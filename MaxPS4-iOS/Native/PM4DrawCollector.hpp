@@ -10,6 +10,7 @@
 #include "PM4Type3Decoder.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -19,6 +20,9 @@ namespace maxps4::gpu {
 struct PM4DrawStats {
     unsigned draws = 0, rendered = 0, skipped = 0, failed = 0, dispatches = 0;
     std::string error; // the first failure
+    // Diagnostics: the registers of the last draw skipped for want of a colour
+    // target, and the last dispatch (program address and group counts).
+    std::string lastSkipped, lastDispatch;
     void fail(const std::string& message) { ++failed; if (error.empty()) error = message; }
 };
 struct PM4Draw {
@@ -81,7 +85,17 @@ public:
                 break;
             }
             case 0x2d: if (n >= 1) collect(data[0], false, 0, draw); break;
-            case 0x15: ++stats_.dispatches; break;
+            case 0x15: {                                                // DISPATCH_DIRECT
+                ++stats_.dispatches;
+                // COMPUTE_PGM_LO/HI (0x2e0c), COMPUTE_NUM_THREAD_X/Y/Z (0x2e07).
+                const std::uint64_t program = (std::uint64_t(shader_[0x20c]) | std::uint64_t(shader_[0x20d] & 0xff) << 32) << 8;
+                char text[160];
+                std::snprintf(text, sizeof text, "programme 0x%llx, groupes %ux%ux%u de %ux%ux%u",
+                              (unsigned long long)program, n > 0 ? data[0] : 0, n > 1 ? data[1] : 0, n > 2 ? data[2] : 0,
+                              shader_[0x207] & 0xffff, shader_[0x208] & 0xffff, shader_[0x209] & 0xffff);
+                stats_.lastDispatch = text;
+                break;
+            }
             default: break; // synchronization and prefetch packets: nothing to draw
             }
         }
@@ -102,7 +116,19 @@ private:
     static float f(std::uint32_t x) { return gcn_detail::f32(x); }
     template <class Draw> void collect(std::uint32_t count, bool indexed, std::uint64_t indexAddress, Draw& draw) {
         ++stats_.draws;
-        if (!(context_[0x8e] & 0xf) || !context_[0x318]) { ++stats_.skipped; return; }
+        if (!(context_[0x8e] & 0xf) || !context_[0x318]) {
+            ++stats_.skipped;
+            // CB_TARGET_MASK, CB_COLOR0/1 BASE and INFO format, CB_COLOR_CONTROL,
+            // DB_Z_INFO, PS program.
+            char text[200];
+            std::snprintf(text, sizeof text, "masque 0x%x, cible0 0x%llx format %u, cible1 0x%llx format %u, mode CB %u, profondeur %u, PS 0x%llx",
+                          context_[0x8e], (unsigned long long)(std::uint64_t(context_[0x318]) << 8), (context_[0x31c] >> 2) & 0x1f,
+                          (unsigned long long)(std::uint64_t(context_[0x327]) << 8), (context_[0x32b] >> 2) & 0x1f,
+                          (context_[0x202] >> 4) & 7, context_[0x10] & 3,
+                          (unsigned long long)((std::uint64_t(shader_[0x8]) | std::uint64_t(shader_[0x9] & 0xff) << 32) << 8));
+            stats_.lastSkipped = text;
+            return;
+        }
         const std::uint32_t info = context_[0x31c];
         if (((info >> 2) & 0x1f) != 0xa || ((info >> 8) & 7) != 0) { stats_.fail("colour target format"); return; }
         PM4Draw d;
