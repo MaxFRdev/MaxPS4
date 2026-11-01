@@ -935,20 +935,24 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
          "vertex GCNVaryings gcn_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],\n"
          "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]],\n"
          "    device const uint* indices [[buffer(2)]]) {\n"
-         "    GCNVaryings o;\n"
+         // One call site for the program, in a loop: with a call per corner
+         // (four inlined copies) Metal miscompiled large vertex programs and
+         // rasterized nothing (Mortal Kombat: Legacy Kollection's matrix VS).
+         "    uint at[3] = { vid, 0u, 0u }; uint n = 1u;\n"
          "    if ((D.flags & GCN_DRAW_RECT_LIST) != 0u) {\n"
          "        uint first = 3u * (vid / 6u); uint k = vid % 6u;\n"
          "        uint corner = k == 0u ? 0u : k == 1u ? 1u : k == 2u ? 2u : k == 3u ? 2u : k == 4u ? 1u : 3u;\n"
-         "        if (corner < 3u) o = gcn_run_vertex(indices[first + corner], iid, mem, D);\n"
-         "        else {\n"
-         "            GCNVaryings a = gcn_run_vertex(indices[first], iid, mem, D);\n"
-         "            GCNVaryings b = gcn_run_vertex(indices[first + 1u], iid, mem, D);\n"
-         "            GCNVaryings c = gcn_run_vertex(indices[first + 2u], iid, mem, D);\n"
-         "            o.position = b.position + c.position - a.position;\n";
+         "        if (corner < 3u) at[0] = first + corner;\n"
+         "        else { n = 3u; at[0] = first; at[1] = first + 1u; at[2] = first + 2u; }\n"
+         "    }\n"
+         "    GCNVaryings got[3];\n"
+         "    for (uint j = 0u; j < n; ++j) got[j] = gcn_run_vertex(indices[at[j]], iid, mem, D);\n"
+         "    GCNVaryings o = got[0];\n"
+         "    if (n == 3u) {\n"
+         "        o.position = got[1].position + got[2].position - got[0].position;\n";
     for (unsigned p = 0; p < 32; ++p)
-        if ((vs.params >> p) & 1) s += "            o.p" + std::to_string(p) + " = b.p" + std::to_string(p) + " + c.p" + std::to_string(p) + " - a.p" + std::to_string(p) + ";\n";
-    s += "        }\n"
-         "    } else o = gcn_run_vertex(indices[vid], iid, mem, D);\n"
+        if ((vs.params >> p) & 1) s += "        o.p" + std::to_string(p) + " = got[1].p" + std::to_string(p) + " + got[2].p" + std::to_string(p) + " - got[0].p" + std::to_string(p) + ";\n";
+    s += "    }\n"
          "    if ((D.flags & GCN_DRAW_FLIP_Y) != 0u) o.position.y = -o.position.y;\n"
          "    return o;\n}\n"
          "struct GCNFragment { float4 color [[color(0)]]; uint coverage [[sample_mask]]; };\n";
