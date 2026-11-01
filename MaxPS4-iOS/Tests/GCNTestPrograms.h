@@ -71,7 +71,8 @@ inline void loadQuadPS(Arena& arena) {
 }
 
 // A VS calling a fetch shader (s_swappc/s_setpc), a scalar loop and VOP3.
-constexpr std::uint64_t fetchVS = 0x10800, fetchShader = 0x10a00, vertexTable = 0x10c00;
+// fetchShaderBelow is the same fetch shader at an address under the VS.
+constexpr std::uint64_t fetchVS = 0x10800, fetchShader = 0x10a00, fetchShaderBelow = 0x107c0, vertexTable = 0x10c00;
 inline const float fetchVertices[3][4] = {{1, 2, 0, 1}, {3, 4, 0, 1}, {5, 6, 0, 1}};
 inline void loadFetchVS(Arena& arena) {
     arena.code(fetchVS, {
@@ -85,12 +86,13 @@ inline void loadFetchVS(Arena& arena) {
         0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
         0xf800020f, 0x09090909, // exp param0, v9, v9, v9, v9
         0xbf810000});
-    arena.code(fetchShader, {
-        0xc0840300,             // s_load_dwordx4 s[8:11], s[2:3], 0x0
-        0xbf8c007f,             // s_waitcnt lgkmcnt(0)
-        0xe00c2000, 0x80020400, // buffer_load_format_xyzw v[4:7], v0, s[8:11], 0 idxen
-        0xbf8c1f70,             // s_waitcnt vmcnt(0)
-        0xbe802000});           // s_setpc_b64 s[0:1]
+    for (const auto address : {fetchShader, fetchShaderBelow})
+        arena.code(address, {
+            0xc0840300,             // s_load_dwordx4 s[8:11], s[2:3], 0x0
+            0xbf8c007f,             // s_waitcnt lgkmcnt(0)
+            0xe00c2000, 0x80020400, // buffer_load_format_xyzw v[4:7], v0, s[8:11], 0 idxen
+            0xbf8c1f70,             // s_waitcnt vmcnt(0)
+            0xbe802000});           // s_setpc_b64 s[0:1]
     arena.code(vertexTable, {0x10e00, 16u << 16, 3, 0x77fac}); // V#: stride 16, 3 records, float xyzw
     for (unsigned n = 0; n < 3; ++n) for (unsigned c = 0; c < 4; ++c) arena.put(0x10e00 + 16 * n + 4 * c, bits(fetchVertices[n][c]));
 }

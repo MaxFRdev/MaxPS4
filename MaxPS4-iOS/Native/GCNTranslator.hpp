@@ -180,7 +180,6 @@ private:
 
     // ---- emission ----
     void emit(std::uint64_t entry) {
-        (void)entry;
         std::size_t k = 0;
         for (const auto leader : leaders_) {
             body_ += "    case " + std::to_string(k++) + "u: {\n";
@@ -213,7 +212,9 @@ private:
         }
         for (const auto n : vregs_)
             head += "    uint v" + std::to_string(n) + " = " + (n < 24 ? "L.vinit[" + std::to_string(n) + "]" : std::string("0u")) + ";\n";
-        head += "    bool scc = false; uint pc = 0u; bool running = true;\n"
+        // Blocks are numbered by address: a fetch shader below the program
+        // comes first, so execution starts at the entry's own block.
+        head += "    bool scc = false; uint pc = " + std::to_string(index(entry)) + "u; bool running = true;\n"
                 "    (void)scc; (void)M; (void)Q;\n"
                 "    while (running) {\n    switch (pc) {\n";
         out_.source = head + body_ + "    default: running = false; break;\n    }\n    }\n}\n";

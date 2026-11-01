@@ -66,6 +66,11 @@ int main() {
         rt::GCNLane L; L.user[0] = std::uint32_t(fetchShader); L.user[2] = std::uint32_t(vertexTable); L.vinit[0] = 2;
         rt::vs_fetch(L, M, unusedQuad);
         assert(L.pos[0] == 5 && L.pos[1] == 6 && L.param[0][0] == 5 * 9 + 6);
+        // A fetch shader below the VS (Mortal Kombat: Legacy Kollection): the
+        // program still starts at its own first block.
+        rt::GCNLane B; B.user[0] = std::uint32_t(fetchShaderBelow); B.user[2] = std::uint32_t(vertexTable); B.vinit[0] = 2;
+        rt::vs_fetch_below(B, M, unusedQuad);
+        assert(B.pos[0] == 5 && B.pos[1] == 6 && B.param[0][0] == 5 * 9 + 6);
         // The same program on copies of two ranges only (the V# table, then the
         // vertices) packed at other offsets, as the Metal renderer feeds the GPU.
         std::vector<unsigned char> packed(0x100 + 0x40, 0);

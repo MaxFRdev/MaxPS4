@@ -35,6 +35,9 @@ int main(int argc, char** argv) {
     const auto fetched = translateGCN(arena.memory, fetchVS, fetch);
     if (!fetched) std::printf("%s\n", fetched.error.c_str());
     assert(fetched && fetched.position && fetched.params == 1);
+    GCNTranslateOptions below = fetch; below.name = "vs_fetch_below"; below.userData[0] = std::uint32_t(fetchShaderBelow);
+    const auto fetchedBelow = translateGCN(arena.memory, fetchVS, below);
+    assert(fetchedBelow && fetchedBelow.position && fetchedBelow.params == 1);
     // Refusals: no fetch-shader address, interpolation in a vertex program,
     // unmapped code.
     GCNTranslateOptions noUser = fetch; noUser.userCount = 0;
@@ -55,6 +58,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << copied.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << copied.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }
