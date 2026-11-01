@@ -670,6 +670,13 @@ public:
         if (stopping) return kernel_error(again);
         const auto slot = std::find_if(threads.begin(), threads.end(), [](const Thread& t) { return !t.used; });
         if (slot == threads.end()) return kernel_error(again);
+        // FEX does not check the reservation of the new thread's lookup cache
+        // and crashes on it: refuse the thread while that space is missing.
+        if (void* spare = ::mmap(nullptr, size_t(maxps4::GuestELF::fexLookupCacheBytes), PROT_NONE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); spare != MAP_FAILED)
+            ::munmap(spare, size_t(maxps4::GuestELF::fexLookupCacheBytes));
+        else
+            return kernel_error(again);
         uint64_t top = 0, tp = 0;
         if (!image.prepare_thread(static_cast<size_t>(slot - threads.begin()), top, tp)) return kernel_error(nomem);
         const uint64_t id = identities.attach();

@@ -249,14 +249,32 @@ int GuestELF::prepare_orbis_general(const std::vector<OrbisLinker::Input>& input
             ::munmap(mapped, size);
             return MAP_FAILED;
         };
+        // The largest window that still leaves generalHeadroom of address
+        // space for what the run maps later (FEX's ~272 MiB lookup cache per
+        // guest thread: Mortal Kombat: Legacy Kollection's threads crashed
+        // when a 24 GiB window left none). Without that room anywhere, the
+        // largest window that fits, as before.
+        auto room = [] {
+            void* spare = ::mmap(nullptr, size_t(generalHeadroom), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (spare == MAP_FAILED) return false;
+            ::munmap(spare, size_t(generalHeadroom));
+            return true;
+        };
         void* reserved = MAP_FAILED;
-        for (const uint64_t heap : generalHeapSizes) {
-            layout(heap);
-            for (const unsigned bits : {40U, 47U}) {
-                user_end = uint64_t{1} << bits;
-                reserved = reserve(0);
-                for (uint64_t hint = uint64_t{1} << 36; reserved == MAP_FAILED && hint <= user_end - size; hint <<= 1)
-                    reserved = reserve(hint);
+        for (const bool headroom : {true, false}) {
+            for (const uint64_t heap : generalHeapSizes) {
+                layout(heap);
+                for (const unsigned bits : {40U, 47U}) {
+                    user_end = uint64_t{1} << bits;
+                    reserved = reserve(0);
+                    for (uint64_t hint = uint64_t{1} << 36; reserved == MAP_FAILED && hint <= user_end - size; hint <<= 1)
+                        reserved = reserve(hint);
+                    if (reserved != MAP_FAILED) break;
+                }
+                if (reserved != MAP_FAILED && headroom && !room()) {
+                    ::munmap(reserved, size);
+                    reserved = MAP_FAILED;
+                }
                 if (reserved != MAP_FAILED) break;
             }
             if (reserved != MAP_FAILED) break;
