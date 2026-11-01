@@ -1902,6 +1902,23 @@ extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* te
     std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
     return int32_t(out.size());
 }
+extern "C" int32_t maxps4_fex_engine_moved_mappings(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::array<maxps4::PS4VirtualMemory::Moved, maxps4::PS4VirtualMemory::moved_limit> moved {};
+    size_t count = 0;
+    const size_t total = engine->dynamic_ps4.moved(moved, count);
+    std::string out;
+    char line[128];
+    for (size_t i = 0; i < count; ++i) {
+        std::snprintf(line, sizeof(line), "0x%llx + 0x%llx -> 0x%llx (code %d)\n",
+            (unsigned long long)moved[i].hint, (unsigned long long)moved[i].size,
+            (unsigned long long)moved[i].result, moved[i].status);
+        if (out.size() + std::strlen(line) >= capacity) break;
+        out += line;
+    }
+    std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
+    return int32_t(std::min<size_t>(total, INT32_MAX));
+}
 extern "C" int32_t maxps4_fex_engine_recent_calls(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     auto& probe = engine->probe;

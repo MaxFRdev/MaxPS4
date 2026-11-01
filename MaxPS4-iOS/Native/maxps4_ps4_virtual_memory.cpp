@@ -178,6 +178,8 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
     // Engine pools at 0x1000000000), never by replacing a host mapping. Else
     // the span goes elsewhere in the window and the caller reads it back
     // (Crash Bandicoot 4's libc maps its heap this way).
+    uint64_t moved_hint = 0;
+    int moved_status = 0;
     if (fixed && host && (hint < window || size > window_bytes || hint - window > window_bytes - size)) {
         if (hint % page_size == 0 && hint <= UINT64_MAX - size && in_app_area(hint, size)) {
             // Inside the reserved application area: ours, so its pages are
@@ -193,7 +195,7 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
         }
         if (hint % page_size == 0 && hint <= UINT64_MAX - size) {
             release(hint, size); // What we mapped there before, as MAP_FIXED replaces it.
-            int status = 0;
+            int& status = moved_status;
             if (reserve_exact(hint, size, status)) {
                 auto* granted = reinterpret_cast<void*>(hint);
                 if (!host_protect(hint, size, permission)) { ::munmap(granted, size_t(size)); return nomem; }
@@ -205,7 +207,8 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
                 return ok;
             }
         }
-        if (size > window_bytes) return nomem;
+        if (size > window_bytes) { record_move(hint, size, 0, moved_status); return nomem; }
+        moved_hint = hint;
         fixed = false;
         hint = 0;
     }
@@ -263,7 +266,18 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
         insert(std::move(pending));
     } catch (const std::bad_alloc&) { return nomem; }
     used_ += size_t(size); result = candidate;
+    if (moved_hint) record_move(moved_hint, size, candidate, moved_status);
     return ok;
+}
+void PS4VirtualMemory::record_move(uint64_t hint, uint64_t size, uint64_t result, int status) {
+    std::lock_guard guard(moved_lock_);
+    moved_[moved_total_++ % moved_limit] = {hint, size, result, status};
+}
+size_t PS4VirtualMemory::moved(std::array<Moved, moved_limit>& out, size_t& count) const {
+    std::lock_guard guard(moved_lock_);
+    count = std::min(moved_total_, moved_limit);
+    for (size_t i = 0; i < count; ++i) out[i] = moved_[(moved_total_ - count + i) % moved_limit];
+    return moved_total_;
 }
 PS4VirtualMemory::Region* PS4VirtualMemory::range(uint64_t address, uint64_t size) {
     const size_t r = holding(address);

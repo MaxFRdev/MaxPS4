@@ -95,6 +95,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var inputEngine: OpaquePointer?
     private var displayed = 0
     private var started: TimeInterval?
+    // Rewritten each heartbeat so a run that crashes the app leaves its state.
+    private var liveReport: URL?
     private var vblanksSent = 0 // With vblankPort, under inputLock.
     private var vblankPort: UInt64 = 1
     private var lastTicket: UInt64 = 0
@@ -154,7 +156,19 @@ final class MaxPS4GameSource: @unchecked Sendable {
             + missing.called.prefix(5).joined(separator: " · ") + "\n"
         let text = compatibility + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
+        if let liveReport {
+            MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 :\n" + recentCalls(engine)
+                + "\n" + memoryLayout(engine), to: liveReport)
+        }
         return text
+    }
+    // Fixed PS4 addresses iOS refused: the game got another address and may
+    // still write at the one it asked for, into MaxPS4's own memory.
+    private func movedMappings(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 4096)
+        let total = maxps4_fex_engine_moved_mappings(engine, &text, text.count)
+        guard total > 0 else { return "Adresses fixes déplacées : aucune" }
+        return "Adresses fixes déplacées (\(total)) :\n" + String(cString: text)
     }
     // Whether the PS4 application area and the mmap window were granted, and where.
     private func memoryLayout(_ engine: OpaquePointer) -> String {
@@ -407,6 +421,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
             lock.lock()
             bridge = metal; ready = !stopped
             started = ProcessInfo.processInfo.systemUptime
+            liveReport = MaxPS4Reports.live(for: url)
             self.relocation = relocation
             let cancelled = stopped
             if ready {
@@ -445,6 +460,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
                             "Derniers appels PS4 :", recentCalls(opened), "",
                             "Sortie du jeu :", console(opened), "", memoryLayout(opened), "", live].joined(separator: "\n")
                 outcome = Outcome(missing: missing.called, crashed: crashed, report: MaxPS4Reports.save(text, for: url))
+                // The run ended normally: its final report replaces the live one.
+                lock.lock(); let liveFile = liveReport; liveReport = nil; lock.unlock()
+                if let liveFile { try? FileManager.default.removeItem(at: liveFile) }
             }
             return result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP)
         } catch {
