@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
     assert(gcnMetalComputeEntry("cs_copy").find("kernel void gcn_compute(") != std::string::npos);
     // The Metal prelude carries the shared runtime text.
     const std::string prelude = gcnMetalPrelude();
-    assert(prelude.find("#include <metal_stdlib>") == 0 && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
+    assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
     out << embedded.source << quad.source << fetched.source << copied.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");

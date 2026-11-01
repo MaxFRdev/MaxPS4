@@ -284,6 +284,14 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
               "    GCNVaryings o = gcn_run_vertex(indices[i], 0u, mem, D" + (native_ ? ", N" : "") + ");\n"
               "    out[i] = o.position;\n}\n";
     source += "fragment float4 gcn_plain_fragment(GCNVaryings in [[stage_in]]) { return float4(1.0f); }\n";
+    // gcn_vertex's own output as rasterized: the position it returns, also written to buffer(4).
+    source += std::string("vertex GCNVaryings gcn_vertex_traced(uint vid [[vertex_id]], uint iid [[instance_id]],\n"
+                          "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]],\n"
+                          "    device const uint* indices [[buffer(2)]],\n") +
+              (native_ ? "    constant GCNNativeTexture& N [[buffer(3)]],\n" : "") +
+              "    device float4* out [[buffer(4)]]) {\n"
+              "    GCNVaryings o = gcn_run_vertex(indices[vid], iid, mem, D" + (native_ ? ", N" : "") + ");\n"
+              "    out[vid] = o.position;\n    return o;\n}\n";
     // The same positions from Metal's vertex stage (rasterization off), through gcn_vertex itself.
     source += std::string("vertex void gcn_vertex_capture(uint vid [[vertex_id]], uint iid [[instance_id]],\n"
                           "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]],\n"
@@ -360,7 +368,11 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
     plain.fragmentFunction = [library newFunctionWithName:@"gcn_plain_fragment"];
     plain.colorAttachments[0].pixelFormat = d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
     id<MTLRenderPipelineState> plainState = [device_ newRenderPipelineStateWithDescriptor:plain error:&failure];
-    for (id<MTLRenderPipelineState> real : {pipeline(d, d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm), plainState}) {
+    plain.vertexFunction = [library newFunctionWithName:@"gcn_vertex_traced"];
+    id<MTLRenderPipelineState> tracedState = [device_ newRenderPipelineStateWithDescriptor:plain error:&failure];
+    id<MTLBuffer> traced = [device_ newBufferWithLength:count * 16 options:MTLResourceStorageModeShared];
+    std::memset(traced.contents, 0, count * 16);
+    for (id<MTLRenderPipelineState> real : {pipeline(d, d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm), plainState, tracedState}) {
         if (!real) { text += ", pipeline absent"; continue; }
         MTLTextureDescriptor* small = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm
                                                                                        width:64 height:64 mipmapped:NO];
@@ -379,12 +391,21 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
         [e setVertexBytes:state length:stateBytes atIndex:1]; [e setFragmentBytes:state length:stateBytes atIndex:1];
         [e setVertexBuffer:indices offset:0 atIndex:2];
         if (native) { [e setVertexBuffer:native offset:0 atIndex:3]; [e setFragmentBuffer:native offset:0 atIndex:3]; }
+        [e setVertexBuffer:traced offset:0 atIndex:4];
         [e setVisibilityResultMode:MTLVisibilityResultModeCounting offset:0];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
         [e endEncoding]; [drawn commit]; [drawn waitUntilCompleted];
         char item[96];
-        std::snprintf(item, sizeof item, ", %s sur 64x64 : %llu échantillons", real == plainState ? "fragment simple" : "pipeline réel",
+        std::snprintf(item, sizeof item, ", %s sur 64x64 : %llu échantillons",
+                      real == plainState ? "fragment simple" : real == tracedState ? "sommets tracés" : "pipeline réel",
                       (unsigned long long)*static_cast<const std::uint64_t*>(visibility.contents));
+        text += item;
+    }
+    text += ", positions rasterisées :";
+    p = static_cast<const float*>(traced.contents);
+    for (unsigned k = 0; k < count; ++k) {
+        char item[96];
+        std::snprintf(item, sizeof item, " (%g %g %g %g)", p[4 * k], p[4 * k + 1], p[4 * k + 2], p[4 * k + 3]);
         text += item;
     }
     text += ", étage sommets (position, param0, param1) :";
