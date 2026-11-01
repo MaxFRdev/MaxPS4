@@ -34,7 +34,13 @@ public:
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
         for (unsigned k = 0; k < d.vsUserCount; ++k) wave.s[k] = d.vsUser[k];
         wave.v(0, 0) = d.indices.empty() ? 0 : d.indices[0];
-        wave.run(d.vs); // a failure keeps what was found before it
+        vsRan_ = wave.run(d.vs); // a failure keeps what was found before it
+        vsError_ = wave.error;
+        vsExports_.clear();
+        for (const auto& e : wave.exports) {
+            std::array<std::uint32_t, 5> x{e.target, e.value[0][0], e.value[1][0], e.value[2][0], e.value[3][0]};
+            vsExports_.push_back(x);
+        }
     }
     {
         wave.reset();
@@ -94,10 +100,17 @@ public:
     }
     const std::vector<PM4Range>& stored() const { return stored_; }
     const std::vector<std::array<std::uint32_t, 8>>& images() const { return images_; }
+    // The last scanned draw's vertex lane: (target, x, y, z, w) per export.
+    const std::vector<std::array<std::uint32_t, 5>>& vertexExports() const { return vsExports_; }
+    bool vertexRan() const { return vsRan_; }
+    const std::string& vertexError() const { return vsError_; }
 private:
     GCNCodeCache cache_;
     GCNWave wave_;
     std::vector<PM4Range> found_, merged_, stored_;
+    std::vector<std::array<std::uint32_t, 5>> vsExports_;
+    bool vsRan_ = false;
+    std::string vsError_;
     std::vector<std::array<std::uint32_t, 8>> images_;
     bool captureImages_;
     void image(const std::array<std::uint32_t, 8>& descriptor) {

@@ -243,19 +243,26 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
 }
 
 void PM4MetalRenderer::listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) {
-    if (listed_.size() >= 6 || std::find(listed_.begin(), listed_.end(), address) != listed_.end()) return;
+    if (listed_.size() >= 9 || std::find(listed_.begin(), listed_.end(), address) != listed_.end()) return;
     listed_.push_back(address);
     std::vector<std::uint32_t> words;
     for (std::uint32_t word = 0; words.size() < 1024 && code_.read(address + 4 * words.size(), &word, 4);) words.push_back(word);
-    const auto decoded = decodeGCN(words.data(), words.size());
+    // Up to s_endpgm, or s_setpc_b64 (a fetch shader's return).
+    std::vector<GCNInstruction> code;
+    for (std::size_t at = 0; at < words.size() && code.size() < 120;) {
+        GCNInstruction i;
+        if (decodeGCNInstruction(words.data() + at, words.size() - at, at, i) != GCNError::none) break;
+        code.push_back(i);
+        at += i.size;
+        if ((i.encoding == GCNEncoding::sopp && i.opcode == 1) || (i.encoding == GCNEncoding::sop1 && i.opcode == 32)) break;
+    }
     char text[160];
-    std::snprintf(text, sizeof text, "\n%s 0x%llx, %zu instructions, SGPR utilisateur :", stage, (unsigned long long)address,
-                  decoded.instructions.size());
+    std::snprintf(text, sizeof text, "
+%s 0x%llx, %zu instructions, SGPR utilisateur :", stage, (unsigned long long)address, code.size());
     programListings += text;
     for (unsigned k = 0; k < userCount && k < 16; ++k) { std::snprintf(text, sizeof text, " %x", user[k]); programListings += text; }
-    if (!decoded) programListings += " (code illisible)";
-    for (std::size_t k = 0; k < decoded.instructions.size() && k < 120; ++k)
-        programListings += "\n    " + gcnDisassemble(decoded.instructions[k]);
+    for (const auto& i : code) programListings += "
+    " + gcnDisassemble(i);
 }
 
 void PM4MetalRenderer::endBatch() {
@@ -480,7 +487,18 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                       (unsigned long long)d.target, d.pitch, d.height, d.swap, d.mask, d.blend, d.indices.size(),
                       d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3], (unsigned long long)d.ps);
         batchDraws += text;
+        // The first vertex as the interpreter computes it (position, parameters).
+        if (!scanner_.vertexRan()) batchDraws += ", VS interpreté : " + scanner_.vertexError();
+        for (const auto& e : scanner_.vertexExports()) {
+            if (e[0] != 12 && !(e[0] >= 32 && e[0] < 36)) continue;
+            std::snprintf(text, sizeof text, ", %s%u (%g %g %g %g)", e[0] == 12 ? "pos" : "param", e[0] == 12 ? 0u : e[0] - 32,
+                          gcn_detail::f32(e[1]), gcn_detail::f32(e[2]), gcn_detail::f32(e[3]), gcn_detail::f32(e[4]));
+            batchDraws += text;
+        }
+        std::snprintf(text, sizeof text, ", entrees PS 0x%x (attr0 0x%x, attr1 0x%x)", d.psInputAddr, d.inputCntl[0], d.inputCntl[1]);
+        batchDraws += text;
         listProgram("VS", d.vs, d.vsUser, d.vsUserCount);
+        if (d.vsUserCount >= 2) listProgram("Fetch", std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32, d.vsUser, 0);
         listProgram("PS", d.ps, d.psUser, d.psUserCount);
         if (native_) {
             unsigned shown = 0;
