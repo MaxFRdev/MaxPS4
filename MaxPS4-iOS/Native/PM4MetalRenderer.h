@@ -46,7 +46,16 @@ public:
     std::string batchDraws, programListings;
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
-    void beginBatch() { endBatch(); batching_ = true; batchDraws.clear(); }
+    void beginBatch() {
+        endBatch(); batching_ = true; batchDraws.clear();
+        visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
+        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
+        visibilityCount_ = 0;
+    }
+    // The samples each draw of the last batch that drew rasterized (Metal
+    // visibility results, readable once its commands completed).
+    id<MTLBuffer> lastVisibility = nil;
+    unsigned lastVisibilityCount = 0;
     void endBatch();
     // The texture holding colour target `address`, or nil if never drawn.
     id<MTLTexture> target(std::uint64_t address) const;
@@ -82,6 +91,8 @@ private:
     id<MTLLibrary> library(const std::string& source);
     std::map<std::uint64_t, Target> targets_;
     std::vector<std::uint64_t> listed_;
+    id<MTLBuffer> visibility_ = nil;
+    unsigned visibilityCount_ = 0;
     void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount);
     bool batching_ = false;
     id<MTLRenderCommandEncoder> encoder_ = nil;

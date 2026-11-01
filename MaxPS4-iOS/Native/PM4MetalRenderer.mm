@@ -264,6 +264,8 @@ void PM4MetalRenderer::listProgram(const char* stage, std::uint64_t address, con
 }
 
 void PM4MetalRenderer::endBatch() {
+    if (visibility_ && visibilityCount_) { lastVisibility = visibility_; lastVisibilityCount = visibilityCount_; }
+    visibility_ = nil; visibilityCount_ = 0;
     [encoder_ endEncoding];
     encoder_ = nil; commands_ = nil; attachment_ = nil; batching_ = false;
 }
@@ -407,6 +409,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     pass.colorAttachments[0].loadAction = target.fresh ? MTLLoadActionClear : MTLLoadActionLoad;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    if (batching_) pass.visibilityResultBuffer = visibility_;
     encoder = [commands renderCommandEncoderWithDescriptor:pass];
     if (!encoder) return fail("render encoder");
     target.fresh = false;
@@ -477,7 +480,10 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         [encoder setVertexBuffer:indices offset:0 atIndex:2];
     }
     const NSUInteger count = d.primitive == 0x11 ? NSUInteger(d.indices.size() / 3 * 6) : NSUInteger(d.indices.size());
+    const bool counted = batching_ && visibility_ && visibilityCount_ < 64;
+    if (counted) [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:8 * visibilityCount_++];
     [encoder drawPrimitives:d.primitive == 6 ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
+    if (counted) [encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
     if (!batching_) [encoder endEncoding];
     if (batchDraws.size() < 2000) {
         char text[256];
@@ -493,6 +499,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                           gcn_detail::f32(e[1]), gcn_detail::f32(e[2]), gcn_detail::f32(e[3]), gcn_detail::f32(e[4]));
             batchDraws += text;
         }
+        std::snprintf(text, sizeof text, ", primitive %u, viewport %g %g %g %g %g %g, vte 0x%x", d.primitive, d.viewport[0], d.viewport[1],
+                      d.viewport[2], d.viewport[3], d.viewport[4], d.viewport[5], d.vte);
+        batchDraws += text;
         std::snprintf(text, sizeof text, ", entrees PS 0x%x (attr0 0x%x, attr1 0x%x)", d.psInputAddr, d.inputCntl[0], d.inputCntl[1]);
         batchDraws += text;
         listProgram("VS", d.vs, d.vsUser, d.vsUserCount);

@@ -43,6 +43,7 @@ struct GameMetalState {
     std::string lastDraws;
     uint32_t centre = 0;
     std::string targetPixels; // the centre pixel of every colour target
+    std::string samples;      // visibility results of the last batch's draws
     bool centreBGRA = false;
     bool nativeTextures;
     NSString* report() const {
@@ -51,13 +52,13 @@ struct GameMetalState {
             @"\nTextures natives : %u dessins (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
             renderer.nativeDraws, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
-        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nDessins du dernier lot :%s\nProgrammes des premiers dessins :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
+        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nÉchantillons dessinés par dessin (dernier lot) :%s\nDessins du dernier lot :%s\nProgrammes des premiers dessins :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused,
             stats.skipped, renderer.targetCount(), stats.dispatches, computeRun - renderer.dispatchesWithoutEffect,
             renderer.dispatchesWithoutEffect, computeRefused,
             computeError.empty() ? "" : " : ", computeError.c_str(), renderer.kernelsBuilt, renderer.targetsSynced,
             (centre >> (centreBGRA ? 16 : 0)) & 0xff, (centre >> 8) & 0xff, (centre >> (centreBGRA ? 0 : 16)) & 0xff, centre >> 24, targetPixels.c_str(),
-            lastDraws.empty() ? " aucun" : lastDraws.c_str(), renderer.programListings.c_str(), stats.lastSkipped.c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
+            samples.c_str(), lastDraws.empty() ? " aucun" : lastDraws.c_str(), renderer.programListings.c_str(), stats.lastSkipped.c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
             encodeMs, gpuText(renderGpuMs), waitMs, copyMs, gpuText(copyGpuMs), native];
     }
     GameMetalState(id<MTLDevice> device, MaxPS4GameMemoryReader reader, bool nativeTextures)
@@ -187,6 +188,15 @@ struct GameMetalState {
     if (pixel) {
         std::memcpy(&s.centre, pixel.contents, 4); s.centreBGRA = source.pixelFormat == MTLPixelFormatBGRA8Unorm;
         s.targetPixels.clear();
+        s.samples.clear();
+        if (id<MTLBuffer> v = s.renderer.lastVisibility) {
+            const auto* counts = static_cast<const uint64_t*>(v.contents);
+            for (unsigned k = 0; k < s.renderer.lastVisibilityCount; ++k) {
+                char text[32];
+                std::snprintf(text, sizeof text, " %llu", (unsigned long long)counts[k]);
+                s.samples += text;
+            }
+        }
         const auto* bytes = static_cast<const uint8_t*>(pixel.contents);
         for (size_t k = 0; k < targets.size(); ++k) {
             char text[96];
