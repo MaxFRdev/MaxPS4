@@ -47,15 +47,16 @@ public:
     static constexpr uint64_t generalHeap = uint64_t(1024) * 1024 * 1024, generalHeapPage = 0x4000;
     static constexpr uint64_t generalHeapSizes[] = {24 * generalHeap, 16 * generalHeap, 12 * generalHeap, 8 * generalHeap,
                                                     5 * generalHeap, 3 * generalHeap, generalHeap};
-    // Address space left free after the reservation when possible: about 11
+    // Address space left free after the reservation when possible: about 9
     // guest threads' FEX lookup caches (fexLookupCacheBytes each). iOS gives
-    // little address space: 8 GiB of room left Mortal Kombat: Legacy
-    // Kollection (7 threads) a 5 GiB window and no image.
-    static constexpr uint64_t generalHeadroom = 3 * generalHeap;
-    // What FEX reserves per guest thread for its lookup cache (pinned FEX:
-    // 2^36 / 4 KiB * 8 + 128 MiB code pointers + 1 Mi * 16 bytes of L1). A
-    // failed reservation is not checked there: the thread would crash.
-    static constexpr uint64_t fexLookupCacheBytes = 272 * 1024 * 1024;
+    // the app under 11 GiB: 3 GiB of room left Mortal Kombat: Legacy
+    // Kollection (7 threads) a 5 GiB window.
+    static constexpr uint64_t generalHeadroom = generalHeap;
+    // What FEX reserves per guest thread for its lookup cache, as
+    // scripts/patch-fexcore-lookup-cache.py sizes it: 2^34 / 4 KiB * 8 +
+    // 64 MiB of block pointers + 1 Mi * 16 bytes of L1. A failed reservation
+    // is not checked there: the thread would crash.
+    static constexpr uint64_t fexLookupCacheBytes = 112 * 1024 * 1024;
     // Child thread slots after the mmap window (scePthreadCreate): each a
     // guarded RW region holding a stack of generalStack bytes with a private
     // copy of the static TLS (blocks, then the TCB) right above it.
