@@ -352,6 +352,33 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
     [render endEncoding];
     [renders commit];
     [renders waitUntilCompleted];
+    // The renderer's own pipeline for this draw over a 64x64 target, its whole viewport, counting samples.
+    if (id<MTLRenderPipelineState> real = pipeline(d, d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm)) {
+        MTLTextureDescriptor* small = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm
+                                                                                       width:64 height:64 mipmapped:NO];
+        small.usage = MTLTextureUsageRenderTarget; small.storageMode = MTLStorageModePrivate;
+        id<MTLBuffer> visibility = [device_ newBufferWithLength:8 options:MTLResourceStorageModeShared];
+        std::memset(visibility.contents, 0, 8);
+        MTLRenderPassDescriptor* full = [MTLRenderPassDescriptor renderPassDescriptor];
+        full.colorAttachments[0].texture = [device_ newTextureWithDescriptor:small];
+        full.colorAttachments[0].loadAction = MTLLoadActionClear;
+        full.visibilityResultBuffer = visibility;
+        id<MTLCommandBuffer> drawn = [probeQueue_ commandBuffer];
+        id<MTLRenderCommandEncoder> e = [drawn renderCommandEncoderWithDescriptor:full];
+        [e setRenderPipelineState:real];
+        [e setViewport:MTLViewport{0, 0, 64, 64, d.viewport[5], d.viewport[5] + d.viewport[4]}];
+        [e setVertexBuffer:memory offset:0 atIndex:0]; [e setFragmentBuffer:memory offset:0 atIndex:0];
+        [e setVertexBytes:state length:stateBytes atIndex:1]; [e setFragmentBytes:state length:stateBytes atIndex:1];
+        [e setVertexBuffer:indices offset:0 atIndex:2];
+        if (native) { [e setVertexBuffer:native offset:0 atIndex:3]; [e setFragmentBuffer:native offset:0 atIndex:3]; }
+        [e setVisibilityResultMode:MTLVisibilityResultModeCounting offset:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
+        [e endEncoding]; [drawn commit]; [drawn waitUntilCompleted];
+        char item[96];
+        std::snprintf(item, sizeof item, ", pipeline réel sur 64x64 : %llu échantillons",
+                      (unsigned long long)*static_cast<const std::uint64_t*>(visibility.contents));
+        text += item;
+    }
     text += ", étage sommets (position, param0, param1) :";
     p = static_cast<const float*>(staged.contents);
     for (unsigned k = 0; k < count && k < 3; ++k) {
