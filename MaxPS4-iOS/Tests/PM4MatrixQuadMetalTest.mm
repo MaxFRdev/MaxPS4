@@ -127,10 +127,13 @@ int main() {
         s.set(0x79, 0x242, {4});                                             // VGT_PRIMITIVE_TYPE: triangles
         s.words.insert(s.words.end(), {0xc0002a00, 0});                      // INDEX_TYPE: 16 bits
         s.words.insert(s.words.end(), {0xc0042700, 6, lo(indexBuffer), hi(indexBuffer), 6, 0}); // DRAW_INDEX_2
-        for (const bool native : {false, true}) {
+        for (const int mode : {0, 1, 2}) {
+            const bool native = mode == 1;
+            if (mode == 2 && high) continue;
+            id<MTLBuffer> window = mode == 2 ? [device newBufferWithBytes:arena.bytes.data() length:arena.bytes.size() options:MTLResourceStorageModeShared] : nil;
             PM4DrawStats stats;
             PM4DrawCollector collector(memory, stats);
-            PM4MetalRenderer renderer(device, memory, nil, 0, native);
+            PM4MetalRenderer renderer(device, memory, window, window ? Arena::start : 0, native);
             id<MTLCommandBuffer> command = [queue commandBuffer];
             renderer.beginBatch();
             collector.execute(s.words.data(), s.words.size(), [&](const PM4Draw& draw) {
@@ -152,7 +155,7 @@ int main() {
             [blit endEncoding]; [read commit]; [read waitUntilCompleted];
             const auto* p = static_cast<const std::uint8_t*>(pixel.contents);
             std::printf("VS 0x%llx, constants 0x%x, records 0x%x, guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", (unsigned long long)program, constantRecords, records, (unsigned long long)high,
-                        native ? "native textures" : "buffer textures",
+                        native ? "native textures" : mode == 2 ? "guest window" : "buffer textures",
                         std::size_t(stats.rendered), (unsigned long long)samples, p[0], p[1], p[2], p[3]);
             auto near = [](unsigned a, unsigned b) { return a + 1 >= b && b + 1 >= a; };
             ok = ok && stats.rendered == 1 && samples > 0 && near(p[0], 200) && near(p[1], 100) && near(p[2], 50) && p[3] == 255;
