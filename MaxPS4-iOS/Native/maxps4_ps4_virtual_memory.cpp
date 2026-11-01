@@ -342,8 +342,11 @@ size_t PS4VirtualMemory::contiguous(uint64_t address, size_t limit, uint32_t per
     const Region& region = regions_[r];
     const uint64_t relative = address - region.address;
     const size_t first = size_t(relative / page_size);
+    // Only the pages `limit` reaches: a region can hold a million of them.
+    const uint64_t reach = (relative + std::min<uint64_t>(limit, region.size - relative) + page_size - 1) / page_size;
+    const size_t end = size_t(std::min<uint64_t>(reach, region.pages.size()));
     size_t last = first;
-    while (last < region.pages.size() && region.pages[last] != 0xff &&
+    while (last < end && region.pages[last] != 0xff &&
            (region.pages[last] & permissions) == permissions) ++last;
     if (last == first) return 0;
     return std::min(limit, size_t(last * page_size - relative));

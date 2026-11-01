@@ -807,6 +807,11 @@ constexpr Binding bindings[] = {
     {"sceNpRegisterStateCallbackA", "qQJfO8HAiaY", PS4KernelService::succeed, "libSceNpManager"},
     {"sceNpSetContentRestriction", "A2CQ3kgSopQ", PS4KernelService::succeed, "libSceNpManager"},
     {"sceNpGetParentalControlInfoA", "m9L3O6yst-U", PS4KernelService::np_signed_out, "libSceNpManager"},
+    // Game intents (activities started from the system menu): none arrives.
+    {"sceNpGameIntentInitialize", "m87BHxt-H60", PS4KernelService::succeed, "libSceNpGameIntent"},
+    {"sceNpGameIntentTerminate", "0HBYxYAjmf0", PS4KernelService::succeed, "libSceNpGameIntent"},
+    {"sceNpGameIntentReceiveIntent", "jEIXUAr9XE8", PS4KernelService::np_signed_out, "libSceNpGameIntent"},
+    {"sceNpGameIntentGetPropertyValueString", "rPl0INNc-M8", PS4KernelService::np_signed_out, "libSceNpGameIntent"},
     {"sceNpAuthCreateRequest", "6bwFkosYRQg", PS4KernelService::np_create_request, "libSceNpAuth"},
     {"sceNpAuthDeleteRequest", "H8wG9Bk-nPc", PS4KernelService::succeed, "libSceNpAuth"},
     {"sceNpAuthGetAuthorizationCodeV3", "KI4dHLlTNl0", PS4KernelService::np_signed_out, "libSceNpAuth"},
