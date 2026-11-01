@@ -283,6 +283,13 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
               "    device float4* out [[buffer(4)]]) {\n"
               "    GCNVaryings o = gcn_run_vertex(indices[i], 0u, mem, D" + (native_ ? ", N" : "") + ");\n"
               "    out[i] = o.position;\n}\n";
+    // The same positions from Metal's vertex stage (rasterization off), through gcn_vertex itself.
+    source += std::string("vertex void gcn_vertex_capture(uint vid [[vertex_id]], uint iid [[instance_id]],\n"
+                          "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]],\n"
+                          "    device const uint* indices [[buffer(2)]],\n") +
+              (native_ ? "    constant GCNNativeTexture& N [[buffer(3)]],\n" : "") +
+              "    device float4* out [[buffer(4)]]) {\n"
+              "    out[vid] = gcn_run_vertex(indices[vid], iid, mem, D" + (native_ ? ", N" : "") + ").position;\n}\n";
     const std::string saved = error;
     id<MTLLibrary> library = this->library(source);
     if (!library) { const std::string e = error; error = saved; return ", sonde GPU : " + e; }
@@ -314,6 +321,36 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
     if (commands.error) return std::string(", sonde GPU : ") + commands.error.localizedDescription.UTF8String;
     std::string text = ", positions GPU :";
     const auto* p = static_cast<const float*>(out.contents);
+    for (unsigned k = 0; k < count; ++k) {
+        char item[96];
+        std::snprintf(item, sizeof item, " (%g %g %g %g)", p[4 * k], p[4 * k + 1], p[4 * k + 2], p[4 * k + 3]);
+        text += item;
+    }
+    MTLRenderPipelineDescriptor* capture = [MTLRenderPipelineDescriptor new];
+    capture.vertexFunction = [library newFunctionWithName:@"gcn_vertex_capture"];
+    capture.rasterizationEnabled = NO;
+    capture.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> stage = [device_ newRenderPipelineStateWithDescriptor:capture error:&failure];
+    if (!stage) return text + ", étage sommets : pipeline";
+    id<MTLBuffer> staged = [device_ newBufferWithLength:count * 16 options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = [device_ newTextureWithDescriptor:td];
+    id<MTLCommandBuffer> renders = [probeQueue_ commandBuffer];
+    id<MTLRenderCommandEncoder> render = [renders renderCommandEncoderWithDescriptor:pass];
+    [render setRenderPipelineState:stage];
+    [render setVertexBuffer:memory offset:0 atIndex:0];
+    [render setVertexBytes:state length:stateBytes atIndex:1];
+    [render setVertexBuffer:indices offset:0 atIndex:2];
+    if (native) [render setVertexBuffer:native offset:0 atIndex:3];
+    [render setVertexBuffer:staged offset:0 atIndex:4];
+    [render drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:count];
+    [render endEncoding];
+    [renders commit];
+    [renders waitUntilCompleted];
+    text += ", étage sommets :";
+    p = static_cast<const float*>(staged.contents);
     for (unsigned k = 0; k < count; ++k) {
         char item[96];
         std::snprintf(item, sizeof item, " (%g %g %g %g)", p[4 * k], p[4 * k + 1], p[4 * k + 2], p[4 * k + 3]);
