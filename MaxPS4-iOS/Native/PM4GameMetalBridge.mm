@@ -1,7 +1,9 @@
 #import "PM4GameMetalBridge.h"
 #include "PM4MetalRenderer.h"
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <vector>
 #include <memory>
 #include <mutex>
 #include <chrono>
@@ -40,6 +42,7 @@ struct GameMetalState {
     // last displayed image (its four bytes in texture order).
     std::string lastDraws;
     uint32_t centre = 0;
+    std::string targetPixels; // the centre pixel of every colour target
     bool centreBGRA = false;
     bool nativeTextures;
     NSString* report() const {
@@ -48,12 +51,12 @@ struct GameMetalState {
             @"\nTextures natives : %u dessins (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
             renderer.nativeDraws, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
-        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées\nPixel central affiché : R %u V %u B %u A %u\nDessins du dernier lot :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
+        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nDessins du dernier lot :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused,
             stats.skipped, renderer.targetCount(), stats.dispatches, computeRun - renderer.dispatchesWithoutEffect,
             renderer.dispatchesWithoutEffect, computeRefused,
             computeError.empty() ? "" : " : ", computeError.c_str(), renderer.kernelsBuilt, renderer.targetsSynced,
-            (centre >> (centreBGRA ? 16 : 0)) & 0xff, (centre >> 8) & 0xff, (centre >> (centreBGRA ? 0 : 16)) & 0xff, centre >> 24,
+            (centre >> (centreBGRA ? 16 : 0)) & 0xff, (centre >> 8) & 0xff, (centre >> (centreBGRA ? 0 : 16)) & 0xff, centre >> 24, targetPixels.c_str(),
             lastDraws.empty() ? " aucun" : lastDraws.c_str(), stats.lastSkipped.c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
             encodeMs, gpuText(renderGpuMs), waitMs, copyMs, gpuText(copyGpuMs), native];
     }
@@ -160,11 +163,20 @@ struct GameMetalState {
     [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
         sourceSize:MTLSizeMake(width,height,1) toTexture:texture destinationSlice:0 destinationLevel:0
         destinationOrigin:MTLOriginMake(0,0,0)];
-    // One pixel at the centre, read back for the session report.
-    id<MTLBuffer> pixel = [s.device newBufferWithLength:4 options:MTLResourceStorageModeShared];
-    if (pixel)
+    // The centre pixel of the displayed image, then of every colour target,
+    // read back for the session report.
+    std::vector<std::pair<uint64_t, id<MTLTexture>>> targets;
+    s.renderer.forEachTarget([&](uint64_t at, id<MTLTexture> t) { if (t && targets.size() < 8) targets.push_back({at, t}); });
+    id<MTLBuffer> pixel = [s.device newBufferWithLength:4 * (1 + targets.size()) options:MTLResourceStorageModeShared];
+    if (pixel) {
         [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(width / 2, height / 2, 0)
                    sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
+        for (size_t k = 0; k < targets.size(); ++k)
+            [blit copyFromTexture:targets[k].second sourceSlice:0 sourceLevel:0
+                     sourceOrigin:MTLOriginMake(targets[k].second.width / 2, targets[k].second.height / 2, 0)
+                       sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:4 * (k + 1)
+           destinationBytesPerRow:4 destinationBytesPerImage:4];
+    }
     [blit endEncoding];
     [command commit];
     [command waitUntilCompleted];
@@ -172,7 +184,19 @@ struct GameMetalState {
         s.error = "Metal display copy failed"; return nil;
     }
     s.copyMs = elapsedMs(started); s.copyGpuMs = gpuMs(command);
-    if (pixel) { std::memcpy(&s.centre, pixel.contents, 4); s.centreBGRA = source.pixelFormat == MTLPixelFormatBGRA8Unorm; }
+    if (pixel) {
+        std::memcpy(&s.centre, pixel.contents, 4); s.centreBGRA = source.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        s.targetPixels.clear();
+        const auto* bytes = static_cast<const uint8_t*>(pixel.contents);
+        for (size_t k = 0; k < targets.size(); ++k) {
+            char text[96];
+            const uint8_t* p = bytes + 4 * (k + 1);
+            std::snprintf(text, sizeof text, "\n  - 0x%llx %lux%lu %s : %u %u %u %u", (unsigned long long)targets[k].first,
+                          (unsigned long)targets[k].second.width, (unsigned long)targets[k].second.height,
+                          targets[k].second.pixelFormat == MTLPixelFormatBGRA8Unorm ? "BGRA" : "RGBA", p[0], p[1], p[2], p[3]);
+            s.targetPixels += text;
+        }
+    }
     self.lastReport = s.report();
     return texture;
 }
