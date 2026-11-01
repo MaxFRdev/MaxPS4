@@ -560,7 +560,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         }
         // The same vertex computed from the GPU's copy of guest memory (copy
         // mode), with the ranges copied and every V# the lane addressed.
-        if (!guest_ && memory) {
+        if (!guest_ && memory && probes_ < 6) {
+            std::string probe;
+            std::uint64_t unreadable = 0;
             const auto* copy = static_cast<const std::uint8_t*>(memory.contents);
             const std::uint64_t copySize = memory.length;
             // Code is read from guest memory; any other read outside the copies is listed.
@@ -577,7 +579,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                     }
                     const bool code = (a >= d.vs && a - d.vs < 0x2000) || (fetchShader && a >= fetchShader && a - fetchShader < 0x2000);
                     if (!code && misses.size() < 6) misses.push_back(a);
-                    return code_.read(a, out, n);
+                    if (code_.read(a, out, n)) return true;
+                    unreadable = a;
+                    return false;
                 },
                 [](std::uint64_t, const void*, std::size_t) { return true; }};
             GCNWave wave(view, 1);
@@ -590,25 +594,29 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                 buffers += text;
             };
             const bool ran = wave.run(d.vs);
-            batchDraws += ran ? ", sur la copie GPU :" : ", sur la copie GPU, VS en échec (" + wave.error + ") :";
+            probe += ran ? ", sur la copie GPU :" : ", sur la copie GPU, VS en échec (" + wave.error + ") :";
             for (const auto& e : wave.exports) {
                 if (e.target != 12) continue;
                 std::snprintf(text, sizeof text, " pos0 (%g %g %g %g)", gcn_detail::f32(e.value[0][0]), gcn_detail::f32(e.value[1][0]),
                               gcn_detail::f32(e.value[2][0]), gcn_detail::f32(e.value[3][0]));
-                batchDraws += text;
+                probe += text;
             }
-            batchDraws += buffers;
+            probe += buffers;
+            if (unreadable) { std::snprintf(text, sizeof text, " [illisible 0x%llx]", (unsigned long long)unreadable); probe += text; }
             for (const auto a : misses) {
                 std::snprintf(text, sizeof text, " [lu hors copie 0x%llx]", (unsigned long long)a);
-                batchDraws += text;
+                probe += text;
             }
-            batchDraws += probeVertices(d, memory, &drawState, sizeof drawState);
-            batchDraws += ", copies :";
+            probe += probeVertices(d, memory, &drawState, sizeof drawState);
+            probe += ", copies :";
             for (unsigned k = 0; k < drawState.rangeCount && k < 16; ++k) {
                 std::snprintf(text, sizeof text, " 0x%llx+0x%llx", (unsigned long long)drawState.ranges[3 * k],
                               (unsigned long long)drawState.ranges[3 * k + 1]);
-                batchDraws += text;
+                probe += text;
             }
+            std::snprintf(text, sizeof text, "\n  - cible 0x%llx, VS 0x%llx, PS 0x%llx :", (unsigned long long)d.target,
+                          (unsigned long long)d.vs, (unsigned long long)d.ps);
+            probeReport += text + probe;
         }
         std::snprintf(text, sizeof text, ", primitive %u, viewport %g %g %g %g %g %g, vte 0x%x", d.primitive, d.viewport[0], d.viewport[1],
                       d.viewport[2], d.viewport[3], d.viewport[4], d.viewport[5], d.vte);

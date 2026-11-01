@@ -44,6 +44,7 @@ public:
     // The draws of the current batch, described for the session report, and
     // the disassembly of the first programs drawn (VS and PS, with user SGPRs).
     std::string batchDraws, programListings;
+    std::string probeReport; // the first draws re-run on the GPU's memory copy and on the GPU
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
     void beginBatch() {
