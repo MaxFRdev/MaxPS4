@@ -89,6 +89,11 @@ private:
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
     id<MTLLibrary> library(const std::string& source);
+    // Diagnostics: the positions the draw's vertex program computes on the
+    // GPU for its first vertices, from the same memory copy (first draws only).
+    std::string probeVertices(const PM4Draw& draw, id<MTLBuffer> memory, const void* state, std::size_t stateBytes);
+    unsigned probes_ = 0;
+    id<MTLCommandQueue> probeQueue_ = nil;
     std::map<std::uint64_t, Target> targets_;
     std::vector<std::uint64_t> listed_;
     id<MTLBuffer> visibility_ = nil;

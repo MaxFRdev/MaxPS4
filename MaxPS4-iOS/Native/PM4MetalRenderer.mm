@@ -263,6 +263,65 @@ void PM4MetalRenderer::listProgram(const char* stage, std::uint64_t address, con
     for (const auto& i : code) programListings += "\n    " + gcnDisassemble(i);
 }
 
+std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memory, const void* state, std::size_t stateBytes) {
+    if (probes_ >= 6 || !memory || d.indices.empty()) return "";
+    ++probes_;
+    GCNTranslateOptions vsOptions;
+    vsOptions.stage = GCNStage::vertex; vsOptions.name = "vs_program"; vsOptions.userCount = d.vsUserCount;
+    for (unsigned k = 0; k < 16; ++k) vsOptions.userData[k] = d.vsUser[k];
+    GCNTranslateOptions psOptions;
+    psOptions.name = "ps_program"; psOptions.userCount = d.psUserCount;
+    for (unsigned k = 0; k < 16; ++k) psOptions.userData[k] = d.psUser[k];
+    const auto vs = translateGCN(code_, d.vs, vsOptions);
+    const auto ps = translateGCN(code_, d.ps, psOptions);
+    if (!vs || !ps) return ", sonde GPU : traduction impossible";
+    std::string source = gcnMetalPrelude(native_) + vs.source + ps.source +
+                         gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
+    source += std::string("kernel void gcn_vertex_probe(uint i [[thread_position_in_grid]], device const uchar* mem [[buffer(0)]],\n"
+                          "    constant GCNDrawState& D [[buffer(1)]], device const uint* indices [[buffer(2)]],\n") +
+              (native_ ? "    constant GCNNativeTexture& N [[buffer(3)]],\n" : "") +
+              "    device float4* out [[buffer(4)]]) {\n"
+              "    GCNVaryings o = gcn_run_vertex(indices[i], 0u, mem, D" + (native_ ? ", N" : "") + ");\n"
+              "    out[i] = o.position;\n}\n";
+    const std::string saved = error;
+    id<MTLLibrary> library = this->library(source);
+    if (!library) { const std::string e = error; error = saved; return ", sonde GPU : " + e; }
+    NSError* failure = nil;
+    id<MTLComputePipelineState> probe = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"gcn_vertex_probe"] error:&failure];
+    if (!probe) return ", sonde GPU : pipeline";
+    if (!probeQueue_) probeQueue_ = [device_ newCommandQueue];
+    const unsigned count = unsigned(std::min<std::size_t>(d.indices.size(), 6));
+    id<MTLBuffer> indices = [device_ newBufferWithBytes:d.indices.data() length:count * 4 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> out = [device_ newBufferWithLength:count * 16 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> native = nil;
+    if (native_ && nativeArguments_) {
+        native = [device_ newBufferWithLength:nativeArguments_.encodedLength options:MTLResourceStorageModeShared];
+        [nativeArguments_ setArgumentBuffer:native offset:0];
+        *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = 0;
+    }
+    id<MTLCommandBuffer> commands = [probeQueue_ commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+    [encoder setComputePipelineState:probe];
+    [encoder setBuffer:memory offset:0 atIndex:0];
+    [encoder setBytes:state length:stateBytes atIndex:1];
+    [encoder setBuffer:indices offset:0 atIndex:2];
+    if (native) [encoder setBuffer:native offset:0 atIndex:3];
+    [encoder setBuffer:out offset:0 atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(count, 1, 1)];
+    [encoder endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    if (commands.error) return std::string(", sonde GPU : ") + commands.error.localizedDescription.UTF8String;
+    std::string text = ", positions GPU :";
+    const auto* p = static_cast<const float*>(out.contents);
+    for (unsigned k = 0; k < count; ++k) {
+        char item[96];
+        std::snprintf(item, sizeof item, " (%g %g %g %g)", p[4 * k], p[4 * k + 1], p[4 * k + 2], p[4 * k + 3]);
+        text += item;
+    }
+    return text;
+}
+
 void PM4MetalRenderer::endBatch() {
     if (visibility_ && visibilityCount_) { lastVisibility = visibility_; lastVisibilityCount = visibilityCount_; }
     visibility_ = nil; visibilityCount_ = 0;
@@ -504,6 +563,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         if (!guest_ && memory) {
             const auto* copy = static_cast<const std::uint8_t*>(memory.contents);
             const std::uint64_t copySize = memory.length;
+            // Code is read from guest memory; any other read outside the copies is listed.
+            const std::uint64_t fetchShader = d.vsUserCount >= 2 ? (std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32) : 0;
+            std::vector<std::uint64_t> misses;
             GCNMemory view{
                 [&](std::uint64_t a, void* out, std::size_t n) {
                     for (unsigned k = 0; k < drawState.rangeCount; ++k) {
@@ -513,7 +575,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                             return true;
                         }
                     }
-                    return false;
+                    const bool code = (a >= d.vs && a - d.vs < 0x2000) || (fetchShader && a >= fetchShader && a - fetchShader < 0x2000);
+                    if (!code && misses.size() < 6) misses.push_back(a);
+                    return code_.read(a, out, n);
                 },
                 [](std::uint64_t, const void*, std::size_t) { return true; }};
             GCNWave wave(view, 1);
@@ -534,6 +598,11 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                 batchDraws += text;
             }
             batchDraws += buffers;
+            for (const auto a : misses) {
+                std::snprintf(text, sizeof text, " [lu hors copie 0x%llx]", (unsigned long long)a);
+                batchDraws += text;
+            }
+            batchDraws += probeVertices(d, memory, &drawState, sizeof drawState);
             batchDraws += ", copies :";
             for (unsigned k = 0; k < drawState.rangeCount && k < 16; ++k) {
                 std::snprintf(text, sizeof text, " 0x%llx+0x%llx", (unsigned long long)drawState.ranges[3 * k],
