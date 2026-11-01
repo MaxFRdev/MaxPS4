@@ -76,24 +76,34 @@ int main() {
             for (unsigned c = 0; c < 4; ++c) arena.put(vertices + 20 * n + 4 * c, bits(corners[n][c]));
             arena.put(vertices + 20 * n + 16, 0xffffffff);
         }
-        arena.code(table, {std::uint32_t(vertices), 20u << 16, 4, 0x5ffac,        // float2 position
-                           std::uint32_t(vertices + 8), 20u << 16, 4, 0x5ffac,    // float2 UV
-                           std::uint32_t(vertices + 16), 20u << 16, 4, 0x50fac}); // 8_8_8_8 UNORM colour
         // Constants: x = s0 * px + s8, y = s5 * py + s9, z = s10, w = s11.
         const float matrix[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
         for (unsigned k = 0; k < 16; ++k) arena.put(constants + 4 * k, bits(matrix[k]));
         const std::uint16_t quad[6] = {0, 1, 2, 2, 1, 3};
         for (unsigned k = 0; k < 6; ++k) arena.put16(indexBuffer + 2 * k, quad[k]);
         for (unsigned k = 0; k < 64; ++k) arena.put(texture + 4 * k, 200u | (100u << 8) | (50u << 16) | (255u << 24));
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        bool ok = true;
+        // Guest addresses as in the game (above 4 GiB, 0x70...) or as in the
+        // other tests: the arena seen at `high` + its own addresses.
+        for (const std::uint64_t high : {std::uint64_t(0), std::uint64_t(0x7000000000)}) {
+        const GCNMemory memory{
+            [&](std::uint64_t a, void* d, std::size_t n) { return a >= high && arena.memory.read(a - high, d, n); },
+            [&](std::uint64_t a, const void* d, std::size_t n) { return a >= high && arena.memory.write(a - high, d, n); }};
+        auto lo = [&](std::uint64_t a) { return std::uint32_t(a + high); };
+        auto hi = [&](std::uint64_t a) { return std::uint32_t((a + high) >> 32); };
+        arena.code(table, {lo(vertices), hi(vertices) | 20u << 16, 4, 0x5ffac,        // float2 position
+                           lo(vertices + 8), hi(vertices + 8) | 20u << 16, 4, 0x5ffac, // float2 UV
+                           lo(vertices + 16), hi(vertices + 16) | 20u << 16, 4, 0x50fac}); // 8_8_8_8 UNORM colour
         Stream s;
-        s.set(0x76, 0x48, {std::uint32_t(vs >> 8), 0});                      // SPI_SHADER_PGM_LO/HI_VS
+        s.set(0x76, 0x48, {std::uint32_t((vs + high) >> 8), std::uint32_t((vs + high) >> 40)}); // SPI_SHADER_PGM_LO/HI_VS
         s.set(0x76, 0x4b, {10u << 1});                                       // RSRC2_VS: 10 user SGPRs
-        s.set(0x76, 0x4c, {std::uint32_t(fetch), 0, std::uint32_t(table), 0,
-                           std::uint32_t(constants), 16u << 16, 4, 0x77fac, 0, 0});
-        s.set(0x76, 0x08, {std::uint32_t(ps >> 8), 0});                      // SPI_SHADER_PGM_LO/HI_PS
+        s.set(0x76, 0x4c, {lo(fetch), hi(fetch), lo(table), hi(table),
+                           lo(constants), hi(constants) | 16u << 16, 4, 0x77fac, 0, 0});
+        s.set(0x76, 0x08, {std::uint32_t((ps + high) >> 8), std::uint32_t((ps + high) >> 40)}); // SPI_SHADER_PGM_LO/HI_PS
         s.set(0x76, 0x0b, {13u << 1});                                       // RSRC2_PS: 13 user SGPRs
-        s.set(0x76, 0x0c, {std::uint32_t(texture >> 8), 10u << 20, 7 | (7u << 14), 0x90800fac, 7u << 13, 0, 0, 0,
-                           0x12, 0, 0x500000, 0, 0});
+        s.set(0x76, 0x0c, {std::uint32_t((texture + high) >> 8), std::uint32_t((texture + high) >> 40) | 10u << 20,
+                           7 | (7u << 14), 0x90800fac, 7u << 13, 0, 0, 0, 0x12, 0, 0x500000, 0, 0});
         s.set(0x69, 0x8e, {0xf});                                            // CB_TARGET_MASK
         s.set(0x69, 0x318, {std::uint32_t(target >> 8), width / 8 - 1, width * height / 64 - 1});
         s.set(0x69, 0x31c, {0xau << 2});                                     // CB_COLOR0_INFO: 8_8_8_8
@@ -105,13 +115,11 @@ int main() {
         s.set(0x69, 0x191, {0, 1});                                          // SPI_PS_INPUT_CNTL_0/1
         s.set(0x79, 0x242, {4});                                             // VGT_PRIMITIVE_TYPE: triangles
         s.words.insert(s.words.end(), {0xc0002a00, 0});                      // INDEX_TYPE: 16 bits
-        s.words.insert(s.words.end(), {0xc0042700, 6, std::uint32_t(indexBuffer), 0, 6, 0}); // DRAW_INDEX_2
-        id<MTLCommandQueue> queue = [device newCommandQueue];
-        bool ok = true;
+        s.words.insert(s.words.end(), {0xc0042700, 6, lo(indexBuffer), hi(indexBuffer), 6, 0}); // DRAW_INDEX_2
         for (const bool native : {false, true}) {
             PM4DrawStats stats;
-            PM4DrawCollector collector(arena.memory, stats);
-            PM4MetalRenderer renderer(device, arena.memory, nil, 0, native);
+            PM4DrawCollector collector(memory, stats);
+            PM4MetalRenderer renderer(device, memory, nil, 0, native);
             id<MTLCommandBuffer> command = [queue commandBuffer];
             renderer.beginBatch();
             collector.execute(s.words.data(), s.words.size(), [&](const PM4Draw& draw) {
@@ -131,10 +139,12 @@ int main() {
                        sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
             [blit endEncoding]; [read commit]; [read waitUntilCompleted];
             const auto* p = static_cast<const std::uint8_t*>(pixel.contents);
-            std::printf("%s: %zu draws, %llu samples, centre %u %u %u %u\n", native ? "native textures" : "buffer textures",
+            std::printf("guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", (unsigned long long)high,
+                        native ? "native textures" : "buffer textures",
                         std::size_t(stats.rendered), (unsigned long long)samples, p[0], p[1], p[2], p[3]);
             auto near = [](unsigned a, unsigned b) { return a + 1 >= b && b + 1 >= a; };
             ok = ok && stats.rendered == 1 && samples > 0 && near(p[0], 200) && near(p[1], 100) && near(p[2], 50) && p[3] == 255;
+        }
         }
         std::puts(ok ? "PASS full-screen quad shaped like Mortal Kombat's frame" : "FAIL full-screen quad shaped like Mortal Kombat's frame");
         return ok ? 0 : 1;
