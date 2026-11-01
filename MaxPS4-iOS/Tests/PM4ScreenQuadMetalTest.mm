@@ -21,7 +21,7 @@ struct Stream {
         words.insert(words.end(), values);
     }
 };
-constexpr std::uint64_t vs = 0x10000, fetch = 0x10200, ps = 0x10400, table = 0x10800, vertices = 0x10c00,
+constexpr std::uint64_t vs = 0x10000, fetch = 0x10200, ps = 0x10400, table = 0x10800, vertices = 0x1c000,
                         constants = 0x10e00, indexBuffer = 0x10f00, texture = 0x11000, target = 0x7000000000;
 constexpr unsigned width = 1920, height = 1080;
 }
