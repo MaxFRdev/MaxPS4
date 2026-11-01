@@ -110,6 +110,45 @@ int main() {
                 [e endEncoding]; [c commit]; [c waitUntilCompleted];
                 std::memcpy(results[variant], out.contents, sizeof results[variant]);
             }
+            // 3: the full pipeline (gcn_vertex, gcn_fragment, the game's blend) over a 64x64 target.
+            std::uint64_t samples = 0;
+            {
+                MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
+                d.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
+                d.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
+                d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+                d.colorAttachments[0].blendingEnabled = YES;
+                d.colorAttachments[0].sourceRGBBlendFactor = d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
+                d.colorAttachments[0].destinationRGBBlendFactor = d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+                id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:d error:&error];
+                if (!pipeline) { std::printf("FAIL full pipeline: %s\n", error.localizedDescription.UTF8String); return 1; }
+                MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
+                td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
+                id<MTLBuffer> visibility = [device newBufferWithLength:8 options:MTLResourceStorageModeShared];
+                std::memset(visibility.contents, 0, 8);
+                MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                pass.colorAttachments[0].texture = [device newTextureWithDescriptor:td];
+                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                pass.visibilityResultBuffer = visibility;
+                DrawState full = state;
+                const std::uint32_t psUser[13] = {0x110, 10u << 20, 7 | (7u << 14), 0x90800fac, 7u << 13, 0, 0, 0, 0x12, 0, 0x500000, 0, 0};
+                for (unsigned k = 0; k < 13; ++k) full.psUser[k] = psUser[k];
+                for (unsigned k = 0; k < 64; ++k) arena.put(0x11000 + 4 * k, 200u | (100u << 8) | (50u << 16) | (255u << 24));
+                std::memcpy(memory.contents, arena.bytes.data(), arena.bytes.size());
+                id<MTLCommandBuffer> c = [queue commandBuffer];
+                id<MTLRenderCommandEncoder> e = [c renderCommandEncoderWithDescriptor:pass];
+                [e setRenderPipelineState:pipeline];
+                [e setViewport:MTLViewport{0, 0, 64, 64, 0.5, 1.0}];
+                [e setVertexBuffer:memory offset:0 atIndex:0]; [e setFragmentBuffer:memory offset:0 atIndex:0];
+                [e setVertexBytes:&full length:sizeof full atIndex:1]; [e setFragmentBytes:&full length:sizeof full atIndex:1];
+                [e setVertexBuffer:indexBuffer offset:0 atIndex:2];
+                [e setVisibilityResultMode:MTLVisibilityResultModeCounting offset:0];
+                [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+                [e endEncoding]; [c commit]; [c waitUntilCompleted];
+                samples = *static_cast<const std::uint64_t*>(visibility.contents);
+            }
+            std::printf("VS 0x%llx, full pipeline: %llu samples\n", (unsigned long long)program, (unsigned long long)samples);
+            ok = ok && samples == 64 * 64;
             static const char* const names[3] = {"kernel", "vertex stage", "vertex stage, positioned"};
             for (unsigned r = 0; r < 3; ++r) {
                 std::printf("VS 0x%llx, %s:", (unsigned long long)program, names[r]);
