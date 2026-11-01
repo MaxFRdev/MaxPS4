@@ -13,6 +13,9 @@ namespace {
 // Must match GCNDrawState in gcnMetalPrelude().
 struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; };
 static_assert(sizeof(DrawState) == 544, "GCNDrawState layout");
+// Must match GCNDispatchState in gcnMetalComputeEntry().
+struct DispatchState { std::uint64_t base, size; std::uint32_t user[16], userCount, rsrc2, rangeCount, pad; std::uint64_t ranges[48]; };
+static_assert(sizeof(DispatchState) == 480, "GCNDispatchState layout");
 constexpr std::uint32_t rectList = 1, flipY = 2;
 
 // CB_BLEND factor codes to Metal; dual-source factors remain unsupported.
@@ -63,18 +66,10 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     if (!ps) { fail("PS translation: " + ps.error); return nil; }
     const std::string source = gcnMetalPrelude(native_) + vs.source + ps.source +
                                gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
-    MTLCompileOptions* options = [MTLCompileOptions new];
-    if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeSafe;
-    else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        options.fastMathEnabled = NO;
-#pragma clang diagnostic pop
-    }
-    NSError* failure = nil;
-    id<MTLLibrary> library = [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&failure];
-    if (!library) { fail(std::string("MSL: ") + failure.localizedDescription.UTF8String); return nil; }
+    id<MTLLibrary> library = this->library(source);
+    if (!library) return nil;
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+    NSError* failure = nil;
     descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
     descriptor.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
@@ -104,6 +99,141 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     ++pipelinesBuilt;
     pipelines_[key] = state;
     return state;
+}
+
+id<MTLLibrary> PM4MetalRenderer::library(const std::string& source) {
+    MTLCompileOptions* options = [MTLCompileOptions new];
+    if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeSafe;
+    else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        options.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+    }
+    NSError* failure = nil;
+    id<MTLLibrary> library = [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&failure];
+    if (!library) fail(std::string("MSL: ") + failure.localizedDescription.UTF8String);
+    return library;
+}
+
+id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
+    const auto key = std::make_pair(c.program, c.rsrc2);
+    const auto found = kernels_.find(key);
+    if (found != kernels_.end()) return found->second;
+    GCNTranslateOptions options;
+    options.stage = GCNStage::compute; options.name = "cs_program"; options.userCount = c.userCount;
+    for (unsigned k = 0; k < 16; ++k) options.userData[k] = c.user[k];
+    const auto cs = translateGCN(code_, c.program, options);
+    if (!cs) { fail("CS translation: " + cs.error); return nil; }
+    id<MTLLibrary> library = this->library(gcnMetalPrelude(native_) + cs.source + gcnMetalComputeEntry("cs_program"));
+    if (!library) return nil;
+    NSError* failure = nil;
+    id<MTLComputePipelineState> state = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"gcn_compute"]
+                                                                               error:&failure];
+    if (!state) { fail(std::string("compute pipeline: ") + failure.localizedDescription.UTF8String); return nil; }
+    ++kernelsBuilt;
+    kernels_[key] = state;
+    return state;
+}
+
+bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> commands) {
+    error.clear();
+    if (!c.program || !c.groups[0] || !c.groups[1] || !c.groups[2]) return true; // nothing to run
+    const std::uint64_t tx = std::max(1u, c.threads[0]), ty = std::max(1u, c.threads[1]), tz = std::max(1u, c.threads[2]);
+    id<MTLComputePipelineState> state = kernel(c);
+    if (!state) return false;
+    if (tx * ty * tz > state.maxTotalThreadsPerThreadgroup) return fail("threads per group");
+    // Copies of the ranges the program addresses, as for a draw (copy mode only).
+    if (guest_) return fail("compute with a guest memory window");
+    const auto& ranges = scanner_.scan(c);
+    if (ranges.empty()) return fail("compute program addresses no memory");
+    if (ranges.size() > 16) return fail("compute reads more than 16 memory ranges");
+    std::uint64_t total = 0;
+    for (const auto& r : ranges) total += r.size + 255;
+    if (total > (256ull << 20)) return fail("compute reads more than 256 MiB");
+    id<MTLBuffer> memory = uploadBuffer(std::max<std::uint64_t>(total, 256), commands);
+    if (!memory) return fail("compute memory buffer");
+    DispatchState dispatchState{};
+    std::uint64_t offset = 0;
+    auto* bytes = static_cast<std::uint8_t*>(memory.contents);
+    for (std::size_t k = 0; k < ranges.size(); ++k) {
+        offset += (ranges[k].base - offset) & 255;
+        if (!code_.read(ranges[k].base, bytes + offset, ranges[k].size)) std::memset(bytes + offset, 0, ranges[k].size);
+        dispatchState.ranges[3 * k] = ranges[k].base;
+        dispatchState.ranges[3 * k + 1] = ranges[k].size;
+        dispatchState.ranges[3 * k + 2] = offset;
+        offset += ranges[k].size;
+    }
+    dispatchState.rangeCount = std::uint32_t(ranges.size());
+    dispatchState.userCount = c.userCount; dispatchState.rsrc2 = c.rsrc2;
+    for (unsigned k = 0; k < 16; ++k) dispatchState.user[k] = c.user[k];
+    // Where [address, address + length) lies in `memory`, if inside one range.
+    auto locate = [&](std::uint64_t address, std::uint64_t length, std::uint64_t& at) {
+        for (std::size_t k = 0; k < ranges.size(); ++k)
+            if (address >= ranges[k].base && address - ranges[k].base <= ranges[k].size && length <= ranges[k].size - (address - ranges[k].base)) {
+                at = dispatchState.ranges[3 * k + 2] + (address - ranges[k].base);
+                return true;
+            }
+        return false;
+    };
+    auto stored = [&](std::uint64_t address, std::uint64_t length) {
+        for (const auto& s : scanner_.stored()) if (address < s.base + s.size && s.base < address + length) return true;
+        return false;
+    };
+    // Linear 8_8_8_8 images the kernel stores that no target holds yet.
+    struct Output { std::uint64_t base; unsigned pitch, height; };
+    std::vector<Output> outputs;
+    for (const auto& t : scanner_.images()) {
+        const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
+        const unsigned dfmt = (t[1] >> 20) & 63, tiling = (t[3] >> 20) & 31;
+        const unsigned pitch = ((t[4] >> 13) & 0x3fff) + 1, height = ((t[2] >> 14) & 0x3fff) + 1;
+        if (dfmt == 10 && tiling == 8 && !targets_.count(base) && stored(base, std::uint64_t(pitch) * height * 4))
+            outputs.push_back({base, pitch, height});
+    }
+    if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; }
+    // Colour targets live in their textures: the kernel reads their current contents.
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (!blit) return fail("compute blit encoder");
+    for (auto& [address, target] : targets_) {
+        std::uint64_t at = 0;
+        const std::uint64_t row = target.texture.width * 4, length = row * target.texture.height;
+        if (!target.texture || target.fresh || !locate(address, length, at)) continue;
+        [blit copyFromTexture:target.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(target.texture.width, target.texture.height, 1)
+                     toBuffer:memory destinationOffset:at destinationBytesPerRow:row destinationBytesPerImage:length];
+    }
+    [blit endEncoding];
+    id<MTLComputeCommandEncoder> compute = [commands computeCommandEncoder];
+    if (!compute) return fail("compute encoder");
+    [compute setComputePipelineState:state];
+    [compute setBuffer:memory offset:0 atIndex:0];
+    [compute setBytes:&dispatchState length:sizeof dispatchState atIndex:1];
+    [compute dispatchThreadgroups:MTLSizeMake(c.groups[0], c.groups[1], c.groups[2])
+            threadsPerThreadgroup:MTLSizeMake(tx, ty, tz)];
+    [compute endEncoding];
+    for (const auto& o : outputs) {
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                              width:o.pitch height:o.height mipmapped:NO];
+        descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
+        if (texture) targets_[o.base] = {texture, false};
+    }
+    // What the kernel stored in targets goes back to their textures.
+    blit = [commands blitCommandEncoder];
+    if (!blit) return fail("compute blit encoder");
+    for (auto& [address, target] : targets_) {
+        std::uint64_t at = 0;
+        const std::uint64_t row = target.texture.width * 4, length = row * target.texture.height;
+        if (!target.texture || !stored(address, length) || !locate(address, length, at)) continue;
+        [blit copyFromBuffer:memory sourceOffset:at sourceBytesPerRow:row sourceBytesPerImage:length
+                  sourceSize:MTLSizeMake(target.texture.width, target.texture.height, 1)
+                   toTexture:target.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        target.fresh = false;
+        ++targetsSynced;
+    }
+    [blit endEncoding];
+    return true;
 }
 
 void PM4MetalRenderer::endBatch() {

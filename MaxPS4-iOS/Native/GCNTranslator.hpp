@@ -11,7 +11,9 @@
 // local scalar registers; lane masks keep this lane's bit in bit 0; branches
 // on VCC/EXEC, WQM and SCC of 64-bit mask operations are decided per 2x2
 // quad. Not translated, reported as errors: LDS (other than ds_swizzle in
-// quad mode), memory stores, lane counts of masks, s_getpc.
+// quad mode), memory stores outside compute programs, lane counts of masks,
+// s_getpc. A compute program runs one lane per thread: user SGPRs, then the
+// enabled thread group ids, in L.user; thread ids in v0-v2.
 #include "GCNDecoder.hpp"
 #include "GCNInterpreter.hpp"
 #include <map>
@@ -20,7 +22,7 @@
 #include <vector>
 
 namespace maxps4::gpu {
-enum class GCNStage { vertex, pixel };
+enum class GCNStage { vertex, pixel, compute };
 struct GCNTranslateOptions {
     GCNStage stage = GCNStage::pixel;
     std::uint32_t userData[16] = {}; // resolves s_swappc_b64 targets
@@ -34,6 +36,7 @@ struct GCNTranslation {
     std::uint32_t attributes = 0, flat = 0; // pixel: attributes read, of which flat
     std::uint8_t colors = 0;     // pixel: MRTs exported
     bool position = false, quad = false, mayKill = false;
+    bool stores = false;         // compute: writes guest memory
     explicit operator bool() const { return error.empty(); }
 };
 
@@ -204,7 +207,7 @@ private:
         std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) {\n";
         for (const auto n : sregs_) {
             std::string init = "0u";
-            if (n < 17) init = "L.user[" + std::to_string(n) + "]";
+            if (n < 20) init = "L.user[" + std::to_string(n) + "]";
             if (n == 126) init = "(L.exec ? 1u : 0u)";
             head += "    uint s" + std::to_string(n) + " = " + init + ";\n";
         }
@@ -609,14 +612,34 @@ private:
         if ((w >> 15) & 1) return fail("addr64 buffer access");
         const unsigned op = i.opcode;
         unsigned count;
+        const bool store = (op >= 4 && op <= 7) || op == 24 || op == 26 || (op >= 28 && op <= 31);
         if (op <= 3) count = op + 1;
-        else if (op == 12) count = 1; else if (op == 13) count = 2; else if (op == 14) count = 4; else if (op == 15) count = 3;
-        else return fail("buffer store or unsupported buffer access");
+        else if (op >= 4 && op <= 7) count = op - 3;
+        else if (op == 12 || op == 24 || op == 26 || op == 28) count = 1;
+        else if (op == 13 || op == 29) count = 2; else if (op == 14 || op == 30) count = 4; else if (op == 15 || op == 31) count = 3;
+        else return fail("unsupported buffer access");
+        if (store && options_.stage != GCNStage::compute) return fail("buffer store outside a compute program");
         const std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + s(rsrc + 3) + "}}; ";
         const std::string index = idxen ? v(vaddr) : "0u", voffset = offen ? v(vaddr + (idxen ? 1 : 0)) : "0u";
         const std::string args = index + ", " + voffset + ", " + scalar(w1 >> 24, i) + ", " + std::to_string(w & 0xfff) + "u, " +
                                  (idxen ? "true" : "false") + ", " + (offen ? "true" : "false");
         body_ += "if (" + std::string(ex()) + ") { " + res;
+        if (store) {
+            out_.stores = true;
+            if (op <= 7) {
+                body_ += "gcn_buffer_store_format(M, r, " + args + ", uint4(";
+                for (unsigned c = 0; c < 4; ++c) body_ += (c < count ? v(vdata + c) : std::string("0u")) + (c < 3 ? ", " : "), ");
+                body_ += std::to_string(count) + "u); }";
+            } else if (op == 24 || op == 26) {
+                body_ += "gcn_buffer_store_bytes(M, r, " + args + ", " + v(vdata) + ", " + (op == 24 ? "1u" : "2u") + "); }";
+            } else {
+                for (unsigned c = 0; c < count; ++c)
+                    body_ += "gcn_buffer_store_dword(M, r, " + args + ", " + std::to_string(c) + "u, " + v(vdata + c) + "); ";
+                body_ += "}";
+            }
+            sregs_.insert(126);
+            return out_.error.empty();
+        }
         if (op <= 3) {
             body_ += "uint4 f = gcn_buffer_format(M, r, " + args + "); ";
             for (unsigned c = 0; c < count; ++c) body_ += v(vdata + c) + " = f[" + std::to_string(c) + "]; ";
@@ -647,7 +670,17 @@ private:
                    v(vaddr + first + 1) + "))";
         } else if (op == 0 || op == 1) {
             call = "gcn_image_load(M, t, " + v(vaddr) + ", " + v(vaddr + 1) + ")";
-        } else return fail("image store or unsupported image access");
+        } else if (op == 8 || op == 9) {
+            // image_store(_mip): the enabled components, in order, from vdata.
+            if (options_.stage != GCNStage::compute) return fail("image store outside a compute program");
+            out_.stores = true;
+            body_ += "if (" + std::string(ex()) + ") { " + res + "gcn_image_store(M, t, " + v(vaddr) + ", " + v(vaddr + 1) + ", uint4(";
+            for (unsigned n = 0, in = 0; n < 4; ++n)
+                body_ += ((dmask >> n) & 1 ? v(vdata + in++) : std::string("0u")) + (n < 3 ? ", " : "), ");
+            body_ += std::to_string(dmask) + "u); }";
+            sregs_.insert(126);
+            return out_.error.empty();
+        } else return fail("unsupported image access");
         body_ += "if (" + std::string(ex()) + ") { " + res + "float4 c = " + call + "; ";
         for (unsigned n = 0, out = 0; n < 4; ++n)
             if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(c[" + std::to_string(n) + "]); ";
@@ -693,6 +726,25 @@ inline GCNTranslation translateGCN(const GCNMemory& memory, std::uint64_t entry,
     return GCNTranslator(memory, options).translate(entry);
 }
 
+// The Metal kernel gcn_compute around a translated compute program (after
+// gcnMetalPrelude()). Buffers: 0 guest memory, writable: one window at
+// `base` or rangeCount copied ranges, as for draws; 1 GCNDispatchState. COMPUTE_PGM_RSRC2 (rsrc2) enables the thread group ids,
+// which follow the user SGPRs, and the thread id components beyond x.
+inline std::string gcnMetalComputeEntry(const std::string& name) {
+    return "struct GCNDispatchState { ulong base; ulong size; uint user[16]; uint userCount; uint rsrc2; uint rangeCount; uint pad; ulong ranges[48]; };\n"
+           "kernel void gcn_compute(uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]],\n"
+           "    device uchar* mem [[buffer(0)]], constant GCNDispatchState& D [[buffer(1)]]) {\n"
+           "    GCNLane L; gcn_lane_init(L);\n"
+           "    uint n = min(D.userCount, 16u);\n"
+           "    for (uint k = 0u; k < n; ++k) L.user[k] = D.user[k];\n"
+           "    if ((D.rsrc2 & 0x80u) != 0u && n < 20u) L.user[n++] = group.x;\n"
+           "    if ((D.rsrc2 & 0x100u) != 0u && n < 20u) L.user[n++] = group.y;\n"
+           "    if ((D.rsrc2 & 0x200u) != 0u && n < 20u) L.user[n++] = group.z;\n"
+           "    L.vinit[0] = local.x; L.vinit[1] = local.y; L.vinit[2] = local.z;\n"
+           "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u };\n"
+           "    " + name + "(L, M, Q);\n}\n";
+}
+
 // The Metal build of GCNShaderRuntime.hpp: put it before translated programs.
 inline std::string gcnMetalPrelude(bool nativeTextures = false) {
     std::string text = R"MSL(#include <metal_stdlib>
@@ -717,12 +769,12 @@ struct GCNMemory { device const uchar* p; ulong base; ulong size; constant ulong
 };
 struct GCNQuad { uint unused; };
 struct GCNLane {
-    uint user[17]; uint vinit[24]; bool exec; uint quadLane;
+    uint user[20]; uint vinit[24]; bool exec; uint quadLane;
     float4 attr[32];
     float4 pos; float4 param[32]; float4 color[8]; uint colorWritten; bool killed;
 };
 GCN_FN void gcn_clear(thread GCNLane& L) {
-    for (uint k = 0u; k < 17u; ++k) L.user[k] = 0u;
+    for (uint k = 0u; k < 20u; ++k) L.user[k] = 0u;
     for (uint k = 0u; k < 24u; ++k) L.vinit[k] = 0u;
     for (uint k = 0u; k < 32u; ++k) { L.attr[k] = float4(0.0f); L.param[k] = float4(0.0f); }
     for (uint k = 0u; k < 8u; ++k) L.color[k] = float4(0.0f);
@@ -732,7 +784,7 @@ GCN_FN void gcn_clear(thread GCNLane& L) {
 // was most of a full-screen draw's GPU time (GCNShaderCostMetalTest). Entry
 // points set the attributes a program reads and clear what it exports.
 GCN_FN void gcn_lane_init(thread GCNLane& L) {
-    for (uint k = 0u; k < 17u; ++k) L.user[k] = 0u;
+    for (uint k = 0u; k < 20u; ++k) L.user[k] = 0u;
     for (uint k = 0u; k < 24u; ++k) L.vinit[k] = 0u;
     L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false;
 }
@@ -784,6 +836,10 @@ GCN_FN uint gcn_ld8(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a,
 GCN_FN uint gcn_packed32(GCNMemory M, ulong o) { return *(device const uint*)(M.p + o); }
 GCN_FN uint gcn_packed16(GCNMemory M, ulong o) { return uint(*(device const ushort*)(M.p + o)); }
 GCN_FN uint gcn_packed8(GCNMemory M, ulong o) { return uint(M.p[o]); }
+// Stores, from compute kernels only, whose memory buffer is writable.
+GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 4ul, o)) *(device uint*)(M.p + o) = v; }
+GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 2ul, o)) *(device ushort*)(M.p + o) = ushort(v); }
+GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 1ul, o)) *(device uchar*)(M.p + o) = uchar(v); }
 GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4& value) {
 #if GCN_NATIVE_TEXTURES
     const uint dfmt = (t.d[1] >> 20) & 63u;

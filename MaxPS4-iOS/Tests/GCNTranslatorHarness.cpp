@@ -113,5 +113,30 @@ int main() {
         }
         assert(lanes[0].color[0][0] == 1.0f && lanes[0].color[0][1] == 0.5f && lanes[1].color[0][1] == 1.0f);
     }
-    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, pixel quad)");
+    // Compute: two groups of 32 threads; the stores leave identical memory.
+    {
+        Arena interpreted, translated;
+        loadComputeCS(interpreted); loadComputeCS(translated);
+        const rt::GCNMemory T = window(translated);
+        for (unsigned group = 0; group < 2; ++group) {
+            GCNWave wave(interpreted.memory, 32);
+            for (unsigned k = 0; k < 16; ++k) wave.s[k] = computeSgprs[k];
+            wave.s[16] = group;
+            for (unsigned lane = 0; lane < 32; ++lane) wave.v(0, lane) = lane;
+            assert(wave.run(computeCS));
+            for (unsigned lane = 0; lane < 32; ++lane) {
+                rt::GCNLane L;
+                for (unsigned k = 0; k < 16; ++k) L.user[k] = computeSgprs[k];
+                L.user[16] = group; L.vinit[0] = lane;
+                rt::cs_copy(L, T, unusedQuad);
+            }
+        }
+        assert(interpreted.bytes == translated.bytes);
+        // Record 33 (group 1, thread 1): z = (237 % 13) / 8 - 0.25 = 0.125, so 32 of 255.
+        assert(translated.bytes[computeBuffer + 4 * 33 + 2 - Arena::start] == 32);
+        // Pixel (1, 1) of the image holds the same record; x = 8 and beyond are outside it.
+        assert(translated.bytes[computeImage + 4 * (8 + 1) + 2 - Arena::start] == 32);
+        assert(translated.bytes[computeImage + 4 * 64 - Arena::start] == 0);
+    }
+    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, pixel quad, compute stores)");
 }

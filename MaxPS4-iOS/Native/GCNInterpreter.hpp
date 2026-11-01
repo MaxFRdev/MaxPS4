@@ -142,6 +142,8 @@ public:
     // guest memory is built from these (PM4ResourceScan.hpp).
     std::function<void(std::uint64_t base, std::uint64_t bytes)> resource;
     std::function<void(const std::array<std::uint32_t, 8>&)> imageResource;
+    // Called as `resource` for the resources a store instruction writes.
+    std::function<void(std::uint64_t base, std::uint64_t bytes)> stored;
 
     std::uint32_t& v(unsigned reg, unsigned lane) { return v_[std::size_t(reg & 0xff) * lanes_ + lane]; }
     std::uint64_t exec() const { return std::uint64_t(s[126]) | std::uint64_t(s[127]) << 32; }
@@ -154,7 +156,7 @@ public:
     void reset() {
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
-        attribute = {}; resource = {}; imageResource = {}; images = nullptr;
+        attribute = {}; resource = {}; imageResource = {}; stored = {}; images = nullptr;
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
 
@@ -697,6 +699,7 @@ private:
         unsigned channels = 1, bits = 32;
         if (format && !bufferLayout(dfmt, channels, bits)) return fail("buffer data format " + std::to_string(dfmt));
         if (resource) resource(base, stride ? std::uint64_t(records) * stride : records);
+        if (store && stored) stored(base, stride ? std::uint64_t(records) * stride : records);
         for (unsigned lane = 0; lane < lanes_; ++lane) {
             if (!active(lane)) continue;
             const std::uint32_t index = idxen ? v(vaddr, lane) : 0;
@@ -875,6 +878,7 @@ private:
             return fail("BC" + std::to_string(t.dfmt - 34) +
                 (t.dfmt >= 38 ? " requires UNORM/SNORM and pitch >= width" : " requires UNORM and pitch >= width"));
         if (resource) resource(t.base, imageSize(t, bytes));
+        if (i.opcode == 8 && stored) stored(t.base, imageSize(t, bytes));
         if (imageResource) {
             std::array<std::uint32_t, 8> descriptor{};
             std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);

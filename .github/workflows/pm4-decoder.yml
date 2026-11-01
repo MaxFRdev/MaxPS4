@@ -90,6 +90,9 @@ jobs:
           xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNMetalTest.mm \
             -framework Foundation -framework Metal -o build/pm4/gcn-metal-test
           build/pm4/gcn-metal-test
+          xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNComputeMetalTest.mm \
+            -framework Foundation -framework Metal -o build/pm4/gcn-compute-metal-test
+          build/pm4/gcn-compute-metal-test
           xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNTextureFootprintMetalTest.mm \
             -framework Foundation -framework Metal -o build/pm4/gcn-texture-footprint-metal-test
           build/pm4/gcn-texture-footprint-metal-test

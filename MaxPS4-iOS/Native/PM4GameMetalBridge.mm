@@ -32,6 +32,9 @@ struct GameMetalState {
     // (then what the game shows was never drawn by Metal), and the last one.
     unsigned shown = 0, absent = 0;
     uint64_t lastShown = 0;
+    // Compute dispatches run as kernels, or refused (and skipped) with the last reason.
+    unsigned computeRun = 0, computeRefused = 0;
+    std::string computeError;
     bool nativeTextures;
     NSString* report() const {
         const unsigned* m = renderer.nativeMisses;
@@ -39,9 +42,10 @@ struct GameMetalState {
             @"\nTextures natives : %u dessins (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
             renderer.nativeDraws, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
-        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur, %u calculs (dispatch) · %zu cibles\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
+        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u refusés%s%s · %u kernels · %u images synchronisées\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused,
-            stats.skipped, stats.dispatches, renderer.targetCount(), stats.lastSkipped.c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
+            stats.skipped, renderer.targetCount(), stats.dispatches, computeRun, computeRefused,
+            computeError.empty() ? "" : " : ", computeError.c_str(), renderer.kernelsBuilt, renderer.targetsSynced, stats.lastSkipped.c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
             encodeMs, gpuText(renderGpuMs), waitMs, copyMs, gpuText(copyGpuMs), native];
     }
     GameMetalState(id<MTLDevice> device, MaxPS4GameMemoryReader reader, bool nativeTextures)
@@ -102,6 +106,11 @@ struct GameMetalState {
             if (s.stats.failed != failed) return;
             if (s.renderer.encode(draw, command)) ++s.stats.rendered;
             else s.stats.fail(s.renderer.error);
+        }, [&](const PM4Dispatch& dispatch) {
+            // A dispatch that cannot run is skipped, as before compute support.
+            if (s.stats.failed != failed) return;
+            if (s.renderer.dispatch(dispatch, command)) ++s.computeRun;
+            else { ++s.computeRefused; s.computeError = s.renderer.error; }
         });
         s.renderer.endBatch();
         if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }

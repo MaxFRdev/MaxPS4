@@ -8,6 +8,11 @@
 // across draws. Pipelines are cached by program addresses, the fetch-shader
 // SGPR pair (s[0:1]), PS inputs, format and blend. Limits as the software
 // renderer: colour target 0 only, no depth, instance 0.
+// Compute dispatches run as Metal kernels on copies of the ranges one
+// interpreted lane addresses; colour targets inside those ranges are copied
+// in from their textures, and back after the kernel. A linear 8_8_8_8 image
+// the kernel stores becomes a colour target texture, so draws (and the
+// display) see it. Guest memory itself never receives what kernels store.
 // Prototype, off by default: `nativeTextures` reads one linear 8_8_8_8 or 5_6_5 T# per
 // draw through a Metal texture viewing the draw's memory buffer (no copy).
 // Filtering stays the GCN arithmetic; any other T#, or a view Metal cannot
@@ -26,11 +31,16 @@ public:
     // `guest` nil: each draw copies the memory ranges its programs read.
     PM4MetalRenderer(id<MTLDevice> device, const GCNMemory& code, id<MTLBuffer> guest, std::uint64_t guestBase,
                      bool nativeTextures = false)
-        : device_(device), code_(code), guest_(guest), guestBase_(guestBase), scanner_(code, nativeTextures),
-          native_(nativeTextures) {}
+        : device_(device), code_(code), guest_(guest), guestBase_(guestBase),
+          scanMemory_{code.read, [](std::uint64_t, const void*, std::size_t) { return true; }},
+          scanner_(scanMemory_, nativeTextures), native_(nativeTextures) {}
     // Encodes one draw as a render pass into `commands`. False with `error`
     // set (and nothing encoded) when the draw cannot be expressed.
     bool encode(const PM4Draw& draw, id<MTLCommandBuffer> commands);
+    // Encodes one compute dispatch into `commands`, false with `error` set
+    // (and nothing encoded) when it cannot be expressed.
+    bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
+    unsigned kernelsBuilt = 0, targetsSynced = 0;
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
     void beginBatch() { endBatch(); batching_ = true; }
@@ -57,10 +67,14 @@ private:
     const GCNMemory& code_;
     id<MTLBuffer> guest_;
     std::uint64_t guestBase_;
+    GCNMemory scanMemory_; // code_ reads; scanned lanes' stores are dropped
     PM4ResourceScanner scanner_;
     bool native_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
+    std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
+    id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
+    id<MTLLibrary> library(const std::string& source);
     std::map<std::uint64_t, Target> targets_;
     bool batching_ = false;
     id<MTLRenderCommandEncoder> encoder_ = nil;

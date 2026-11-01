@@ -66,11 +66,38 @@ public:
     }
     return merged_;
     }
+    // A dispatch: one lane (group 0, thread 0) of its program, whose stores
+    // are not written; their resources are also given by stored(). Images
+    // the program addresses are captured whatever captureImages.
+    const std::vector<PM4Range>& scan(const PM4Dispatch& c) {
+        found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); stored_.clear();
+        constexpr std::uint64_t largest = 256ull << 20;
+        auto& wave = wave_;
+        wave.reset();
+        wave.resource = [&](std::uint64_t base, std::uint64_t bytes) {
+            if (bytes && bytes <= largest && base + bytes > base) found_.push_back({base, bytes});
+        };
+        wave.stored = [&](std::uint64_t base, std::uint64_t bytes) {
+            if (bytes && bytes <= largest && base + bytes > base) stored_.push_back({base, bytes});
+        };
+        wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
+        for (unsigned k = 0; k < c.userCount; ++k) wave.s[k] = c.user[k];
+        wave.run(c.program);
+        wave.resource = {}; wave.stored = {}; wave.imageResource = {};
+        std::sort(found_.begin(), found_.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
+        for (const auto& r : found_) {
+            if (!merged_.empty() && r.base <= merged_.back().base + merged_.back().size + 4096) {
+                merged_.back().size = std::max(merged_.back().size, r.base + r.size - merged_.back().base);
+            } else merged_.push_back(r);
+        }
+        return merged_;
+    }
+    const std::vector<PM4Range>& stored() const { return stored_; }
     const std::vector<std::array<std::uint32_t, 8>>& images() const { return images_; }
 private:
     GCNCodeCache cache_;
     GCNWave wave_;
-    std::vector<PM4Range> found_, merged_;
+    std::vector<PM4Range> found_, merged_, stored_;
     std::vector<std::array<std::uint32_t, 8>> images_;
     bool captureImages_;
     void image(const std::array<std::uint32_t, 8>& descriptor) {

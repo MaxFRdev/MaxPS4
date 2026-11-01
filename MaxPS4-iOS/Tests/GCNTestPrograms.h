@@ -94,4 +94,28 @@ inline void loadFetchVS(Arena& arena) {
     arena.code(vertexTable, {0x10e00, 16u << 16, 3, 0x77fac}); // V#: stride 16, 3 records, float xyzw
     for (unsigned n = 0; n < 3; ++n) for (unsigned c = 0; c < 4; ++c) arena.put(0x10e00 + 16 * n + 4 * c, bits(fetchVertices[n][c]));
 }
+
+// A compute program, 32 threads per group (thread group id x in s16): thread
+// n of group g reads record 32g + n (float xyzw), halves x and stores the
+// record as 8_8_8_8 UNORM, then as pixel (n, g) of a linear 8x8 image.
+constexpr std::uint64_t computeCS = 0x11000, computeSource = 0x14000, computeBuffer = 0x15000, computeImage = 0x16000;
+inline const std::uint32_t computeSgprs[16] = {
+    0x14000, 16u << 16, 40, 0x77fac,                        // V# source: stride 16, 40 records, float xyzw
+    0x15000, 4u << 16, 100, 0x50fac,                        // V# destination: stride 4, 8_8_8_8 UNORM
+    0x160, 10u << 20, 7 | 7u << 14, 0x90800fac, 7u << 13, 0, 0, 0}; // T#: 8x8, pitch 8, 8_8_8_8 UNORM, linear 2D
+inline void loadComputeCS(Arena& arena) {
+    arena.code(computeCS, {
+        0x8f118510,             // s_lshl_b32 s17, s16, 5
+        0x4a080011,             // v_add_i32 v4, vcc, s17, v0
+        0x7e0c0300,             // v_mov_b32 v6, v0
+        0x7e0e0210,             // v_mov_b32 v7, s16
+        0xe00c2000, 0x80000004, // buffer_load_format_xyzw v[0:3], v4, s[0:3], 0 idxen
+        0xbf8c1f70,             // s_waitcnt vmcnt(0)
+        0x100000f0,             // v_mul_f32 v0, 0.5, v0
+        0xe01c2000, 0x80010004, // buffer_store_format_xyzw v[0:3], v4, s[4:7], 0 idxen
+        0xf0200f00, 0x00020006, // image_store v[0:3], v[6:7], s[8:15] dmask:0xf
+        0xbf810000});           // s_endpgm
+    for (unsigned n = 0; n < 40; ++n)
+        for (unsigned c = 0; c < 4; ++c) arena.put(computeSource + 16 * n + 4 * c, bits(float((n * 7 + c * 3) % 13) / 8.0f - 0.25f));
+}
 } // namespace gcn_test

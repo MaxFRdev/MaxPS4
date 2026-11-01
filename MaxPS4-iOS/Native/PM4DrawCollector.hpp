@@ -43,12 +43,29 @@ struct PM4Draw {
     float blendConstant[4] = {};                     // CB_BLEND_RED/GREEN/BLUE/ALPHA
 };
 
+// A compute dispatch (DISPATCH_DIRECT): program, user SGPRs, COMPUTE_PGM_RSRC2
+// (user SGPR count, thread group id and thread id enables), threads per
+// group and group counts.
+struct PM4Dispatch {
+    std::uint64_t program = 0;
+    std::uint32_t user[16] = {};
+    unsigned userCount = 0;
+    std::uint32_t rsrc2 = 0;
+    std::uint32_t threads[3] = {}, groups[3] = {};
+};
+
 class PM4DrawCollector {
 public:
     PM4DrawCollector(const GCNMemory& memory, PM4DrawStats& stats) : memory_(memory), stats_(stats) {}
     // Executes one submission and calls draw(const PM4Draw&) for each colour
     // draw; register state persists across submissions.
     template <class Draw> void execute(const std::uint32_t* words, std::size_t count, Draw&& draw) {
+        execute(words, count, draw, [](const PM4Dispatch&) {});
+    }
+    // The same, with dispatch(const PM4Dispatch&) for each compute dispatch,
+    // in submission order among the draws.
+    template <class Draw, class Dispatch>
+    void execute(const std::uint32_t* words, std::size_t count, Draw&& draw, Dispatch&& dispatch) {
         const auto parsed = decodePM4Type3(words, count);
         if (!parsed) { stats_.fail("unframed PM4 stream"); return; }
         for (const auto& packet : parsed.packets) {
@@ -94,6 +111,14 @@ public:
                               (unsigned long long)program, n > 0 ? data[0] : 0, n > 1 ? data[1] : 0, n > 2 ? data[2] : 0,
                               shader_[0x207] & 0xffff, shader_[0x208] & 0xffff, shader_[0x209] & 0xffff);
                 stats_.lastDispatch = text;
+                if (n < 3) break;
+                PM4Dispatch c;
+                c.program = program;
+                c.rsrc2 = shader_[0x213];                                // COMPUTE_PGM_RSRC2
+                c.userCount = std::min(16u, unsigned((c.rsrc2 >> 1) & 31));
+                for (unsigned k = 0; k < 16; ++k) c.user[k] = shader_[0x240 + k]; // COMPUTE_USER_DATA_0..15
+                for (unsigned k = 0; k < 3; ++k) { c.threads[k] = shader_[0x207 + k] & 0xffff; c.groups[k] = data[k]; }
+                dispatch(c);
                 break;
             }
             default: break; // synchronization and prefetch packets: nothing to draw

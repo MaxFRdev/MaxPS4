@@ -117,6 +117,59 @@ GCN_FN uint gcn_buffer_dword(GCNMemory M, GCNRes4 r, uint index, uint voffset, u
     if (!inside) return 0u;
     return gcn_ld32(M, base + soffset + inst + ulong(idx) * stride + off + 4u * n);
 }
+// The inverse of gcn_convert: a register value as `bits` bits of format nfmt.
+GCN_FN uint gcn_pack(uint value, uint bits, uint nfmt) {
+    uint top = bits == 32u ? 0xffffffffu : (1u << bits) - 1u;
+    float f = gf(value);
+    if (nfmt == 0u) return bits == 32u ? value : uint(gcn_rint(gcn_fmin(gcn_fmax(f, 0.0f), 1.0f) * float(top))) & top;
+    if (nfmt == 1u) {
+        if (bits == 32u) return value;
+        float scale = float(top >> 1);
+        return uint(int(gcn_rint(gcn_fmin(gcn_fmax(f, -1.0f), 1.0f) * scale))) & top;
+    }
+    if (nfmt == 2u) return uint(gcn_fmax(f, 0.0f)) & top;
+    if (nfmt == 3u) return uint(int(f)) & top;
+    if (nfmt == 7u && bits == 16u) return gcn_f16rtz(f);
+    return value & top;
+}
+GCN_FN void gcn_store_bits(GCNMemory M, ulong at, uint bits, uint raw) {
+    if (bits == 32u) gcn_st32(M, at, raw); else if (bits == 16u) gcn_st16(M, at, raw); else gcn_st8(M, at, raw);
+}
+// buffer_store_format_*: `count` components (x, xy, xyz, xyzw) of `value`.
+GCN_FN void gcn_buffer_store_format(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen,
+                                    uint4 value, uint count) {
+    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xffffu) << 32);
+    uint stride = (r.d[1] >> 16) & 0x3fffu; uint records = r.d[2];
+    uint dfmt = (r.d[3] >> 15) & 15u; uint nfmt = (r.d[3] >> 12) & 7u;
+    uint channels = 0u; uint bits = 32u;
+    if (dfmt == 1u) { channels = 1u; bits = 8u; } else if (dfmt == 2u) { channels = 1u; bits = 16u; }
+    else if (dfmt == 3u) { channels = 2u; bits = 8u; } else if (dfmt == 4u) { channels = 1u; bits = 32u; }
+    else if (dfmt == 5u) { channels = 2u; bits = 16u; } else if (dfmt == 10u) { channels = 4u; bits = 8u; }
+    else if (dfmt == 11u) { channels = 2u; bits = 32u; } else if (dfmt == 12u) { channels = 4u; bits = 16u; }
+    else if (dfmt == 13u) { channels = 3u; bits = 32u; } else if (dfmt == 14u) { channels = 4u; bits = 32u; }
+    uint idx = idxen ? index : 0u; uint off = offen ? voffset : 0u;
+    bool inside = stride != 0u ? idx < records : ulong(inst) + off < ulong(records);
+    if (!inside) return;
+    ulong address = base + soffset + inst + ulong(idx) * stride + off;
+    for (uint c = 0u; c < channels && c < count; ++c)
+        gcn_store_bits(M, address + c * (bits / 8u), bits, gcn_pack(value[c], bits, nfmt));
+}
+GCN_FN void gcn_buffer_store_dword(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen,
+                                   uint n, uint value) {
+    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xffffu) << 32);
+    uint stride = (r.d[1] >> 16) & 0x3fffu; uint records = r.d[2];
+    uint idx = idxen ? index : 0u; uint off = offen ? voffset : 0u;
+    bool inside = stride != 0u ? idx < records : ulong(inst) + off < ulong(records);
+    if (inside) gcn_st32(M, base + soffset + inst + ulong(idx) * stride + off + 4u * n, value);
+}
+GCN_FN void gcn_buffer_store_bytes(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen,
+                                   uint value, uint bytes) {
+    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xffffu) << 32);
+    uint stride = (r.d[1] >> 16) & 0x3fffu; uint records = r.d[2];
+    uint idx = idxen ? index : 0u; uint off = offen ? voffset : 0u;
+    bool inside = stride != 0u ? idx < records : ulong(inst) + off < ulong(records);
+    if (inside) gcn_store_bits(M, base + soffset + inst + ulong(idx) * stride + off, bytes * 8u, value);
+}
 GCN_FN float4 gcn_texture_swizzle(GCNRes8 t, float4 value) {
     uint4 c; for (uint k = 0u; k < 4u; ++k) c[k] = gu(value[k]);
     return float4(gf(gcn_sel(t.d[3] & 7u, c, 0x3f800000u)), gf(gcn_sel((t.d[3] >> 3) & 7u, c, 0x3f800000u)),
@@ -253,6 +306,24 @@ GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u,
     if (gcn_locate(M, base, ((ulong(height) - 1ul) * pitch + width) * bytes, offset))
         return gcn_sample_at(M, t, s, unorm, u, v, true, offset);
     return gcn_sample_at(M, t, s, unorm, u, v, false, 0ul);
+}
+// image_store to a linear 2D image (tiling index 8): components in channel
+// order, those outside `dmask` stored as 0. Other formats and tilings: none.
+GCN_FN void gcn_image_store(GCNMemory M, GCNRes8 t, uint x, uint y, uint4 value, uint dmask) {
+    uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
+    if (((t.d[3] >> 20) & 0x1fu) != 8u || x >= w || y >= h) return;
+    ulong base = (ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8;
+    uint dfmt = (t.d[1] >> 20) & 0x3fu; uint nfmt = (t.d[1] >> 26) & 15u; uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u;
+    uint channels = 0u; uint bits = 32u;
+    if (dfmt == 1u) { channels = 1u; bits = 8u; } else if (dfmt == 2u) { channels = 1u; bits = 16u; }
+    else if (dfmt == 3u) { channels = 2u; bits = 8u; } else if (dfmt == 4u) { channels = 1u; bits = 32u; }
+    else if (dfmt == 5u) { channels = 2u; bits = 16u; } else if (dfmt == 10u) { channels = 4u; bits = 8u; }
+    else if (dfmt == 11u) { channels = 2u; bits = 32u; } else if (dfmt == 12u) { channels = 4u; bits = 16u; }
+    else if (dfmt == 14u) { channels = 4u; bits = 32u; }
+    if (channels == 0u) return;
+    ulong at = base + (ulong(y) * pitch + x) * ulong(channels * bits / 8u);
+    for (uint c = 0u; c < channels; ++c)
+        gcn_store_bits(M, at + c * (bits / 8u), bits, ((dmask >> c) & 1u) != 0u ? gcn_pack(value[c], bits, nfmt) : 0u);
 }
 GCN_FN float4 gcn_image_load(GCNMemory M, GCNRes8 t, uint x, uint y) {
     uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
