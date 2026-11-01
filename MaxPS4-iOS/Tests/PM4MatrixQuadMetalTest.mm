@@ -88,6 +88,7 @@ int main() {
         // other tests: the arena seen at `high` + its own addresses.
         // Vertex buffers sized exactly, or with the "unbounded" record count
         // engines give dynamic buffers (far beyond what a draw reads).
+        for (const std::uint32_t constantRecords : {4u, 0x1000u})
         for (const std::uint32_t records : {4u, 0xffffffffu})
         for (const std::uint64_t high : {std::uint64_t(0), std::uint64_t(0x7000000000)}) {
         const GCNMemory memory{
@@ -103,7 +104,7 @@ int main() {
         s.set(0x76, 0x48, {std::uint32_t((vs + high) >> 8), std::uint32_t((vs + high) >> 40)}); // SPI_SHADER_PGM_LO/HI_VS
         s.set(0x76, 0x4b, {10u << 1});                                       // RSRC2_VS: 10 user SGPRs
         s.set(0x76, 0x4c, {lo(fetch), hi(fetch), lo(table), hi(table),
-                           lo(constants), hi(constants) | 16u << 16, 0x1000, 0x20077fac, 0, 0});
+                           lo(constants), hi(constants) | 16u << 16, constantRecords, 0x20077fac, 0, 0});
         s.set(0x76, 0x08, {std::uint32_t((ps + high) >> 8), std::uint32_t((ps + high) >> 40)}); // SPI_SHADER_PGM_LO/HI_PS
         s.set(0x76, 0x0b, {13u << 1});                                       // RSRC2_PS: 13 user SGPRs
         s.set(0x76, 0x0c, {std::uint32_t((texture + high) >> 8), std::uint32_t((texture + high) >> 40) | 10u << 20,
@@ -144,7 +145,7 @@ int main() {
                        sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
             [blit endEncoding]; [read commit]; [read waitUntilCompleted];
             const auto* p = static_cast<const std::uint8_t*>(pixel.contents);
-            std::printf("records 0x%x, guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", records, (unsigned long long)high,
+            std::printf("constants 0x%x, records 0x%x, guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", records, (unsigned long long)high,
                         native ? "native textures" : "buffer textures",
                         std::size_t(stats.rendered), (unsigned long long)samples, p[0], p[1], p[2], p[3]);
             auto near = [](unsigned a, unsigned b) { return a + 1 >= b && b + 1 >= a; };
