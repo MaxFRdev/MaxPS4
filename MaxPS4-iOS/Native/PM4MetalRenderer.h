@@ -41,8 +41,9 @@ public:
     // (and nothing encoded) when it cannot be expressed.
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     unsigned kernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
-    // The draws of the current batch, described for the session report.
-    std::string batchDraws;
+    // The draws of the current batch, described for the session report, and
+    // the disassembly of the first programs drawn (VS and PS, with user SGPRs).
+    std::string batchDraws, programListings;
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
     void beginBatch() { endBatch(); batching_ = true; batchDraws.clear(); }
@@ -80,6 +81,8 @@ private:
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
     id<MTLLibrary> library(const std::string& source);
     std::map<std::uint64_t, Target> targets_;
+    std::vector<std::uint64_t> listed_;
+    void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount);
     bool batching_ = false;
     id<MTLRenderCommandEncoder> encoder_ = nil;
     id<MTLCommandBuffer> commands_ = nil;

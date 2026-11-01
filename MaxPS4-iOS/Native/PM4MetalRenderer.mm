@@ -242,6 +242,22 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     return true;
 }
 
+void PM4MetalRenderer::listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) {
+    if (listed_.size() >= 6 || std::find(listed_.begin(), listed_.end(), address) != listed_.end()) return;
+    listed_.push_back(address);
+    std::vector<std::uint32_t> words;
+    for (std::uint32_t word = 0; words.size() < 1024 && code_.read(address + 4 * words.size(), &word, 4);) words.push_back(word);
+    const auto decoded = decodeGCN(words.data(), words.size());
+    char text[160];
+    std::snprintf(text, sizeof text, "\n%s 0x%llx, %zu instructions, SGPR utilisateur :", stage, (unsigned long long)address,
+                  decoded.instructions.size());
+    programListings += text;
+    for (unsigned k = 0; k < userCount && k < 16; ++k) { std::snprintf(text, sizeof text, " %x", user[k]); programListings += text; }
+    if (!decoded) programListings += " (code illisible)";
+    for (std::size_t k = 0; k < decoded.instructions.size() && k < 120; ++k)
+        programListings += "\n    " + gcnDisassemble(decoded.instructions[k]);
+}
+
 void PM4MetalRenderer::endBatch() {
     [encoder_ endEncoding];
     encoder_ = nil; commands_ = nil; attachment_ = nil; batching_ = false;
@@ -464,6 +480,8 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                       (unsigned long long)d.target, d.pitch, d.height, d.swap, d.mask, d.blend, d.indices.size(),
                       d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3], (unsigned long long)d.ps);
         batchDraws += text;
+        listProgram("VS", d.vs, d.vsUser, d.vsUserCount);
+        listProgram("PS", d.ps, d.psUser, d.psUserCount);
         if (native_) {
             unsigned shown = 0;
             for (const auto& t : scanner_.images()) {
