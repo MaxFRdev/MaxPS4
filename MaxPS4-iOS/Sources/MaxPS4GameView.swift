@@ -167,9 +167,12 @@ struct MaxPS4GameView: View {
     @StateObject private var session = MaxPS4GameSession()
     @State private var device = MTLCreateSystemDefaultDevice()
     @State private var touch: UInt32 = 0
+    // The touch right stick, -1...1 on each axis, y growing downwards like the PS4's.
+    @State private var rightStick = CGPoint.zero
     @AppStorage("maxps4.touch.scale") private var touchScale = 1.0
     @AppStorage("maxps4.touch.opacity") private var touchOpacity = 0.85
     @AppStorage("maxps4.pad.stickDpad") private var stickAsDpad = true
+    @AppStorage("maxps4.touch.rightStick") private var rightStickShown = true
     @State private var hasLaunched = false
     @State private var gamepad = MaxPS4GameView.gamepadConnected()
     @AppStorage("maxps4.metal.nativeTextures") private var nativeTextures = true
@@ -192,6 +195,7 @@ struct MaxPS4GameView: View {
         _touchScale = AppStorage(wrappedValue: value("maxps4.touch.scale", 1.0), own("maxps4.touch.scale"))
         _touchOpacity = AppStorage(wrappedValue: value("maxps4.touch.opacity", 0.85), own("maxps4.touch.opacity"))
         _stickAsDpad = AppStorage(wrappedValue: value("maxps4.pad.stickDpad", true), own("maxps4.pad.stickDpad"))
+        _rightStickShown = AppStorage(wrappedValue: value("maxps4.touch.rightStick", true), own("maxps4.touch.rightStick"))
         _nativeTextures = AppStorage(wrappedValue: value("maxps4.metal.nativeTextures", true), own("maxps4.metal.nativeTextures"))
         _tso = AppStorage(wrappedValue: value("maxps4.fex.tso", true), own("maxps4.fex.tso"))
         _scaling = AppStorage(wrappedValue: value("maxps4.display.scaling", "fit"), own("maxps4.display.scaling"))
@@ -242,7 +246,7 @@ struct MaxPS4GameView: View {
                             }
                         }
                         Button(hasLaunched ? "Rejouer" : "Jouer") {
-                            touch = 0; hasLaunched = true
+                            touch = 0; rightStick = .zero; hasLaunched = true
                             MaxPS4GameFolders.shared.remember(directory)
                             let update = MaxPS4GameFolders.useUpdate(for: directory) ? MaxPS4GameFolders.shared.update(for: directory)?.url : nil
                             let addons = MaxPS4GameFolders.shared.addons(for: directory)
@@ -289,7 +293,7 @@ struct MaxPS4GameView: View {
                 HStack {
                     Button {
 #if MAXPS4_FEX_APP
-                        touch = 0; session.input(MaxPS4PadState())
+                        touch = 0; rightStick = .zero; session.input(MaxPS4PadState())
 #endif
                         showingMenu = true
                     } label: {
@@ -326,6 +330,7 @@ struct MaxPS4GameView: View {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Commandes").font(.headline)
                                 Toggle("Stick gauche comme croix directionnelle", isOn: $stickAsDpad)
+                                Toggle("Stick droit tactile", isOn: $rightStickShown)
                                 Text("Taille des commandes tactiles")
                                 Slider(value: $touchScale, in: 0.7...1.5)
                                 Text("Opacité des commandes tactiles")
@@ -333,7 +338,7 @@ struct MaxPS4GameView: View {
                             }.font(.subheadline).tint(.cyan)
                             if session.running {
                                 Button("Arrêter la session", role: .destructive) {
-                                    touch = 0; session.stop(); showingMenu = false
+                                    touch = 0; rightStick = .zero; session.stop(); showingMenu = false
                                 }
                             }
                             // A snapshot of the report, refreshed on demand: the live
@@ -370,18 +375,18 @@ struct MaxPS4GameView: View {
 #if MAXPS4_FEX_APP
         .onReceive(poll) { _ in
             guard session.running, scenePhase == .active, !showingMenu else { return }
-            session.input(Self.padState(touch: touch, stickAsDpad: stickAsDpad))
+            session.input(Self.padState(touch: touch, stick: rightStick, stickAsDpad: stickAsDpad))
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidConnect)) { _ in
-            gamepad = Self.gamepadConnected(); if gamepad { touch = 0 }
+            gamepad = Self.gamepadConnected(); if gamepad { touch = 0; rightStick = .zero }
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in
             gamepad = Self.gamepadConnected()
         }
         // The game waits while its menu is open.
         .onChange(of: showingMenu) { _, open in session.setPaused(open) }
-        .onDisappear { touch = 0; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { touch = 0; session.stop() } }
+        .onDisappear { touch = 0; rightStick = .zero; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { touch = 0; rightStick = .zero; session.stop() } }
         // A running game keeps the screen awake: auto-lock would stop it.
         .onChange(of: session.running, initial: true) { _, running in UIApplication.shared.isIdleTimerDisabled = running }
 #endif
@@ -390,10 +395,11 @@ struct MaxPS4GameView: View {
     // The touch controls plus every connected controller, as one DualShock 4.
     // `stickAsDpad` also presses the D-pad with the left stick (2D games that
     // read only the D-pad); the stick's analog position is always sent.
-    private static func padState(touch: UInt32, stickAsDpad: Bool) -> MaxPS4PadState {
+    private static func padState(touch: UInt32, stick: CGPoint, stickAsDpad: Bool) -> MaxPS4PadState {
         typealias P = MaxPS4PadState
-        var state = P.touch(touch)
-        var left: Float = 0.1, right: Float = 0.1 // Deflection to beat (dead zone first).
+        var state = touchState(touch, stick: stick)
+        // Deflection to beat (dead zone first); the touch stick competes too.
+        var left: Float = 0.1, right = max(0.1, Float(abs(stick.x) + abs(stick.y)))
         func axis(_ value: Float) -> UInt8 { UInt8(max(0, min(255, ((value + 1) * 127.5).rounded()))) }
         func analog(_ value: Float) -> UInt8 { UInt8(max(0, min(255, (value * 255).rounded()))) }
         for controller in GCController.controllers() {
@@ -440,6 +446,13 @@ struct MaxPS4GameView: View {
         }
         return state
     }
+    // The touch buttons and the touch right stick.
+    private static func touchState(_ touch: UInt32, stick: CGPoint) -> MaxPS4PadState {
+        func axis(_ value: CGFloat) -> UInt8 { UInt8(max(0, min(255, ((value + 1) * 127.5).rounded()))) }
+        var state = MaxPS4PadState.touch(touch)
+        if stick != .zero { state.rx = axis(stick.x); state.ry = axis(stick.y) }
+        return state
+    }
     private static func gamepadConnected() -> Bool {
         GCController.controllers().contains { $0.extendedGamepad != nil || $0.microGamepad != nil }
     }
@@ -477,6 +490,10 @@ struct MaxPS4GameView: View {
                     control("↓", label: "Bas", bit: 0x40, size: size)
                 }
                 Spacer(minLength: 0)
+                // Where a DualShock 4 has it: below and left of the face buttons.
+                if rightStickShown {
+                    rightStickControl(size: size * 1.9).padding(.trailing, size * 0.25)
+                }
                 VStack(spacing: 0) {
                     control("△", label: "Triangle", bit: 0x1000, size: size)
                     HStack(spacing: 0) {
@@ -493,6 +510,35 @@ struct MaxPS4GameView: View {
         .accessibilityIdentifier("maxps4.game.controls")
     }
 
+    // Full deflection at 80% of the radius; the knob stays inside the ring.
+    private func rightStickControl(size: CGFloat) -> some View {
+        let radius = size / 2, active = rightStick != .zero
+        return ZStack {
+            Circle().fill(Color.black.opacity(0.25))
+                .overlay(Circle().stroke(active ? Color.cyan : Color.white.opacity(0.35), lineWidth: 1))
+            Text("R").font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(active ? 1 : 0.85))
+                .frame(width: size * 0.42, height: size * 0.42)
+                .background(active ? Color.cyan.opacity(0.50) : Color.white.opacity(0.18), in: Circle())
+                .overlay(Circle().stroke(active ? Color.cyan : Color.white.opacity(0.35), lineWidth: 1))
+                .offset(x: rightStick.x * radius * 0.6, y: rightStick.y * radius * 0.6)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: .purple.opacity(active ? 0.45 : 0.15), radius: 6)
+        .contentShape(Circle())
+        .accessibilityLabel("Stick droit")
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                var x = (value.location.x - radius) / (radius * 0.8)
+                var y = (value.location.y - radius) / (radius * 0.8)
+                let length = (x * x + y * y).squareRoot()
+                if length > 1 { x /= length; y /= length }
+                rightStick = CGPoint(x: x, y: y)
+                session.input(Self.touchState(touch, stick: rightStick))
+            }
+            .onEnded { _ in rightStick = .zero; session.input(Self.touchState(touch, stick: rightStick)) })
+    }
+
     private func control(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
         let pressed = touch & bit != 0
         return Text(name)
@@ -505,12 +551,12 @@ struct MaxPS4GameView: View {
             .contentShape(Circle())
             .accessibilityLabel(label).accessibilityAddTraits(.isButton)
             .accessibilityAction {
-                touch |= bit; session.input(MaxPS4PadState.touch(touch))
+                touch |= bit; session.input(Self.touchState(touch, stick: rightStick))
                 touch &= ~bit
             }
             .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in touch |= bit; session.input(MaxPS4PadState.touch(touch)) }
-                .onEnded { _ in touch &= ~bit; session.input(MaxPS4PadState.touch(touch)) })
+                .onChanged { _ in touch |= bit; session.input(Self.touchState(touch, stick: rightStick)) }
+                .onEnded { _ in touch &= ~bit; session.input(Self.touchState(touch, stick: rightStick)) })
     }
 #endif
 }

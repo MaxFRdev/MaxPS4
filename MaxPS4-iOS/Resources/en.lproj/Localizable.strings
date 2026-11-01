@@ -153,6 +153,8 @@
 "Ajouter un jeu" = "Add a game";
 "Commandes" = "Controls";
 "Stick gauche comme croix directionnelle" = "Left stick as D-pad";
+"Stick droit tactile" = "Touch right stick";
+"Stick droit" = "Right stick";
 "Taille des commandes tactiles" = "Touch controls size";
 "Opacité des commandes tactiles" = "Touch controls opacity";
 "Dernier jeu lancé" = "Last game played";
