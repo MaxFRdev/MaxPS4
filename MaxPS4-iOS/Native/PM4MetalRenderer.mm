@@ -178,7 +178,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     auto* bytes = static_cast<std::uint8_t*>(memory.contents);
     for (std::size_t k = 0; k < ranges.size(); ++k) {
         offset += (ranges[k].base - offset) & 255;
-        if (!code_.read(ranges[k].base, bytes + offset, ranges[k].size)) std::memset(bytes + offset, 0, ranges[k].size);
+        copyGuest(ranges[k].base, bytes + offset, ranges[k].size);
         dispatchState.ranges[3 * k] = ranges[k].base;
         dispatchState.ranges[3 * k + 1] = ranges[k].size;
         dispatchState.ranges[3 * k + 2] = offset;
@@ -329,6 +329,19 @@ void PM4MetalRenderer::endBatch() {
     encoder_ = nil; commands_ = nil; attachment_ = nil; batching_ = false;
 }
 
+void PM4MetalRenderer::copyGuest(std::uint64_t address, std::uint8_t* out, std::uint64_t size) const {
+    if (code_.read(address, out, size)) return;
+    // A descriptor's extent may run past mapped memory (a constant buffer
+    // declaring 64 KiB of which the program reads 64 bytes): keep every
+    // readable page instead of zeroing the whole range.
+    constexpr std::uint64_t page = 4096;
+    for (std::uint64_t done = 0; done < size;) {
+        const std::uint64_t chunk = std::min(size - done, page - (address + done) % page);
+        if (!code_.read(address + done, out + done, chunk)) std::memset(out + done, 0, chunk);
+        done += chunk;
+    }
+}
+
 id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands) {
     // Each draw keeps its own immutable snapshot until its command buffer has
     // finished. In particular, two draws in the same batch cannot share a slot.
@@ -437,7 +450,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         for (std::size_t k = 0; k < ranges.size(); ++k) {
             offset += (ranges[k].base - offset) & 255;
             // An unreadable range stays zero rather than exposing anything else.
-            if (!code_.read(ranges[k].base, bytes + offset, ranges[k].size)) std::memset(bytes + offset, 0, ranges[k].size);
+            copyGuest(ranges[k].base, bytes + offset, ranges[k].size);
             drawState.ranges[3 * k] = ranges[k].base;
             drawState.ranges[3 * k + 1] = ranges[k].size;
             drawState.ranges[3 * k + 2] = offset;

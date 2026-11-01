@@ -108,6 +108,8 @@ private:
     std::vector<Upload> uploads_;
     std::uint64_t pooledBytes_ = 0;
     id<MTLBuffer> uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands);
+    // Guest [address, address + size) into `out`; unreadable pages read as zero.
+    void copyGuest(std::uint64_t address, std::uint8_t* out, std::uint64_t size) const;
     id<MTLRenderPipelineState> pipeline(const PM4Draw& draw, MTLPixelFormat format);
     // `ranges`: (guest start, length, buffer offset) triples; none for the guest window.
     id<MTLTexture> nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory,
