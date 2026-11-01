@@ -398,16 +398,34 @@ private:
         if (i.word0 & 0x100) offset = hex(4ull * (i.word0 & 0xff), "ul");
         else if (i.hasLiteral) offset = hex(4ull * i.literal, "ul");
         else offset = "ulong(" + scalar(i.word0 & 0xff, i) + ")";
+        // Several dwords are read in a loop after one gcn_locate of the whole
+        // span: unrolled, a 16-dword load in copy mode (a range search per
+        // dword) made Metal's vertex stage rasterize nothing (Mortal Kombat:
+        // Legacy Kollection's matrix VS), while the same function was correct
+        // without rasterization.
+        const std::string n = std::to_string(count);
         if (i.opcode >= 8) {
             body_ += "{ ulong o = " + offset + "; ulong a = gcn_u64(" + s(base) + ", " + s(base + 1) + " & 0xffffu) + o; "
                      "uint stride = (" + s(base + 1) + " >> 16) & 0x3fffu; "
                      "ulong lim = stride != 0u ? ulong(" + s(base + 2) + ") * stride : ulong(" + s(base + 2) + "); ";
-            for (unsigned n = 0; n < count; ++n)
-                setScalar(d + n, "(o + " + std::to_string(4 * n + 4) + "ul <= lim) ? gcn_ld32(M, a + " + std::to_string(4 * n) + "ul) : 0u");
+            if (count == 1) setScalar(d, "(o + 4ul <= lim) ? gcn_ld32(M, a) : 0u");
+            else {
+                body_ += "uint w[" + n + "]; ulong at = 0ul; "
+                         "if (o + " + std::to_string(4 * count) + "ul <= lim && gcn_locate(M, a, " + std::to_string(4 * count) + "ul, at)) "
+                         "{ for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_packed32(M, at + 4ul * k); } "
+                         "else { for (uint k = 0u; k < " + n + "u; ++k) w[k] = (o + 4ul * k + 4ul <= lim) ? gcn_ld32(M, a + 4ul * k) : 0u; } ";
+                for (unsigned k = 0; k < count; ++k) setScalar(d + k, "w[" + std::to_string(k) + "]");
+            }
             body_ += "}";
         } else {
             body_ += "{ ulong a = (gcn_u64(" + s(base) + ", " + s(base + 1) + ") & 0xfffffffffffful) + " + offset + "; ";
-            for (unsigned n = 0; n < count; ++n) setScalar(d + n, "gcn_ld32(M, a + " + std::to_string(4 * n) + "ul)");
+            if (count == 1) setScalar(d, "gcn_ld32(M, a)");
+            else {
+                body_ += "uint w[" + n + "]; ulong at = 0ul; "
+                         "if (gcn_locate(M, a, " + std::to_string(4 * count) + "ul, at)) { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_packed32(M, at + 4ul * k); } "
+                         "else { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_ld32(M, a + 4ul * k); } ";
+                for (unsigned k = 0; k < count; ++k) setScalar(d + k, "w[" + std::to_string(k) + "]");
+            }
             body_ += "}";
         }
         return out_.error.empty();
