@@ -283,6 +283,7 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
               "    device float4* out [[buffer(4)]]) {\n"
               "    GCNVaryings o = gcn_run_vertex(indices[i], 0u, mem, D" + (native_ ? ", N" : "") + ");\n"
               "    out[i] = o.position;\n}\n";
+    source += "fragment float4 gcn_plain_fragment(GCNVaryings in [[stage_in]]) { return float4(1.0f); }\n";
     // The same positions from Metal's vertex stage (rasterization off), through gcn_vertex itself.
     source += std::string("vertex void gcn_vertex_capture(uint vid [[vertex_id]], uint iid [[instance_id]],\n"
                           "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]],\n"
@@ -352,8 +353,15 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
     [render endEncoding];
     [renders commit];
     [renders waitUntilCompleted];
-    // The renderer's own pipeline for this draw over a 64x64 target, its whole viewport, counting samples.
-    if (id<MTLRenderPipelineState> real = pipeline(d, d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm)) {
+    // The renderer's own pipeline for this draw over a 64x64 target, its whole viewport, counting samples;
+    // then gcn_vertex with a fragment that keeps every sample.
+    MTLRenderPipelineDescriptor* plain = [MTLRenderPipelineDescriptor new];
+    plain.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
+    plain.fragmentFunction = [library newFunctionWithName:@"gcn_plain_fragment"];
+    plain.colorAttachments[0].pixelFormat = d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> plainState = [device_ newRenderPipelineStateWithDescriptor:plain error:&failure];
+    for (id<MTLRenderPipelineState> real : {pipeline(d, d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm), plainState}) {
+        if (!real) { text += ", pipeline absent"; continue; }
         MTLTextureDescriptor* small = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm
                                                                                        width:64 height:64 mipmapped:NO];
         small.usage = MTLTextureUsageRenderTarget; small.storageMode = MTLStorageModePrivate;
@@ -375,7 +383,7 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
         [e endEncoding]; [drawn commit]; [drawn waitUntilCompleted];
         char item[96];
-        std::snprintf(item, sizeof item, ", pipeline réel sur 64x64 : %llu échantillons",
+        std::snprintf(item, sizeof item, ", %s sur 64x64 : %llu échantillons", real == plainState ? "fragment simple" : "pipeline réel",
                       (unsigned long long)*static_cast<const std::uint64_t*>(visibility.contents));
         text += item;
     }
