@@ -257,12 +257,10 @@ void PM4MetalRenderer::listProgram(const char* stage, std::uint64_t address, con
         if ((i.encoding == GCNEncoding::sopp && i.opcode == 1) || (i.encoding == GCNEncoding::sop1 && i.opcode == 32)) break;
     }
     char text[160];
-    std::snprintf(text, sizeof text, "
-%s 0x%llx, %zu instructions, SGPR utilisateur :", stage, (unsigned long long)address, code.size());
+    std::snprintf(text, sizeof text, "\n%s 0x%llx, %zu instructions, SGPR utilisateur :", stage, (unsigned long long)address, code.size());
     programListings += text;
     for (unsigned k = 0; k < userCount && k < 16; ++k) { std::snprintf(text, sizeof text, " %x", user[k]); programListings += text; }
-    for (const auto& i : code) programListings += "
-    " + gcnDisassemble(i);
+    for (const auto& i : code) programListings += "\n    " + gcnDisassemble(i);
 }
 
 void PM4MetalRenderer::endBatch() {
