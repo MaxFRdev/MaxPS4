@@ -145,7 +145,7 @@ int main() {
                        sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
             [blit endEncoding]; [read commit]; [read waitUntilCompleted];
             const auto* p = static_cast<const std::uint8_t*>(pixel.contents);
-            std::printf("constants 0x%x, records 0x%x, guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", records, (unsigned long long)high,
+            std::printf("constants 0x%x, records 0x%x, guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", constantRecords, records, (unsigned long long)high,
                         native ? "native textures" : "buffer textures",
                         std::size_t(stats.rendered), (unsigned long long)samples, p[0], p[1], p[2], p[3]);
             auto near = [](unsigned a, unsigned b) { return a + 1 >= b && b + 1 >= a; };
