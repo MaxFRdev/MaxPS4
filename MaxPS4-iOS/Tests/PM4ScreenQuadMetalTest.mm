@@ -130,7 +130,7 @@ int main() {
                 else stats.fail(renderer.error);
             });
             renderer.endBatch();
-            if (!high && !native) std::printf("draw: %s\n", renderer.batchDraws.c_str());
+            if (!high && !native) std::printf("draw: %s\nprobe: %s\n", renderer.batchDraws.c_str(), renderer.probeReport.c_str());
             [command commit]; [command waitUntilCompleted];
             assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
             if (stats.failed) { std::printf("FAIL draw: %s\n", stats.error.c_str()); return 1; }
