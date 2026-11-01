@@ -86,15 +86,18 @@ int main() {
         bool ok = true;
         // Guest addresses as in the game (above 4 GiB, 0x70...) or as in the
         // other tests: the arena seen at `high` + its own addresses.
+        // Vertex buffers sized exactly, or with the "unbounded" record count
+        // engines give dynamic buffers (far beyond what a draw reads).
+        for (const std::uint32_t records : {4u, 0xffffffffu})
         for (const std::uint64_t high : {std::uint64_t(0), std::uint64_t(0x7000000000)}) {
         const GCNMemory memory{
             [&](std::uint64_t a, void* d, std::size_t n) { return a >= high && arena.memory.read(a - high, d, n); },
             [&](std::uint64_t a, const void* d, std::size_t n) { return a >= high && arena.memory.write(a - high, d, n); }};
         auto lo = [&](std::uint64_t a) { return std::uint32_t(a + high); };
         auto hi = [&](std::uint64_t a) { return std::uint32_t((a + high) >> 32); };
-        arena.code(table, {lo(vertices), hi(vertices) | 20u << 16, 4, 0x5ffac,        // float2 position
-                           lo(vertices + 8), hi(vertices + 8) | 20u << 16, 4, 0x5ffac, // float2 UV
-                           lo(vertices + 16), hi(vertices + 16) | 20u << 16, 4, 0x50fac}); // 8_8_8_8 UNORM colour
+        arena.code(table, {lo(vertices), hi(vertices) | 20u << 16, records, 0x5ffac,        // float2 position
+                           lo(vertices + 8), hi(vertices + 8) | 20u << 16, records, 0x5ffac, // float2 UV
+                           lo(vertices + 16), hi(vertices + 16) | 20u << 16, records, 0x50fac}); // 8_8_8_8 UNORM colour
         Stream s;
         s.set(0x76, 0x48, {std::uint32_t((vs + high) >> 8), std::uint32_t((vs + high) >> 40)}); // SPI_SHADER_PGM_LO/HI_VS
         s.set(0x76, 0x4b, {10u << 1});                                       // RSRC2_VS: 10 user SGPRs
@@ -139,7 +142,7 @@ int main() {
                        sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
             [blit endEncoding]; [read commit]; [read waitUntilCompleted];
             const auto* p = static_cast<const std::uint8_t*>(pixel.contents);
-            std::printf("guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", (unsigned long long)high,
+            std::printf("records 0x%x, guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", records, (unsigned long long)high,
                         native ? "native textures" : "buffer textures",
                         std::size_t(stats.rendered), (unsigned long long)samples, p[0], p[1], p[2], p[3]);
             auto near = [](unsigned a, unsigned b) { return a + 1 >= b && b + 1 >= a; };
