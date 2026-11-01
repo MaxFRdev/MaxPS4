@@ -763,9 +763,17 @@ inline std::string gcnMetalComputeEntry(const std::string& name) {
            "    " + name + "(L, M, Q);\n}\n";
 }
 
+// One past the highest bit set in `bits` (at least 1): an array size.
+inline unsigned gcnHighestUsed(std::uint32_t bits) { unsigned n = 1; while (n < 32 && (bits >> n)) ++n; return n; }
 // The Metal build of GCNShaderRuntime.hpp: put it before translated programs.
-inline std::string gcnMetalPrelude(bool nativeTextures = false) {
-    std::string text = R"MSL(#include <metal_stdlib>
+// `params`, `attrs` and `colors` size the lane's parameter, attribute and
+// colour arrays: one past the highest the library's programs use. A lane
+// sized for 32 of each (1.3 KiB per invocation) made Metal's vertex stage
+// rasterize nothing for some programs in copy mode.
+inline std::string gcnMetalPrelude(bool nativeTextures = false, unsigned params = 32, unsigned attrs = 32, unsigned colors = 8) {
+    std::string text = "#define GCN_PARAMS " + std::to_string(params ? params : 1) + "u\n#define GCN_ATTRS " +
+                       std::to_string(attrs ? attrs : 1) + "u\n#define GCN_COLORS " + std::to_string(colors ? colors : 1) + "u\n";
+    text += R"MSL(#include <metal_stdlib>
 using namespace metal;
 #define GCN_NATIVE_TEXTURES 0
 #define GCN_THREAD thread
@@ -788,14 +796,15 @@ struct GCNMemory { device const uchar* p; ulong base; ulong size; constant ulong
 struct GCNQuad { uint unused; };
 struct GCNLane {
     uint user[20]; uint vinit[24]; bool exec; uint quadLane;
-    float4 attr[32];
-    float4 pos; float4 param[32]; float4 color[8]; uint colorWritten; bool killed;
+    float4 attr[GCN_ATTRS];
+    float4 pos; float4 param[GCN_PARAMS]; float4 color[GCN_COLORS]; uint colorWritten; bool killed;
 };
 GCN_FN void gcn_clear(thread GCNLane& L) {
     for (uint k = 0u; k < 20u; ++k) L.user[k] = 0u;
     for (uint k = 0u; k < 24u; ++k) L.vinit[k] = 0u;
-    for (uint k = 0u; k < 32u; ++k) { L.attr[k] = float4(0.0f); L.param[k] = float4(0.0f); }
-    for (uint k = 0u; k < 8u; ++k) L.color[k] = float4(0.0f);
+    for (uint k = 0u; k < GCN_ATTRS; ++k) L.attr[k] = float4(0.0f);
+    for (uint k = 0u; k < GCN_PARAMS; ++k) L.param[k] = float4(0.0f);
+    for (uint k = 0u; k < GCN_COLORS; ++k) L.color[k] = float4(0.0f);
     L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false;
 }
 // gcn_clear without attr/param/color: zeroing those arrays for every pixel
@@ -875,8 +884,8 @@ GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4
 }
 // Attributes arrive interpolated by Metal: p1 is a no-op, p2 the value.
 GCN_FN float gcn_interp1(thread GCNLane& L, uint attr, uint chan, float i) { return 0.0f; }
-GCN_FN float gcn_interp2(thread GCNLane& L, uint attr, uint chan, float j, float previous) { return L.attr[attr & 31u][chan & 3u]; }
-GCN_FN float gcn_interp_mov(thread GCNLane& L, uint attr, uint chan, uint select) { return L.attr[attr & 31u][chan & 3u]; }
+GCN_FN float gcn_interp2(thread GCNLane& L, uint attr, uint chan, float j, float previous) { return L.attr[min(attr, GCN_ATTRS - 1u)][chan & 3u]; }
+GCN_FN float gcn_interp_mov(thread GCNLane& L, uint attr, uint chan, uint select) { return L.attr[min(attr, GCN_ATTRS - 1u)][chan & 3u]; }
 GCN_FN bool gcn_quad_any(thread GCNQuad& Q, thread GCNLane& L, bool b) { return quad_any(b); }
 GCN_FN uint gcn_quad_shuffle(thread GCNQuad& Q, thread GCNLane& L, uint value, uint lane) { return quad_shuffle(value, ushort(lane)); }
 )MSL";

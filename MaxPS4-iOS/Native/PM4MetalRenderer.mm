@@ -64,7 +64,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     if (!vs) { fail("VS translation: " + vs.error); return nil; }
     const auto ps = translateGCN(code_, d.ps, psOptions);
     if (!ps) { fail("PS translation: " + ps.error); return nil; }
-    const std::string source = gcnMetalPrelude(native_) + vs.source + ps.source +
+    const std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
                                gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
     id<MTLLibrary> library = this->library(source);
     if (!library) return nil;
@@ -125,7 +125,7 @@ id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
     for (unsigned k = 0; k < 16; ++k) options.userData[k] = c.user[k];
     const auto cs = translateGCN(code_, c.program, options);
     if (!cs) { fail("CS translation: " + cs.error); return nil; }
-    id<MTLLibrary> library = this->library(gcnMetalPrelude(native_) + cs.source + gcnMetalComputeEntry("cs_program"));
+    id<MTLLibrary> library = this->library(gcnMetalPrelude(native_, 1, 1, 1) + cs.source + gcnMetalComputeEntry("cs_program"));
     if (!library) return nil;
     NSError* failure = nil;
     id<MTLComputePipelineState> state = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"gcn_compute"]
@@ -275,7 +275,7 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
     const auto vs = translateGCN(code_, d.vs, vsOptions);
     const auto ps = translateGCN(code_, d.ps, psOptions);
     if (!vs || !ps) return ", sonde GPU : traduction impossible";
-    std::string source = gcnMetalPrelude(native_) + vs.source + ps.source +
+    std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
                          gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
     source += std::string("kernel void gcn_vertex_probe(uint i [[thread_position_in_grid]], device const uchar* mem [[buffer(0)]],\n"
                           "    constant GCNDrawState& D [[buffer(1)]], device const uint* indices [[buffer(2)]],\n") +
