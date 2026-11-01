@@ -91,7 +91,7 @@ int main() {
             for (unsigned variant = 1; variant <= 2; ++variant) {
                 MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
                 d.vertexFunction = [library newFunctionWithName:variant == 1 ? @"capture" : @"capture_positioned"];
-                d.rasterizationEnabled = NO;
+                d.rasterizationEnabled = variant == 1 ? NO : YES;
                 d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
                 id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:d error:&error];
                 if (!pipeline) { std::printf("FAIL pipeline: %s\n", error.localizedDescription.UTF8String); return 1; }
