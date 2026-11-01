@@ -43,6 +43,7 @@ public:
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;
     unsigned nativeDraws = 0; // draws given a native texture (nativeTextures)
+    unsigned targetReads = 0; // of which, a colour target an earlier draw rendered
     // T#s refused: none captured (per draw), format/tiling, outside the copied
     // ranges, alignment, Metal view refused; and the last refused T#.
     unsigned nativeMisses[5] = {};
@@ -71,7 +72,7 @@ private:
     id<MTLRenderPipelineState> pipeline(const PM4Draw& draw, MTLPixelFormat format);
     // `ranges`: (guest start, length, buffer offset) triples; none for the guest window.
     id<MTLTexture> nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory,
-                                 const std::uint64_t* ranges, unsigned rangeCount);
+                                 const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing);
     bool fail(const std::string& message) { error = message; return false; }
 };
 } // namespace maxps4::gpu

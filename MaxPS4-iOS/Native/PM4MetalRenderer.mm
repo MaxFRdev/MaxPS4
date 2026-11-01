@@ -138,7 +138,7 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
 }
 
 id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory,
-                                               const std::uint64_t* ranges, unsigned rangeCount) {
+                                               const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing) {
     // dfmt 8_8_8_8 or 5_6_5 (gcn_texel_at reads both as unorm whatever the nfmt), linear tiling.
     const unsigned dfmt = (t[1] >> 20) & 63;
     const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
@@ -152,6 +152,17 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         nativeLastMiss = text;
         return nil;
     };
+    // A colour target lives only in its Metal texture, never written back to
+    // guest memory: an 8_8_8_8 T# at its address reads it there (an emulator
+    // renders its console's frame, then draws that frame scaled on screen).
+    if (dfmt == 10) {
+        const auto rendered = targets_.find(base);
+        id<MTLTexture> texture = rendered == targets_.end() ? nil : rendered->second.texture;
+        if (texture && texture != drawing && !rendered->second.fresh && texture.width >= width && texture.height >= height) {
+            ++targetReads;
+            return texture;
+        }
+    }
     if ((dfmt != 10 && dfmt != 16) || ((t[3] >> 20) & 31) != 8 || pitch < width) return miss(1, 0);
     const MTLPixelFormat format = dfmt == 10 ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatB5G6R5Unorm;
     const std::uint64_t rowBytes = pitch * (dfmt == 10 ? 4 : 2), bytes = rowBytes * height;
@@ -279,7 +290,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         std::array<std::uint32_t, 8> descriptor{};
         if (scanner_.images().empty()) ++nativeMisses[0];
         for (const auto& t : scanner_.images())
-            if ((image = nativeTexture(t, memory, drawState.ranges, drawState.rangeCount))) { descriptor = t; break; }
+            if ((image = nativeTexture(t, memory, drawState.ranges, drawState.rangeCount, target.texture))) { descriptor = t; break; }
         id<MTLBuffer> arguments = nativeArguments_ ? uploadBuffer(nativeArguments_.encodedLength, commands) : nil;
         if (!arguments) {
             if (!batching_) [encoder endEncoding];

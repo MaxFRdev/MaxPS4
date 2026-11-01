@@ -32,8 +32,8 @@ struct GameMetalState {
     NSString* report() const {
         const unsigned* m = renderer.nativeMisses;
         NSString* native = nativeTextures ? [NSString stringWithFormat:
-            @"\nTextures natives : %u dessins · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
-            renderer.nativeDraws, m[0], m[1], m[2], m[3], m[4],
+            @"\nTextures natives : %u dessins (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
+            renderer.nativeDraws, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
         return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused,
