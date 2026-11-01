@@ -284,6 +284,15 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
               "    GCNVaryings o = gcn_run_vertex(indices[i], 0u, mem, D" + (native_ ? ", N" : "") + ");\n"
               "    out[i] = o.position;\n}\n";
     source += "fragment float4 gcn_plain_fragment(GCNVaryings in [[stage_in]]) { return float4(1.0f); }\n";
+    // Memory as the GPU sees it: the draw state's range table and, for each
+    // range, gcn_ld32 at its start (the locate path) and the raw word.
+    source += "kernel void gcn_memory_probe(uint i [[thread_position_in_grid]], device const uchar* mem [[buffer(0)]],\n"
+              "    constant GCNDrawState& D [[buffer(1)]], device uint4* out [[buffer(4)]]) {\n"
+              "    if (i == 0u) { out[0] = uint4(D.rangeCount, uint(D.size), uint(D.base), uint(D.base >> 32)); return; }\n"
+              "    uint k = i - 1u; if (k >= D.rangeCount) return;\n"
+              "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount };\n"
+              "    ulong start = D.ranges[3u * k]; ulong at = D.ranges[3u * k + 2u];\n"
+              "    out[i] = uint4(uint(start), uint(start >> 32), gcn_ld32(M, start), *(device const uint*)(mem + at));\n}\n";
     // gcn_vertex's own output as rasterized: the position it returns, also written to buffer(4).
     source += std::string("vertex GCNVaryings gcn_vertex_traced(uint vid [[vertex_id]], uint iid [[instance_id]],\n"
                           "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]],\n"
@@ -330,7 +339,38 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
     [commands commit];
     [commands waitUntilCompleted];
     if (commands.error) return std::string(", sonde GPU : ") + commands.error.localizedDescription.UTF8String;
-    std::string text = ", positions GPU :";
+    std::string text;
+    if (id<MTLComputePipelineState> memoryProbe = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"gcn_memory_probe"] error:&failure]) {
+        const auto* drawState = static_cast<const std::uint8_t*>(state);
+        std::uint32_t rangeCount = 0;
+        std::memcpy(&rangeCount, drawState + 152, 4); // GCNDrawState::rangeCount
+        const unsigned slots = 1 + std::min(rangeCount, 16u);
+        id<MTLBuffer> words = [device_ newBufferWithLength:slots * 16 options:MTLResourceStorageModeShared];
+        std::memset(words.contents, 0xee, slots * 16);
+        id<MTLCommandBuffer> c = [probeQueue_ commandBuffer];
+        id<MTLComputeCommandEncoder> e = [c computeCommandEncoder];
+        [e setComputePipelineState:memoryProbe];
+        [e setBuffer:memory offset:0 atIndex:0];
+        [e setBytes:state length:stateBytes atIndex:1];
+        [e setBuffer:words offset:0 atIndex:4];
+        [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(slots, 1, 1)];
+        [e endEncoding]; [c commit]; [c waitUntilCompleted];
+        const auto* w = static_cast<const std::uint32_t*>(words.contents);
+        char item[160];
+        std::snprintf(item, sizeof item, ", mémoire GPU : %u zones (CPU %u)", w[0], rangeCount);
+        text += item;
+        for (unsigned k = 0; k + 1 < slots; ++k) {
+            std::uint64_t ranges[3];
+            std::memcpy(ranges, drawState + 160 + 24 * k, 24); // GCNDrawState::ranges
+            std::uint32_t cpu = 0;
+            if (ranges[2] + 4 <= memory.length) std::memcpy(&cpu, static_cast<const std::uint8_t*>(memory.contents) + ranges[2], 4);
+            const std::uint32_t* g = w + 4 * (k + 1);
+            std::snprintf(item, sizeof item, " [0x%llx : GPU 0x%llx lu 0x%x brut 0x%x, CPU 0x%x]", (unsigned long long)ranges[0],
+                          (unsigned long long)(std::uint64_t(g[0]) | std::uint64_t(g[1]) << 32), g[2], g[3], cpu);
+            text += item;
+        }
+    }
+    text += ", positions GPU :";
     const auto* p = static_cast<const float*>(out.contents);
     for (unsigned k = 0; k < count; ++k) {
         char item[96];
