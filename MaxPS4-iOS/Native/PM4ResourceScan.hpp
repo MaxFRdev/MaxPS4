@@ -6,6 +6,10 @@
 // receives copies of these ranges only (PM4MetalRenderer), never the whole
 // guest address space. A resource used only on a path that representative
 // lane does not take is missed and reads as zero on the GPU, never outside.
+// A V# beyond the copy limit (engines give dynamic buffers an unbounded
+// record count) is copied only where the draw reads it: for the vertex
+// program, the elements of the draw's index range around the one the lane
+// read; elsewhere, a window around the lane's address.
 #include "PM4DrawCollector.hpp"
 #include <algorithm>
 #include <array>
@@ -28,9 +32,28 @@ public:
         if (bytes && bytes <= largest && base + bytes > base) found_.push_back({base, bytes});
     };
     auto& wave = wave_;
+    std::uint32_t first = d.indices.empty() ? 0 : d.indices[0], lowest = first, highest = first;
+    for (const auto i : d.indices) { lowest = std::min(lowest, i); highest = std::max(highest, i); }
+    auto oversized = [&](bool vertex) {
+        return [&, vertex](std::uint64_t base, std::uint64_t bytes, std::uint32_t stride, std::uint64_t address) {
+            if (bytes <= largest || base + bytes <= base) return;
+            const std::uint64_t end = base + bytes;
+            std::uint64_t from, to;
+            if (vertex && stride) {
+                const std::uint64_t before = std::uint64_t(first - lowest) * stride, after = std::uint64_t(highest - first + 1) * stride;
+                from = address - base >= before ? address - before : base;
+                to = end - address >= after ? address + after : end;
+            } else {
+                from = address - base >= window ? address - window : base;
+                to = end - address >= window ? address + window : end;
+            }
+            if (to > from) note(from, std::min<std::uint64_t>(to - from, largest));
+        };
+    };
     {
         wave.reset();
         wave.resource = note;
+        wave.buffer = oversized(true);
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
         for (unsigned k = 0; k < d.vsUserCount; ++k) wave.s[k] = d.vsUser[k];
         wave.v(0, 0) = d.indices.empty() ? 0 : d.indices[0];
@@ -45,6 +68,7 @@ public:
     {
         wave.reset();
         wave.resource = note;
+        wave.buffer = oversized(false);
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
         for (unsigned k = 0; k < d.psUserCount; ++k) wave.s[k] = d.psUser[k];
         const float x = float(d.scissor[0] + d.scissor[2]) / 2, y = float(d.scissor[1] + d.scissor[3]) / 2;
@@ -63,7 +87,7 @@ public:
     }
     // Sorted, with overlapping or nearly adjacent (4 KiB) ranges merged.
     wave.resource = {}; // Do not retain the callback to this scan's stack.
-    wave.imageResource = {};
+    wave.imageResource = {}; wave.buffer = {};
     std::sort(found_.begin(), found_.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
     for (const auto& r : found_) {
         if (!merged_.empty() && r.base <= merged_.back().base + merged_.back().size + 4096) {
@@ -87,9 +111,15 @@ public:
             if (bytes && bytes <= largest && base + bytes > base) stored_.push_back({base, bytes});
         };
         wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
+        wave.buffer = [&](std::uint64_t base, std::uint64_t bytes, std::uint32_t, std::uint64_t address) {
+            if (bytes <= largest || base + bytes <= base) return;
+            const std::uint64_t from = address - base >= window ? address - window : base;
+            const std::uint64_t to = base + bytes - address >= window ? address + window : base + bytes;
+            if (to > from) found_.push_back({from, std::min<std::uint64_t>(to - from, largest)});
+        };
         for (unsigned k = 0; k < c.userCount; ++k) wave.s[k] = c.user[k];
         wave.run(c.program);
-        wave.resource = {}; wave.stored = {}; wave.imageResource = {};
+        wave.resource = {}; wave.stored = {}; wave.imageResource = {}; wave.buffer = {};
         std::sort(found_.begin(), found_.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
         for (const auto& r : found_) {
             if (!merged_.empty() && r.base <= merged_.back().base + merged_.back().size + 4096) {
@@ -105,6 +135,8 @@ public:
     bool vertexRan() const { return vsRan_; }
     const std::string& vertexError() const { return vsError_; }
 private:
+    // Half the span copied around an oversized V#'s access outside the vertex program.
+    static constexpr std::uint64_t window = 1ull << 20;
     GCNCodeCache cache_;
     GCNWave wave_;
     std::vector<PM4Range> found_, merged_, stored_;

@@ -144,6 +144,9 @@ public:
     std::function<void(const std::array<std::uint32_t, 8>&)> imageResource;
     // Called as `resource` for the resources a store instruction writes.
     std::function<void(std::uint64_t base, std::uint64_t bytes)> stored;
+    // Called with every V# access: its extent, stride and the address the
+    // first active lane reads or writes (base when no lane is active).
+    std::function<void(std::uint64_t base, std::uint64_t bytes, std::uint32_t stride, std::uint64_t address)> buffer;
 
     std::uint32_t& v(unsigned reg, unsigned lane) { return v_[std::size_t(reg & 0xff) * lanes_ + lane]; }
     std::uint64_t exec() const { return std::uint64_t(s[126]) | std::uint64_t(s[127]) << 32; }
@@ -156,7 +159,7 @@ public:
     void reset() {
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
-        attribute = {}; resource = {}; imageResource = {}; stored = {}; images = nullptr;
+        attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr;
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
 
@@ -700,6 +703,16 @@ private:
         if (format && !bufferLayout(dfmt, channels, bits)) return fail("buffer data format " + std::to_string(dfmt));
         if (resource) resource(base, stride ? std::uint64_t(records) * stride : records);
         if (store && stored) stored(base, stride ? std::uint64_t(records) * stride : records);
+        if (buffer) {
+            std::uint64_t address = base;
+            for (unsigned lane = 0; lane < lanes_; ++lane) {
+                if (!active(lane)) continue;
+                address = base + soffset + instOffset + std::uint64_t(idxen ? v(vaddr, lane) : 0) * stride +
+                          (offen ? v(vaddr + (idxen ? 1 : 0), lane) : 0);
+                break;
+            }
+            buffer(base, stride ? std::uint64_t(records) * stride : records, stride, address);
+        }
         for (unsigned lane = 0; lane < lanes_; ++lane) {
             if (!active(lane)) continue;
             const std::uint32_t index = idxen ? v(vaddr, lane) : 0;
