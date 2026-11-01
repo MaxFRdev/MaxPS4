@@ -29,6 +29,11 @@ int main() {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) { std::puts("SKIP matrix quad: no Metal device"); return 0; }
         Arena arena;
+        arena.code(0x10100, {      // the ImGui-style VS of PM4ScreenQuadMetalTest
+            0xbeeb03ff, 0x00000012, 0xbe802100, 0xc284050c, 0xc2c00500, 0xbf8c007f,
+            0x7e02020b, 0x7e04020a, 0x7e060209, 0x7e000208, 0x3e020803, 0x3e040802, 0x3e060801, 0x3e000800,
+            0x3e020a07, 0x3e040a06, 0x3e060a05, 0x3e000a04, 0xf80008cf, 0x01020300, 0x7e080280,
+            0xf800021f, 0x0f0e0d0c, 0xf800020f, 0x04040908, 0xbf810000});
         arena.code(vs, {
             0xbeeb03ff, 0x00000014, // s_mov_b32 vcc_hi, 0x14
             0xbe802100,             // s_swappc_b64 s[0:1], s[0:1]
@@ -88,6 +93,7 @@ int main() {
         // other tests: the arena seen at `high` + its own addresses.
         // Vertex buffers sized exactly, or with the "unbounded" record count
         // engines give dynamic buffers (far beyond what a draw reads).
+        for (const std::uint64_t program : {vs, std::uint64_t(0x10100)})
         for (const std::uint32_t constantRecords : {4u, 0x1000u})
         for (const std::uint32_t records : {4u, 0xffffffffu})
         for (const std::uint64_t high : {std::uint64_t(0), std::uint64_t(0x7000000000)}) {
@@ -101,7 +107,7 @@ int main() {
                            lo(vertices + 12), hi(vertices + 12) | 24u << 16, records, 0x5ffac, // float2 UV
                            lo(vertices + 20), hi(vertices + 20) | 24u << 16, records, 0x50fac}); // 8_8_8_8 UNORM colour
         Stream s;
-        s.set(0x76, 0x48, {std::uint32_t((vs + high) >> 8), std::uint32_t((vs + high) >> 40)}); // SPI_SHADER_PGM_LO/HI_VS
+        s.set(0x76, 0x48, {std::uint32_t((program + high) >> 8), std::uint32_t((program + high) >> 40)}); // SPI_SHADER_PGM_LO/HI_VS
         s.set(0x76, 0x4b, {10u << 1});                                       // RSRC2_VS: 10 user SGPRs
         s.set(0x76, 0x4c, {lo(fetch), hi(fetch), lo(table), hi(table),
                            lo(constants), hi(constants) | 16u << 16, constantRecords, 0x20077fac, 0, 0});
@@ -145,7 +151,7 @@ int main() {
                        sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
             [blit endEncoding]; [read commit]; [read waitUntilCompleted];
             const auto* p = static_cast<const std::uint8_t*>(pixel.contents);
-            std::printf("constants 0x%x, records 0x%x, guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", constantRecords, records, (unsigned long long)high,
+            std::printf("VS 0x%llx, constants 0x%x, records 0x%x, guest 0x%llx, %s: %zu draws, %llu samples, centre %u %u %u %u\n", (unsigned long long)program, constantRecords, records, (unsigned long long)high,
                         native ? "native textures" : "buffer textures",
                         std::size_t(stats.rendered), (unsigned long long)samples, p[0], p[1], p[2], p[3]);
             auto near = [](unsigned a, unsigned b) { return a + 1 >= b && b + 1 >= a; };
