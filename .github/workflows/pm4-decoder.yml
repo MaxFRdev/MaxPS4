@@ -106,6 +106,8 @@ jobs:
           xcrun clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Native/PM4MetalRenderer.mm \
             MaxPS4-iOS/Tests/PM4NativeTextureMetalTest.mm -framework Foundation -framework Metal -o build/pm4/pm4-native-texture-test
           build/pm4/pm4-native-texture-test
+          xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Native/PM4MetalRenderer.mm             MaxPS4-iOS/Tests/PM4ScreenQuadMetalTest.mm -framework Foundation -framework Metal -o build/pm4/pm4-screen-quad-test
+          build/pm4/pm4-screen-quad-test
           xcrun clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNShaderCostMetalTest.mm \
             -framework Foundation -framework Metal -o build/pm4/gcn-shader-cost-test
           build/pm4/gcn-shader-cost-test
