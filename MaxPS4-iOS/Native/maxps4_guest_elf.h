@@ -47,9 +47,11 @@ public:
     static constexpr uint64_t generalHeap = uint64_t(1024) * 1024 * 1024, generalHeapPage = 0x4000;
     static constexpr uint64_t generalHeapSizes[] = {24 * generalHeap, 16 * generalHeap, 12 * generalHeap, 8 * generalHeap,
                                                     5 * generalHeap, 3 * generalHeap, generalHeap};
-    // Address space left free after the reservation when possible: about 30
-    // guest threads' FEX lookup caches (fexLookupCacheBytes each).
-    static constexpr uint64_t generalHeadroom = 8 * generalHeap;
+    // Address space left free after the reservation when possible: about 11
+    // guest threads' FEX lookup caches (fexLookupCacheBytes each). iOS gives
+    // little address space: 8 GiB of room left Mortal Kombat: Legacy
+    // Kollection (7 threads) a 5 GiB window and no image.
+    static constexpr uint64_t generalHeadroom = 3 * generalHeap;
     // What FEX reserves per guest thread for its lookup cache (pinned FEX:
     // 2^36 / 4 KiB * 8 + 128 MiB code pointers + 1 Mi * 16 bytes of L1). A
     // failed reservation is not checked there: the thread would crash.
