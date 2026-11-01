@@ -37,6 +37,7 @@ public:
     void endBatch();
     // The texture holding colour target `address`, or nil if never drawn.
     id<MTLTexture> target(std::uint64_t address) const;
+    std::size_t targetCount() const { return targets_.size(); }
     std::string error;
     unsigned pipelinesBuilt = 0;
     unsigned lastRanges = 0; // memory ranges copied for the last draw (copy mode)

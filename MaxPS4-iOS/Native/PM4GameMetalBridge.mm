@@ -28,6 +28,10 @@ struct GameMetalState {
     // The previous submission, still running on the GPU while the game goes on.
     id<MTLCommandBuffer> inflight;
     double encodeMs = 0, waitMs = 0, renderGpuMs = -1, copyMs = 0, copyGpuMs = -1;
+    // Display copies: flipped buffers found among the colour targets or not
+    // (then what the game shows was never drawn by Metal), and the last one.
+    unsigned shown = 0, absent = 0;
+    uint64_t lastShown = 0;
     bool nativeTextures;
     NSString* report() const {
         const unsigned* m = renderer.nativeMisses;
@@ -35,8 +39,9 @@ struct GameMetalState {
             @"\nTextures natives : %u dessins (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
             renderer.nativeDraws, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
-        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
+        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur, %u calculs (dispatch) · %zu cibles\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused,
+            stats.skipped, stats.dispatches, renderer.targetCount(), shown, absent, (unsigned long long)lastShown,
             encodeMs, gpuText(renderGpuMs), waitMs, copyMs, gpuText(copyGpuMs), native];
     }
     GameMetalState(id<MTLDevice> device, MaxPS4GameMemoryReader reader, bool nativeTextures)
@@ -117,7 +122,13 @@ struct GameMetalState {
     std::unique_lock<std::mutex> lock(s.mutex, std::try_to_lock);
     if (!lock || !s.error.empty() || !width || !height || width > 1920 || height > 1080) return nil;
     id<MTLTexture> source = s.renderer.target(address);
-    if (!source || source.width < width || source.height < height) return nil;
+    s.lastShown = address;
+    if (!source || source.width < width || source.height < height) {
+        ++s.absent;
+        self.lastReport = s.report();
+        return nil;
+    }
+    ++s.shown;
     const auto started = Clock::now();
     auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
         width:width height:height mipmapped:NO];
