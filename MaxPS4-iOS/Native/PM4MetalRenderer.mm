@@ -485,7 +485,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     [encoder drawPrimitives:d.primitive == 6 ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
     if (counted) [encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
     if (!batching_) [encoder endEncoding];
-    if (batchDraws.size() < 2000) {
+    if (batchDraws.size() < 4000) {
         char text[256];
         std::snprintf(text, sizeof text, "\n  - cible 0x%llx %ux%u (swap %u, masque 0x%x, blend 0x%x), %zu sommets, ciseaux %u,%u-%u,%u, PS 0x%llx",
                       (unsigned long long)d.target, d.pitch, d.height, d.swap, d.mask, d.blend, d.indices.size(),
@@ -498,6 +498,48 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             std::snprintf(text, sizeof text, ", %s%u (%g %g %g %g)", e[0] == 12 ? "pos" : "param", e[0] == 12 ? 0u : e[0] - 32,
                           gcn_detail::f32(e[1]), gcn_detail::f32(e[2]), gcn_detail::f32(e[3]), gcn_detail::f32(e[4]));
             batchDraws += text;
+        }
+        // The same vertex computed from the GPU's copy of guest memory (copy
+        // mode), with the ranges copied and every V# the lane addressed.
+        if (!guest_ && memory) {
+            const auto* copy = static_cast<const std::uint8_t*>(memory.contents);
+            const std::uint64_t copySize = memory.length;
+            GCNMemory view{
+                [&](std::uint64_t a, void* out, std::size_t n) {
+                    for (unsigned k = 0; k < drawState.rangeCount; ++k) {
+                        const std::uint64_t start = drawState.ranges[3 * k], size = drawState.ranges[3 * k + 1], at = drawState.ranges[3 * k + 2];
+                        if (a >= start && a - start <= size && n <= size - (a - start) && at + (a - start) + n <= copySize) {
+                            std::memcpy(out, copy + at + (a - start), n);
+                            return true;
+                        }
+                    }
+                    return false;
+                },
+                [](std::uint64_t, const void*, std::size_t) { return true; }};
+            GCNWave wave(view, 1);
+            for (unsigned k = 0; k < d.vsUserCount; ++k) wave.s[k] = d.vsUser[k];
+            wave.v(0, 0) = d.indices.empty() ? 0 : d.indices[0];
+            std::string buffers;
+            wave.buffer = [&](std::uint64_t base, std::uint64_t bytes, std::uint32_t stride, std::uint64_t address) {
+                std::snprintf(text, sizeof text, " [V# 0x%llx taille 0x%llx pas %u lu 0x%llx]", (unsigned long long)base,
+                              (unsigned long long)bytes, stride, (unsigned long long)address);
+                buffers += text;
+            };
+            const bool ran = wave.run(d.vs);
+            batchDraws += ran ? ", sur la copie GPU :" : ", sur la copie GPU, VS en échec (" + wave.error + ") :";
+            for (const auto& e : wave.exports) {
+                if (e.target != 12) continue;
+                std::snprintf(text, sizeof text, " pos0 (%g %g %g %g)", gcn_detail::f32(e.value[0][0]), gcn_detail::f32(e.value[1][0]),
+                              gcn_detail::f32(e.value[2][0]), gcn_detail::f32(e.value[3][0]));
+                batchDraws += text;
+            }
+            batchDraws += buffers;
+            batchDraws += ", copies :";
+            for (unsigned k = 0; k < drawState.rangeCount && k < 16; ++k) {
+                std::snprintf(text, sizeof text, " 0x%llx+0x%llx", (unsigned long long)drawState.ranges[3 * k],
+                              (unsigned long long)drawState.ranges[3 * k + 1]);
+                batchDraws += text;
+            }
         }
         std::snprintf(text, sizeof text, ", primitive %u, viewport %g %g %g %g %g %g, vte 0x%x", d.primitive, d.viewport[0], d.viewport[1],
                       d.viewport[2], d.viewport[3], d.viewport[4], d.viewport[5], d.vte);
