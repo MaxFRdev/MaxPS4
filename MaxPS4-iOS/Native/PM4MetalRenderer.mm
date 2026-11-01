@@ -289,7 +289,9 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
                           "    device const uint* indices [[buffer(2)]],\n") +
               (native_ ? "    constant GCNNativeTexture& N [[buffer(3)]],\n" : "") +
               "    device float4* out [[buffer(4)]]) {\n"
-              "    out[vid] = gcn_run_vertex(indices[vid], iid, mem, D" + (native_ ? ", N" : "") + ").position;\n}\n";
+              "    GCNVaryings o = gcn_run_vertex(indices[vid], iid, mem, D" + (native_ ? ", N" : "") + ");\n"
+              "    out[3u * vid] = o.position;\n" +
+              ((vs.params & 1) ? "    out[3u * vid + 1u] = o.p0;\n" : "") + ((vs.params & 2) ? "    out[3u * vid + 2u] = o.p1;\n" : "") + "}\n";
     const std::string saved = error;
     id<MTLLibrary> library = this->library(source);
     if (!library) { const std::string e = error; error = saved; return ", sonde GPU : " + e; }
@@ -332,7 +334,8 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
     capture.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     id<MTLRenderPipelineState> stage = [device_ newRenderPipelineStateWithDescriptor:capture error:&failure];
     if (!stage) return text + ", étage sommets : pipeline";
-    id<MTLBuffer> staged = [device_ newBufferWithLength:count * 16 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> staged = [device_ newBufferWithLength:count * 48 options:MTLResourceStorageModeShared];
+    std::memset(staged.contents, 0, count * 48);
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -349,11 +352,13 @@ std::string PM4MetalRenderer::probeVertices(const PM4Draw& d, id<MTLBuffer> memo
     [render endEncoding];
     [renders commit];
     [renders waitUntilCompleted];
-    text += ", étage sommets :";
+    text += ", étage sommets (position, param0, param1) :";
     p = static_cast<const float*>(staged.contents);
-    for (unsigned k = 0; k < count; ++k) {
-        char item[96];
-        std::snprintf(item, sizeof item, " (%g %g %g %g)", p[4 * k], p[4 * k + 1], p[4 * k + 2], p[4 * k + 3]);
+    for (unsigned k = 0; k < count && k < 3; ++k) {
+        char item[200];
+        std::snprintf(item, sizeof item, " [(%g %g %g %g) (%g %g %g %g) (%g %g %g %g)]", p[12 * k], p[12 * k + 1], p[12 * k + 2],
+                      p[12 * k + 3], p[12 * k + 4], p[12 * k + 5], p[12 * k + 6], p[12 * k + 7], p[12 * k + 8], p[12 * k + 9],
+                      p[12 * k + 10], p[12 * k + 11]);
         text += item;
     }
     return text;
