@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <unistd.h>
+#include <pthread.h>
 #include <signal.h>
 #include <setjmp.h>
 #include <sys/ucontext.h>
@@ -33,6 +34,15 @@ Mailbox mailbox;
 struct Region { uintptr_t rw = 0, rx = 0; size_t size = 0; bool leased = false; };
 std::array<Region, 3> regions {};
 std::mutex lock;
+// The thread inside `lock`, for maxps4_jit_held(): a signal handler that
+// interrupted it, or a thread that suspended it, must not wait for `lock`.
+std::atomic<pthread_t> owner {};
+struct Held {
+    Held() { lock.lock(); owner.store(::pthread_self(), std::memory_order_relaxed); }
+    ~Held() { owner.store(pthread_t{}, std::memory_order_relaxed); lock.unlock(); }
+    Held(const Held&) = delete;
+    Held& operator=(const Held&) = delete;
+};
 uint64_t expected_nonce = 0;
 int state = 0, failure = 0;
 int failure_stage = 0, failure_mach = 0, failure_region = -1;
@@ -146,7 +156,7 @@ void* translate(void* pointer, bool writable) {
 extern "C" int32_t maxps4_jit_begin(uint64_t* address, uint64_t* nonce, uint64_t* page) {
     if (!address || !nonce || !page) return -EINVAL;
     *address = *nonce = *page = 0;
-    std::lock_guard guard(lock);
+    Held guard;
     if (state == 1 || state == 2) return -EBUSY;
     const long host_page = sysconf(_SC_PAGESIZE);
     if (host_page <= 0 || host_page > 16384 || 16384 % host_page != 0) return -ENOTSUP;
@@ -163,7 +173,7 @@ extern "C" int32_t maxps4_jit_begin(uint64_t* address, uint64_t* nonce, uint64_t
     return 0;
 }
 extern "C" int32_t maxps4_jit_prepare() {
-    std::lock_guard guard(lock);
+    Held guard;
     if (state == 2) return 0;
     if (state == 3) return -failure;
     if (state != 1) return -EACCES;
@@ -219,13 +229,13 @@ extern "C" int32_t maxps4_jit_prepare() {
     return 0;
 }
 extern "C" int32_t maxps4_jit_confirmation() {
-    std::lock_guard guard(lock);
+    Held guard;
     if (!expected_nonce || mailbox.nonce != expected_nonce) return 0;
     std::atomic_thread_fence(std::memory_order_acquire);
     return mailbox.status == 1 ? 1 : 2;
 }
 extern "C" int32_t maxps4_jit_launch_failed(uint64_t nonce) {
-    std::lock_guard guard(lock);
+    Held guard;
     // Never cancel a request another script has already started to publish.
     if (state != 1 || !nonce || nonce != expected_nonce || mailbox.nonce || mailbox.status != expected_nonce)
         return -EBUSY;
@@ -234,13 +244,13 @@ extern "C" int32_t maxps4_jit_launch_failed(uint64_t nonce) {
     return 0;
 }
 extern "C" uint32_t maxps4_jit_leases() {
-    std::lock_guard guard(lock);
+    Held guard;
     uint32_t count = 0;
     for (const auto& region : regions) count += region.leased;
     return count;
 }
 extern "C" int32_t maxps4_jit_cancel() {
-    std::lock_guard guard(lock);
+    Held guard;
     // Do not race a live debugger script; restart the app after a broken attach.
     if (state == 1) return -EBUSY;
     for (const auto& region : regions) if (region.leased) return -EBUSY;
@@ -251,10 +261,10 @@ extern "C" int32_t maxps4_jit_cancel() {
     failure_stage = 0; failure_mach = 0; failure_region = -1; active_region = -1;
     return 0;
 }
-extern "C" int32_t maxps4_jit_state() { std::lock_guard guard(lock); return state; }
-extern "C" int32_t maxps4_jit_error() { std::lock_guard guard(lock); return failure; }
+extern "C" int32_t maxps4_jit_state() { Held guard; return state; }
+extern "C" int32_t maxps4_jit_error() { Held guard; return failure; }
 extern "C" int32_t maxps4_jit_mailbox_diagnostic() {
-    std::lock_guard guard(lock);
+    Held guard;
     if (state == 0) return 0;
     if (mailbox.nonce == 0) return 1;
     if (mailbox.nonce != expected_nonce) return 2;
@@ -262,11 +272,11 @@ extern "C" int32_t maxps4_jit_mailbox_diagnostic() {
     if (mailbox.status != 1) return 4;
     return 5;
 }
-extern "C" int32_t maxps4_jit_failure_stage() { std::lock_guard guard(lock); return failure_stage; }
-extern "C" int32_t maxps4_jit_failure_mach() { std::lock_guard guard(lock); return failure_mach; }
-extern "C" int32_t maxps4_jit_failure_region() { std::lock_guard guard(lock); return failure_region; }
+extern "C" int32_t maxps4_jit_failure_stage() { Held guard; return failure_stage; }
+extern "C" int32_t maxps4_jit_failure_mach() { Held guard; return failure_mach; }
+extern "C" int32_t maxps4_jit_failure_region() { Held guard; return failure_region; }
 extern "C" void* maxps4_jit_allocate(size_t size) {
-    std::lock_guard guard(lock);
+    Held guard;
     if (state != 2) { errno = EACCES; return nullptr; }
     for (auto& region : regions) if (region.rw && !region.leased && region.size == size) {
         // The code-cache host-page guard was installed during preparation.
@@ -277,7 +287,7 @@ extern "C" void* maxps4_jit_allocate(size_t size) {
     return nullptr;
 }
 extern "C" int32_t maxps4_jit_free(void* write, size_t size) {
-    std::lock_guard guard(lock);
+    Held guard;
     for (auto& region : regions) if (region.rw == reinterpret_cast<uintptr_t>(write)) {
         if (!region.leased || region.size != size) return -EINVAL;
         region.leased = false; // Retain prepared pages for the next fixed probe.
@@ -286,15 +296,16 @@ extern "C" int32_t maxps4_jit_free(void* write, size_t size) {
     return 0;
 }
 extern "C" size_t maxps4_jit_usable_size(void* write, size_t size) {
-    std::lock_guard guard(lock);
+    Held guard;
     const auto& cache = regions[1];
     return cache.leased && cache.rw == reinterpret_cast<uintptr_t>(write) &&
         cache.size == size && size > page_size ? size - page_size : 0;
 }
-extern "C" void* maxps4_jit_executable(void* pointer) { std::lock_guard guard(lock); return translate(pointer, false); }
-extern "C" void* maxps4_jit_writable(void* pointer) { std::lock_guard guard(lock); return translate(pointer, true); }
+extern "C" void* maxps4_jit_executable(void* pointer) { Held guard; return translate(pointer, false); }
+extern "C" void* maxps4_jit_writable(void* pointer) { Held guard; return translate(pointer, true); }
+extern "C" int32_t maxps4_jit_held() { return ::pthread_equal(owner.load(std::memory_order_relaxed), ::pthread_self()) ? 1 : 0; }
 extern "C" int32_t maxps4_jit_describe(void* pointer, uintptr_t* base, size_t* offset, size_t* size) {
-    std::lock_guard guard(lock);
+    Held guard;
     const auto address = reinterpret_cast<uintptr_t>(pointer);
     for (const auto& region : regions) if (region.leased) {
         for (const auto start : {region.rw, region.rx}) if (address >= start && address - start < region.size) {
@@ -324,4 +335,5 @@ extern "C" int32_t maxps4_jit_failure_mach() { return 0; }
 extern "C" int32_t maxps4_jit_failure_region() { return -1; }
 extern "C" uint32_t maxps4_jit_leases() { return 0; }
 extern "C" size_t maxps4_jit_usable_size(void*, size_t) { return 0; }
+extern "C" int32_t maxps4_jit_held() { return 0; }
 #endif

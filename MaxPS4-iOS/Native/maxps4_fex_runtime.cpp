@@ -436,8 +436,9 @@ public:
     std::atomic<uint32_t> sample_sequence {0};
     Sample sample {};
     const pthread_t host = ::pthread_self();
-    // For a sample taken from outside the thread. The signal handler uses the
-    // same FEX lookups, so they take no lock the sampled thread could hold.
+    // For a sample taken from outside the thread. in_jit and guest_rip take
+    // the JIT pool lock: never call them while the thread is suspended, and in
+    // its signal handler only when it is not inside that lock (maxps4_jit_held).
     uint64_t stored_rip() const { return thread->CurrentFrame->State.rip; }
     bool in_dispatcher(uint64_t pc) const { return pc >= config.DispatcherBegin && pc < config.DispatcherEnd; }
     bool in_jit(uint64_t pc) const { return context->IsAddressInCodeBuffer(thread, pc); }
@@ -479,7 +480,9 @@ private:
 #endif
         auto* guard = active;
         if (number == SIGURG && guard && guard->sample_request.exchange(false)) {
-            const bool jit = guard->context->IsAddressInCodeBuffer(guard->thread, pc);
+            // Inside the JIT pool lock the thread runs host code; asking FEX
+            // would wait for that lock on this very thread.
+            const bool jit = !maxps4_jit_held() && guard->context->IsAddressInCodeBuffer(guard->thread, pc);
             const bool dispatcher = pc >= guard->config.DispatcherBegin && pc < guard->config.DispatcherEnd;
 #if defined(__APPLE__)
             guard->sample.lr = machine->uc_mcontext->__ss.__lr;
@@ -495,7 +498,7 @@ private:
             return;
         }
         if (guard && !guard->signal.load()) {
-            const bool in_jit = guard->context->IsAddressInCodeBuffer(guard->thread, pc);
+            const bool in_jit = !maxps4_jit_held() && guard->context->IsAddressInCodeBuffer(guard->thread, pc);
             // x86 permits unaligned accesses. ARM64 TSO loads/stores and locked
             // operations can raise BUS_ADRALN for otherwise valid guest memory.
             // This frontend must route those faults to FEX before containing
@@ -890,8 +893,9 @@ int64_t guest_thread_service(GuestThreads& threads, maxps4::PS4KernelService ser
 // CPU profile of the main guest thread (maxps4_fex_engine_set_profiling):
 // a host thread suspends it through Mach every 5 ms and records where it
 // is: a guest RIP (JIT code, 64-byte buckets), the FEX dispatcher, or a host
-// function (HLE services, FEX helpers). The FEX lookups run while the thread
-// is suspended, as in the signal handler; nothing allocates until it resumes.
+// function (HLE services, FEX helpers). Only the registers are read while it
+// is suspended: it may hold the JIT pool lock the FEX lookups take (it did,
+// compiling Mortal Kombat: Legacy Kollection, and the game and app froze).
 struct CPUProfile {
     std::mutex lock;
     uint64_t jit = 0, dispatcher = 0, host = 0;
@@ -909,17 +913,15 @@ struct CPUProfile {
             if (::thread_suspend(port) != KERN_SUCCESS) break;
             const bool read = ::thread_get_state(port, ARM_THREAD_STATE64,
                 reinterpret_cast<thread_state_t>(&state), &count) == KERN_SUCCESS;
-            uint64_t pc = 0, rip = 0; uint32_t where = 0;
-            if (read) {
-                pc = arm_thread_state64_get_pc(state);
-#if __has_feature(ptrauth_calls)
-                pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
-#endif
-                if (guard.in_jit(pc)) { where = 1; rip = guard.guest_rip(pc); }
-                else where = guard.in_dispatcher(pc) ? 2 : 3;
-            }
             ::thread_resume(port);
             if (!read) continue;
+            uint64_t pc = arm_thread_state64_get_pc(state), rip = 0;
+#if __has_feature(ptrauth_calls)
+            pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
+#endif
+            uint32_t where = 0;
+            if (guard.in_jit(pc)) { where = 1; rip = guard.guest_rip(pc); }
+            else where = guard.in_dispatcher(pc) ? 2 : 3;
             uint64_t symbol = 0;
             if (where == 3) {
                 Dl_info info {};
