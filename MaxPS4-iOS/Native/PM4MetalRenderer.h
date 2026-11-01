@@ -40,10 +40,12 @@ public:
     // Encodes one compute dispatch into `commands`, false with `error` set
     // (and nothing encoded) when it cannot be expressed.
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
-    unsigned kernelsBuilt = 0, targetsSynced = 0;
+    unsigned kernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
+    // The draws of the current batch, described for the session report.
+    std::string batchDraws;
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
-    void beginBatch() { endBatch(); batching_ = true; }
+    void beginBatch() { endBatch(); batching_ = true; batchDraws.clear(); }
     void endBatch();
     // The texture holding colour target `address`, or nil if never drawn.
     id<MTLTexture> target(std::uint64_t address) const;

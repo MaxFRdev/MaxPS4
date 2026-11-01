@@ -1,6 +1,7 @@
 #import "PM4GameMetalBridge.h"
 #include "PM4MetalRenderer.h"
 #include <cerrno>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <chrono>
@@ -35,6 +36,11 @@ struct GameMetalState {
     // Compute dispatches run as kernels, or refused (and skipped) with the last reason.
     unsigned computeRun = 0, computeRefused = 0;
     std::string computeError;
+    // The draws of the last batch that had any, and the centre pixel of the
+    // last displayed image (its four bytes in texture order).
+    std::string lastDraws;
+    uint32_t centre = 0;
+    bool centreBGRA = false;
     bool nativeTextures;
     NSString* report() const {
         const unsigned* m = renderer.nativeMisses;
@@ -42,10 +48,13 @@ struct GameMetalState {
             @"\nTextures natives : %u dessins (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
             renderer.nativeDraws, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
-        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u refusés%s%s · %u kernels · %u images synchronisées\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
+        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées\nPixel central affiché : R %u V %u B %u A %u\nDessins du dernier lot :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused,
-            stats.skipped, renderer.targetCount(), stats.dispatches, computeRun, computeRefused,
-            computeError.empty() ? "" : " : ", computeError.c_str(), renderer.kernelsBuilt, renderer.targetsSynced, stats.lastSkipped.c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
+            stats.skipped, renderer.targetCount(), stats.dispatches, computeRun - renderer.dispatchesWithoutEffect,
+            renderer.dispatchesWithoutEffect, computeRefused,
+            computeError.empty() ? "" : " : ", computeError.c_str(), renderer.kernelsBuilt, renderer.targetsSynced,
+            (centre >> (centreBGRA ? 16 : 0)) & 0xff, (centre >> 8) & 0xff, (centre >> (centreBGRA ? 0 : 16)) & 0xff, centre >> 24,
+            lastDraws.empty() ? " aucun" : lastDraws.c_str(), stats.lastSkipped.c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
             encodeMs, gpuText(renderGpuMs), waitMs, copyMs, gpuText(copyGpuMs), native];
     }
     GameMetalState(id<MTLDevice> device, MaxPS4GameMemoryReader reader, bool nativeTextures)
@@ -113,6 +122,7 @@ struct GameMetalState {
             else { ++s.computeRefused; s.computeError = s.renderer.error; }
         });
         s.renderer.endBatch();
+        if (!s.renderer.batchDraws.empty()) s.lastDraws = s.renderer.batchDraws;
         if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }
         const double encoding = elapsedMs(encodingStarted);
         [command commit];
@@ -150,6 +160,11 @@ struct GameMetalState {
     [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
         sourceSize:MTLSizeMake(width,height,1) toTexture:texture destinationSlice:0 destinationLevel:0
         destinationOrigin:MTLOriginMake(0,0,0)];
+    // One pixel at the centre, read back for the session report.
+    id<MTLBuffer> pixel = [s.device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    if (pixel)
+        [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(width / 2, height / 2, 0)
+                   sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
     [blit endEncoding];
     [command commit];
     [command waitUntilCompleted];
@@ -157,6 +172,7 @@ struct GameMetalState {
         s.error = "Metal display copy failed"; return nil;
     }
     s.copyMs = elapsedMs(started); s.copyGpuMs = gpuMs(command);
+    if (pixel) { std::memcpy(&s.centre, pixel.contents, 4); s.centreBGRA = source.pixelFormat == MTLPixelFormatBGRA8Unorm; }
     self.lastReport = s.report();
     return texture;
 }

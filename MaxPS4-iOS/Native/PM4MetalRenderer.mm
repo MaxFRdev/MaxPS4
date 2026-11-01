@@ -140,14 +140,34 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     error.clear();
     if (!c.program || !c.groups[0] || !c.groups[1] || !c.groups[2]) return true; // nothing to run
     const std::uint64_t tx = std::max(1u, c.threads[0]), ty = std::max(1u, c.threads[1]), tz = std::max(1u, c.threads[2]);
-    id<MTLComputePipelineState> state = kernel(c);
-    if (!state) return false;
-    if (tx * ty * tz > state.maxTotalThreadsPerThreadgroup) return fail("threads per group");
     // Copies of the ranges the program addresses, as for a draw (copy mode only).
     if (guest_) return fail("compute with a guest memory window");
     const auto& ranges = scanner_.scan(c);
     if (ranges.empty()) return fail("compute program addresses no memory");
     if (ranges.size() > 16) return fail("compute reads more than 16 memory ranges");
+    auto stored = [&](std::uint64_t address, std::uint64_t length) {
+        for (const auto& s : scanner_.stored()) if (address < s.base + s.size && s.base < address + length) return true;
+        return false;
+    };
+    // Linear 8_8_8_8 images the kernel stores that no target holds yet.
+    struct Output { std::uint64_t base; unsigned pitch, height; };
+    std::vector<Output> outputs;
+    for (const auto& t : scanner_.images()) {
+        const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
+        const unsigned dfmt = (t[1] >> 20) & 63, tiling = (t[3] >> 20) & 31;
+        const unsigned pitch = ((t[4] >> 13) & 0x3fff) + 1, height = ((t[2] >> 14) & 0x3fff) + 1;
+        if (dfmt == 10 && tiling == 8 && !targets_.count(base) && stored(base, std::uint64_t(pitch) * height * 4))
+            outputs.push_back({base, pitch, height});
+    }
+    // Only stores to targets and new images are kept (guest memory never
+    // receives the rest): a kernel storing nothing else changes nothing.
+    bool visible = !outputs.empty();
+    for (const auto& [address, target] : targets_)
+        if (target.texture && stored(address, std::uint64_t(target.texture.width) * 4 * target.texture.height)) visible = true;
+    if (!visible) { ++dispatchesWithoutEffect; return true; }
+    id<MTLComputePipelineState> state = kernel(c);
+    if (!state) return false;
+    if (tx * ty * tz > state.maxTotalThreadsPerThreadgroup) return fail("threads per group");
     std::uint64_t total = 0;
     for (const auto& r : ranges) total += r.size + 255;
     if (total > (256ull << 20)) return fail("compute reads more than 256 MiB");
@@ -176,20 +196,6 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
             }
         return false;
     };
-    auto stored = [&](std::uint64_t address, std::uint64_t length) {
-        for (const auto& s : scanner_.stored()) if (address < s.base + s.size && s.base < address + length) return true;
-        return false;
-    };
-    // Linear 8_8_8_8 images the kernel stores that no target holds yet.
-    struct Output { std::uint64_t base; unsigned pitch, height; };
-    std::vector<Output> outputs;
-    for (const auto& t : scanner_.images()) {
-        const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
-        const unsigned dfmt = (t[1] >> 20) & 63, tiling = (t[3] >> 20) & 31;
-        const unsigned pitch = ((t[4] >> 13) & 0x3fff) + 1, height = ((t[2] >> 14) & 0x3fff) + 1;
-        if (dfmt == 10 && tiling == 8 && !targets_.count(base) && stored(base, std::uint64_t(pitch) * height * 4))
-            outputs.push_back({base, pitch, height});
-    }
     if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; }
     // Colour targets live in their textures: the kernel reads their current contents.
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
@@ -452,6 +458,24 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     const NSUInteger count = d.primitive == 0x11 ? NSUInteger(d.indices.size() / 3 * 6) : NSUInteger(d.indices.size());
     [encoder drawPrimitives:d.primitive == 6 ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
     if (!batching_) [encoder endEncoding];
+    if (batchDraws.size() < 2000) {
+        char text[256];
+        std::snprintf(text, sizeof text, "\n  - cible 0x%llx %ux%u (swap %u, masque 0x%x, blend 0x%x), %zu sommets, ciseaux %u,%u-%u,%u, PS 0x%llx",
+                      (unsigned long long)d.target, d.pitch, d.height, d.swap, d.mask, d.blend, d.indices.size(),
+                      d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3], (unsigned long long)d.ps);
+        batchDraws += text;
+        if (native_) {
+            unsigned shown = 0;
+            for (const auto& t : scanner_.images()) {
+                if (shown++ == 2) break;
+                const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
+                std::snprintf(text, sizeof text, ", texture dfmt %u nfmt %u %ux%u tuilage %u 0x%llx%s", (t[1] >> 20) & 63, (t[1] >> 26) & 15,
+                              (t[2] & 0x3fff) + 1, ((t[2] >> 14) & 0x3fff) + 1, (t[3] >> 20) & 31, (unsigned long long)base,
+                              targets_.count(base) ? " (rendue GPU)" : "");
+                batchDraws += text;
+            }
+        }
+    }
     return true;
 }
 
