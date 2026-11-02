@@ -789,11 +789,23 @@ struct GCNNativeTexture {
     uint4 high [[id(3)]];
 };
 #endif
+// Large ranges live in buffers of their own (buffer(5) up), shared by the
+// draws of a submission: a range offset's bits 48 and up select one (0: p).
+#define GCN_SLOTS 6u
+struct GCNSlots { device const uchar* x[GCN_SLOTS]; };
+#define GCN_SLOT_PARAMS , device const uchar* x0 [[buffer(5)]], device const uchar* x1 [[buffer(6)]], device const uchar* x2 [[buffer(7)]], \
+    device const uchar* x3 [[buffer(8)]], device const uchar* x4 [[buffer(9)]], device const uchar* x5 [[buffer(10)]]
+#define GCN_SLOT_ARGS { { x0, x1, x2, x3, x4, x5 } }
 struct GCNMemory { device const uchar* p; ulong base; ulong size; constant ulong* ranges; uint count;
 #if GCN_NATIVE_TEXTURES
     constant GCNNativeTexture* native;
 #endif
+    GCNSlots s;
 };
+GCN_FN device const uchar* gcn_at(GCNMemory M, ulong o) {
+    uint k = uint(o >> 48); o &= 0xfffffffffffful;
+    return k == 0u ? M.p + o : M.s.x[min(k, GCN_SLOTS) - 1u] + o;
+}
 struct GCNQuad { uint unused; };
 struct GCNLane {
     uint user[20]; uint vinit[24]; bool exec; uint quadLane;
@@ -857,14 +869,14 @@ GCN_FN bool gcn_locate(GCNMemory M, ulong a, ulong n, thread ulong& offset) {
     }
     return false;
 }
-GCN_FN uint gcn_ld32(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 4ul, o)) return 0u; return *(device const uint*)(M.p + o); }
-GCN_FN uint gcn_ld16(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 2ul, o)) return 0u; return uint(*(device const ushort*)(M.p + o)); }
-GCN_FN uint gcn_ld8(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 1ul, o)) return 0u; return uint(M.p[o]); }
+GCN_FN uint gcn_ld32(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 4ul, o)) return 0u; return *(device const uint*)gcn_at(M, o); }
+GCN_FN uint gcn_ld16(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 2ul, o)) return 0u; return uint(*(device const ushort*)gcn_at(M, o)); }
+GCN_FN uint gcn_ld8(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 1ul, o)) return 0u; return uint(*gcn_at(M, o)); }
 // Only used with an image span already validated by gcn_locate.
-GCN_FN uint gcn_packed32(GCNMemory M, ulong o) { return *(device const uint*)(M.p + o); }
-GCN_FN uint gcn_packed16(GCNMemory M, ulong o) { return uint(*(device const ushort*)(M.p + o)); }
-GCN_FN uint gcn_packed8(GCNMemory M, ulong o) { return uint(M.p[o]); }
-// Stores, from compute kernels only, whose memory buffer is writable.
+GCN_FN uint gcn_packed32(GCNMemory M, ulong o) { return *(device const uint*)gcn_at(M, o); }
+GCN_FN uint gcn_packed16(GCNMemory M, ulong o) { return uint(*(device const ushort*)gcn_at(M, o)); }
+GCN_FN uint gcn_packed8(GCNMemory M, ulong o) { return uint(*gcn_at(M, o)); }
+// Stores, from compute kernels only, whose memory buffer (never a slot) is writable.
 GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 4ul, o)) *(device uint*)(M.p + o) = v; }
 GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 2ul, o)) *(device ushort*)(M.p + o) = ushort(v); }
 GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 1ul, o)) *(device uchar*)(M.p + o) = uchar(v); }
@@ -921,13 +933,13 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         if ((vs.params >> p) & 1)
             s += "    float4 p" + std::to_string(p) + " [[user(locn" + std::to_string(p) + ")" + ((flatParams >> p) & 1 ? ", flat" : "") + "]];\n";
     s += "};\n"
-         "GCN_FN GCNVaryings gcn_run_vertex(uint index, uint iid, device const uchar* mem, constant GCNDrawState& D) {\n"
+         "GCN_FN GCNVaryings gcn_run_vertex(uint index, uint iid, device const uchar* mem, thread const GCNSlots& S, constant GCNDrawState& D) {\n"
          "    GCNLane L; gcn_lane_init(L);\n";
     for (unsigned p = 0; p < 32; ++p)
         if ((vs.params >> p) & 1) s += "    L.param[" + std::to_string(p) + "] = float4(0.0f);\n";
     s += "    for (uint k = 0u; k < 16u; ++k) L.user[k] = D.vsUser[k];\n"
          "    L.vinit[0] = index; L.vinit[3] = iid;\n"
-         "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u };\n"
+         "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u }; M.s = S;\n"
          "    " + vsName + "(L, M, Q);\n"
          "    GCNVaryings o; o.position = L.pos;\n";
     for (unsigned p = 0; p < 32; ++p)
@@ -935,7 +947,8 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     s += "    return o;\n}\n"
          "vertex GCNVaryings gcn_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],\n"
          "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]],\n"
-         "    device const uint* indices [[buffer(2)]]) {\n"
+         "    device const uint* indices [[buffer(2)]] GCN_SLOT_PARAMS) {\n"
+         "    GCNSlots S = GCN_SLOT_ARGS;\n"
          // One call site for the program, in a loop: with a call per corner
          // (four inlined copies) Metal miscompiled large vertex programs and
          // rasterized nothing (Mortal Kombat: Legacy Kollection's matrix VS).
@@ -947,7 +960,7 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
          "        else { n = 3u; at[0] = first; at[1] = first + 1u; at[2] = first + 2u; }\n"
          "    }\n"
          "    GCNVaryings got[3];\n"
-         "    for (uint j = 0u; j < n; ++j) got[j] = gcn_run_vertex(indices[at[j]], iid, mem, D);\n"
+         "    for (uint j = 0u; j < n; ++j) got[j] = gcn_run_vertex(indices[at[j]], iid, mem, S, D);\n"
          "    GCNVaryings o = got[0];\n"
          "    if (n == 3u) {\n"
          "        o.position = got[1].position + got[2].position - got[0].position;\n";
@@ -959,7 +972,7 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
          "struct GCNFragment { float4 color [[color(0)]]; uint coverage [[sample_mask]]; };\n";
     s += std::string("fragment ")+(ps.mayKill ? "GCNFragment" : "float4")+
          " gcn_fragment(GCNVaryings in [[stage_in]], uint sampleCoverage [[sample_mask]],\n"
-         "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]]) {\n"
+         "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]] GCN_SLOT_PARAMS) {\n"
          // Incoming raster coverage is independent of later fragment kills.
          "    const bool covered = sampleCoverage != 0u;\n"
          "    GCNLane L; gcn_lane_init(L);\n";
@@ -992,7 +1005,7 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         else if (bit == 14) s += at + "1u;\n";
         reg += sizes[bit];
     }
-    s += "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u };\n"
+    s += "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u }; M.s = GCNSlots GCN_SLOT_ARGS;\n"
          "    " + psName + "(L, M, Q);\n";
     // An ordinary shader's saved-EXEC/WQM/restore sequence cannot kill a
     // covered pixel. Do not ask Metal to suppress helpers again at export.
@@ -1003,9 +1016,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
             for (std::size_t at = 0; (at = s.find(from, at)) != std::string::npos; at += to.size()) s.replace(at, from.size(), to);
         };
         replace("constant GCNDrawState& D) {", "constant GCNDrawState& D, constant GCNNativeTexture& N) {");
-        replace("device const uint* indices [[buffer(2)]]) {", "device const uint* indices [[buffer(2)]], constant GCNNativeTexture& N [[buffer(3)]]) {");
-        replace("constant GCNDrawState& D [[buffer(1)]]) {", "constant GCNDrawState& D [[buffer(1)]], constant GCNNativeTexture& N [[buffer(3)]]) {");
-        replace("iid, mem, D)", "iid, mem, D, N)");
+        replace("device const uint* indices [[buffer(2)]] GCN_SLOT_PARAMS) {", "device const uint* indices [[buffer(2)]], constant GCNNativeTexture& N [[buffer(3)]] GCN_SLOT_PARAMS) {");
+        replace("constant GCNDrawState& D [[buffer(1)]] GCN_SLOT_PARAMS) {", "constant GCNDrawState& D [[buffer(1)]], constant GCNNativeTexture& N [[buffer(3)]] GCN_SLOT_PARAMS) {");
+        replace("iid, mem, S, D)", "iid, mem, S, D, N)");
         replace("D.rangeCount }", "D.rangeCount, &N }");
     }
     return s;

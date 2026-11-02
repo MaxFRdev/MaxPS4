@@ -64,13 +64,13 @@ int main() {
                 gcnMetalEntryPoints(vs, pst, "vs_program", "ps_program", 2, inputCntl) +
                 "kernel void probe(uint i [[thread_position_in_grid]], device const uchar* mem [[buffer(0)]],\n"
                 "    constant GCNDrawState& D [[buffer(1)]], device const uint* indices [[buffer(2)]], device float4* out [[buffer(4)]]) {\n"
-                "    out[i] = gcn_run_vertex(indices[i], 0u, mem, D).position;\n}\n"
+                "    out[i] = gcn_run_vertex(indices[i], 0u, mem, GCNSlots{}, D).position;\n}\n"
                 "vertex void capture(uint vid [[vertex_id]], device const uchar* mem [[buffer(0)]],\n"
                 "    constant GCNDrawState& D [[buffer(1)]], device const uint* indices [[buffer(2)]], device float4* out [[buffer(4)]]) {\n"
-                "    out[vid] = gcn_run_vertex(indices[vid], 0u, mem, D).position;\n}\n"
+                "    out[vid] = gcn_run_vertex(indices[vid], 0u, mem, GCNSlots{}, D).position;\n}\n"
                 "vertex float4 capture_positioned(uint vid [[vertex_id]], device const uchar* mem [[buffer(0)]],\n"
                 "    constant GCNDrawState& D [[buffer(1)]], device const uint* indices [[buffer(2)]], device float4* out [[buffer(4)]]) {\n"
-                "    float4 p = gcn_run_vertex(indices[vid], 0u, mem, D).position; out[vid] = p; return p;\n}\n";
+                "    float4 p = gcn_run_vertex(indices[vid], 0u, mem, GCNSlots{}, D).position; out[vid] = p; return p;\n}\n";
             NSError* error = nil;
             id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:nil error:&error];
             if (!library) { std::printf("FAIL MSL: %s\n", error.localizedDescription.UTF8String); return 1; }

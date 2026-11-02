@@ -283,6 +283,18 @@ void PM4MetalRenderer::copyGuest(std::uint64_t address, std::uint8_t* out, std::
     }
 }
 
+id<MTLBuffer> PM4MetalRenderer::sharedRange(std::uint64_t base, std::uint64_t size, id<MTLCommandBuffer> commands) {
+    const auto found = shared_.find({base, size});
+    if (found != shared_.end()) return found->second;
+    // At its guest address modulo 256, as in a draw's buffer (native texture views).
+    id<MTLBuffer> buffer = uploadBuffer(size + (base & 255), commands);
+    if (!buffer) return nil;
+    copyGuest(base, static_cast<std::uint8_t*>(buffer.contents) + (base & 255), size);
+    ++rangesShared;
+    shared_[{base, size}] = buffer;
+    return buffer;
+}
+
 id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands) {
     // Each draw keeps its own immutable snapshot until its command buffer has
     // finished. In particular, two draws in the same batch cannot share a slot.
@@ -300,7 +312,8 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
     id<MTLBuffer> buffer = [device_ newBufferWithLength:bytes options:MTLResourceStorageModeShared];
     if (buffer) {
         ++buffersBuilt;
-        constexpr std::uint64_t budget = 64ull << 20;
+        // Shared ranges are atlases of up to 64 MiB: keep a frame's worth or two.
+        constexpr std::uint64_t budget = 384ull << 20;
         if (uploads_.size() < 256 && bytes <= budget - pooledBytes_) {
             uploads_.push_back({buffer, commands});
             pooledBytes_ += bytes;
@@ -309,7 +322,7 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
     return buffer;
 }
 
-id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory,
+id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
                                                const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing) {
     // dfmt 8_8_8_8 or 5_6_5 (gcn_texel_at reads both as unorm whatever the nfmt), linear tiling.
     const unsigned dfmt = (t[1] >> 20) & 63;
@@ -344,20 +357,23 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         inside = base >= guestBase_ && base - guestBase_ <= memory.length && bytes <= memory.length - (base - guestBase_);
         offset = base - guestBase_;
     }
+    id<MTLBuffer> holder = memory;
     for (unsigned k = 0; k < rangeCount && !inside; ++k) {
-        const std::uint64_t start = ranges[3 * k], size = ranges[3 * k + 1];
+        const std::uint64_t start = ranges[3 * k], size = ranges[3 * k + 1], at = ranges[3 * k + 2];
         inside = base >= start && base - start <= size && bytes <= size - (base - start);
-        offset = ranges[3 * k + 2] + (base - start);
+        // Bits 48 and up of a range offset name its shared buffer (slot 1 up).
+        holder = at >> 48 ? slots[(at >> 48) - 1] : memory;
+        offset = (at & 0xffffffffffffull) + (base - start);
     }
     if (!inside) return miss(2, bytes);
     const NSUInteger alignment = [device_ minimumLinearTextureAlignmentForPixelFormat:format];
     if (!alignment || offset % alignment || rowBytes % alignment) return miss(3, alignment ? offset % alignment : 0);
     MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
                                                                                           width:width height:height mipmapped:NO];
-    descriptor.storageMode = memory.storageMode;
-    descriptor.cpuCacheMode = memory.cpuCacheMode;
+    descriptor.storageMode = holder.storageMode;
+    descriptor.cpuCacheMode = holder.cpuCacheMode;
     descriptor.usage = MTLTextureUsageShaderRead;
-    id<MTLTexture> view = [memory newTextureWithDescriptor:descriptor offset:offset bytesPerRow:rowBytes];
+    id<MTLTexture> view = [holder newTextureWithDescriptor:descriptor offset:offset bytesPerRow:rowBytes];
     return view ? view : miss(4, alignment);
 }
 
@@ -371,6 +387,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     if (!state) return false;
     DrawState drawState{};
     id<MTLBuffer> memory = guest_;
+    // buffer(5) up: the shared ranges (see sharedRange), else the draw's buffer.
+    id<MTLBuffer> slots[slotCount] = {};
+    unsigned slotsUsed = 0;
     if (memory) {
         drawState.base = guestBase_; drawState.size = memory.length;
         if (native_) scanner_.scan(d); // only for its T#s
@@ -381,19 +400,34 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         // stays aligned for a native texture view.
         const auto& ranges = scanner_.scan(d);
         if (ranges.size() > 16) return fail("more than 16 memory ranges");
+        // A large range (a texture atlas, a vertex pool) gets a buffer of its
+        // own, copied once per submission and shared by every draw reading it;
+        // the rest is copied into this draw's buffer.
+        if (commands != sharedOwner_) { shared_.clear(); sharedOwner_ = commands; }
+        bool own[16] = {};
         std::uint64_t total = 0;
-        for (const auto& r : ranges) total += r.size + 255;
+        for (std::size_t k = 0, n = 0; k < ranges.size(); ++k) {
+            if (ranges[k].size >= sharedRangeBytes && n < slotCount) { own[k] = true; ++n; }
+            else total += ranges[k].size + 255;
+        }
         if (total > (256ull << 20)) return fail("draw reads more than 256 MiB");
         memory = uploadBuffer(std::max<std::uint64_t>(total, 256), commands);
         if (!memory) return fail("memory buffer");
         std::uint64_t offset = 0;
         auto* bytes = static_cast<std::uint8_t*>(memory.contents);
         for (std::size_t k = 0; k < ranges.size(); ++k) {
+            drawState.ranges[3 * k] = ranges[k].base;
+            drawState.ranges[3 * k + 1] = ranges[k].size;
+            if (own[k]) {
+                id<MTLBuffer> buffer = sharedRange(ranges[k].base, ranges[k].size, commands);
+                if (!buffer) return fail("shared memory buffer");
+                slots[slotsUsed] = buffer;
+                drawState.ranges[3 * k + 2] = std::uint64_t(++slotsUsed) << 48 | (ranges[k].base & 255);
+                continue;
+            }
             offset += (ranges[k].base - offset) & 255;
             // An unreadable range stays zero rather than exposing anything else.
             copyGuest(ranges[k].base, bytes + offset, ranges[k].size);
-            drawState.ranges[3 * k] = ranges[k].base;
-            drawState.ranges[3 * k + 1] = ranges[k].size;
             drawState.ranges[3 * k + 2] = offset;
             offset += ranges[k].size;
         }
@@ -445,6 +479,10 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     drawState.flags = (d.primitive == 0x11 ? rectList : 0) | (ys > 0 ? flipY : 0);
     [encoder setVertexBuffer:memory offset:0 atIndex:0];
     [encoder setFragmentBuffer:memory offset:0 atIndex:0];
+    for (unsigned k = slotsUsed; k < slotCount; ++k) slots[k] = memory;
+    const NSUInteger slotOffsets[slotCount] = {};
+    [encoder setVertexBuffers:slots offsets:slotOffsets withRange:NSMakeRange(5, slotCount)];
+    [encoder setFragmentBuffers:slots offsets:slotOffsets withRange:NSMakeRange(5, slotCount)];
     [encoder setVertexBytes:&drawState length:sizeof drawState atIndex:1];
     [encoder setFragmentBytes:&drawState length:sizeof drawState atIndex:1];
     if (native_) {
@@ -463,7 +501,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         std::array<std::uint32_t, 8> descriptor{};
         if (scanner_.images().empty()) ++nativeMisses[0];
         for (const auto& t : scanner_.images())
-            if ((image = nativeTexture(t, memory, drawState.ranges, drawState.rangeCount, target.texture))) { descriptor = t; break; }
+            if ((image = nativeTexture(t, memory, slots, drawState.ranges, drawState.rangeCount, target.texture))) { descriptor = t; break; }
         id<MTLBuffer> arguments = nativeArguments_ ? uploadBuffer(nativeArguments_.encodedLength, commands) : nil;
         if (!arguments) {
             if (!batching_) [encoder endEncoding];

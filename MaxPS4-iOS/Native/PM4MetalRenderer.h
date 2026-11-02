@@ -67,6 +67,7 @@ public:
     unsigned lastRanges = 0; // memory ranges copied for the last draw (copy mode)
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;
+    unsigned rangesShared = 0; // large ranges copied once for a submission's draws (copy mode)
     unsigned nativeDraws = 0; // draws given a native texture (nativeTextures)
     unsigned targetReads = 0; // of which, a colour target an earlier draw rendered
     // T#s refused: none captured (per draw), format/tiling, outside the copied
@@ -102,11 +103,20 @@ private:
     std::vector<Upload> uploads_;
     std::uint64_t pooledBytes_ = 0;
     id<MTLBuffer> uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands);
+    // Ranges of at least sharedRangeBytes get one of the shader's GCN_SLOTS
+    // buffers (buffer(5) up), copied once per command buffer: the draws of a
+    // submission sampling one atlas share its copy.
+    static constexpr unsigned slotCount = 6;
+    static constexpr std::uint64_t sharedRangeBytes = 1ull << 20;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, id<MTLBuffer>> shared_;
+    id<MTLCommandBuffer> sharedOwner_ = nil;
+    id<MTLBuffer> sharedRange(std::uint64_t base, std::uint64_t size, id<MTLCommandBuffer> commands);
     // Guest [address, address + size) into `out`; unreadable pages read as zero.
     void copyGuest(std::uint64_t address, std::uint8_t* out, std::uint64_t size) const;
     id<MTLRenderPipelineState> pipeline(const PM4Draw& draw, MTLPixelFormat format);
-    // `ranges`: (guest start, length, buffer offset) triples; none for the guest window.
-    id<MTLTexture> nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory,
+    // `ranges`: (guest start, length, buffer offset) triples; none for the guest
+    // window. An offset's bits 48 and up select slots[n - 1] instead of `memory`.
+    id<MTLTexture> nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
                                  const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing);
     bool fail(const std::string& message) { error = message; return false; }
 };

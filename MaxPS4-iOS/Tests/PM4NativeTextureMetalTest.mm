@@ -127,7 +127,8 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                     formatNative[0] ? "tested" : "unavailable", formatNative[1] ? "tested" : "unavailable");
 
         // 2. Measurement through PM4MetalRenderer (per-draw copies, as the game bridge).
-        constexpr unsigned screenW = 1920, screenH = 1080, imageW = 512, imageH = 256;
+        // 1 MiB of texels: the texture's range takes a shared buffer (buffer(5)).
+        constexpr unsigned screenW = 1920, screenH = 1080, imageW = 1024, imageH = 256;
         constexpr uint64_t texturedPS = 0x11400, image = 0x40000, target = 0x200000;
         Arena arena;
         arena.bytes.resize(image + imageW * imageH * 4 - Arena::start);
@@ -191,13 +192,23 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                     gpu[mode] += (command.GPUEndTime - command.GPUStartTime) * 1000; cpu[mode] += encodeMs; ++timed[mode];
                 }
             }
-            // The V# table, then the vertices merged with the texture.
-            assert(native.lastRanges == 2);
+            // The V# table, then the vertices merged with the texture, which is
+            // copied into a shared buffer once per command buffer.
+            assert(native.lastRanges == 2 && native.rangesShared == runs && buffered.rangesShared == runs);
+            {
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                assert(buffered.encode(d, command) && buffered.encode(d, command));
+                [command commit]; [command waitUntilCompleted];
+                assert(command.status == MTLCommandBufferStatusCompleted && !command.error && buffered.rangesShared == runs + 1);
+            }
             if (native.nativeDraws != (formatNative[f] ? runs : 0u))
                 std::printf("native refusals %u/%u/%u/%u/%u, last: %s\n", native.nativeMisses[0], native.nativeMisses[1],
                             native.nativeMisses[2], native.nativeMisses[3], native.nativeMisses[4], native.nativeLastMiss.c_str());
             assert(native.nativeDraws == (formatNative[f] ? runs : 0u));
-            const bool same = pixels(buffered.target(target)) == pixels(native.target(target));
+            const auto drawn = pixels(buffered.target(target));
+            const bool same = drawn == pixels(native.target(target));
+            // Not the zeros an unread slot would give.
+            assert(std::any_of(drawn.begin(), drawn.end(), [](uint8_t b) { return b != 0 && b != 255; }));
             for (unsigned k = 0; k < 2; ++k) if (timed[k]) { gpu[k] /= timed[k]; cpu[k] /= timed[k]; }
             std::printf("NATIVE SONIC-SHAPED %s %ux%u -> %ux%u bilinear wrap %u: buffer GPU %.3f ms (encode %.3f ms), native GPU %.3f ms (encode %.3f ms), %u native draws, pixels %s\n",
                         f ? "5_6_5" : "8_8_8_8", imageW, imageH, screenW, screenH, wrap, gpu[0], cpu[0], gpu[1], cpu[1],
