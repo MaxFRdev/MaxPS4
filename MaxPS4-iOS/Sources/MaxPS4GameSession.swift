@@ -161,7 +161,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
             MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
                 + "\nFichiers ouverts par le jeu :\n" + openedFiles(engine)
                 + "\nDerniers appels PS4 :\n" + recentCalls(engine)
-                + "\n" + memoryLayout(engine) + "\n\n" + folderListing, to: liveReport)
+                + "\n" + memoryLayout(engine) + "\n\n" + (bridge?.report ?? "Metal : pas encore de rendu")
+                + "\n\n" + folderListing, to: liveReport)
         }
         return text
     }
