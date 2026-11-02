@@ -96,19 +96,21 @@ struct GameMetalState {
 - (int32_t)submit:(const uint32_t*)words count:(size_t)count {
     @autoreleasepool {
         auto& s = *state_;
-        std::lock_guard<std::mutex> lock(s.mutex);
-        if (!s.error.empty()) return -EIO;
         if (!words || !count || count > 65536) return -EINVAL;
         const auto started = Clock::now();
         // The game does not wait for its work's GPU completion: every byte a
-        // draw reads is copied while encoding (upload buffers are reused only
-        // once their command buffer has completed, constants go by value),
-        // targets are GPU-only, and display copies follow on the same queue.
-        // One submission at a time stays in flight: the next one waits for it
-        // here, after the game's CPU work in between.
-        if (s.inflight) {
-            [s.inflight waitUntilCompleted];
-            id<MTLCommandBuffer> previous = s.inflight;
+        // draw reads, large textures excepted (read in place), is copied while
+        // encoding (upload buffers are reused only once their command buffer
+        // has completed, constants go by value), targets are GPU-only, and display
+        // copies follow on the same queue. One submission at a time stays in
+        // flight: the next one waits for it here, after the game's CPU work in
+        // between, without the lock, so display copies go on meanwhile.
+        id<MTLCommandBuffer> previous = nil;
+        { std::lock_guard<std::mutex> peek(s.mutex); previous = s.inflight; }
+        if (previous) [previous waitUntilCompleted];
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.error.empty()) return -EIO;
+        if (previous) {
             s.inflight = nil;
             s.waitMs = elapsedMs(started);
             if (previous.status != MTLCommandBufferStatusCompleted || previous.error) {
@@ -150,8 +152,10 @@ struct GameMetalState {
 }
 - (id<MTLTexture>)copyTargetAtAddress:(uint64_t)address width:(uint32_t)width height:(uint32_t)height {
     auto& s = *state_;
-    std::unique_lock<std::mutex> lock(s.mutex, std::try_to_lock);
-    if (!lock || !s.error.empty() || !width || !height || width > 1920 || height > 1080) return nil;
+    // Submissions hold the lock only while encoding (a few milliseconds):
+    // waiting for it beats dropping the game's image.
+    std::unique_lock<std::mutex> lock(s.mutex);
+    if (!s.error.empty() || !width || !height || width > 1920 || height > 1080) return nil;
     id<MTLTexture> source = s.renderer.target(address);
     s.lastShown = address;
     if (!source || source.width < width || source.height < height) {
@@ -188,7 +192,11 @@ struct GameMetalState {
     }
     [blit endEncoding];
     [command commit];
+    // The copy follows the game's submission on the GPU: wait without the
+    // lock, so the game can encode its next one meanwhile.
+    lock.unlock();
     [command waitUntilCompleted];
+    lock.lock();
     if (command.status != MTLCommandBufferStatusCompleted || command.error) {
         s.error = "Metal display copy failed"; return nil;
     }

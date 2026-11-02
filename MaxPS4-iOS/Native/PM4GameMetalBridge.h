@@ -24,7 +24,7 @@ typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
                         nativeTextures:(BOOL)nativeTextures;
 - (int32_t)submit:(const uint32_t*)words count:(size_t)count;
 // Returns an owned, immutable display copy, cropped to VideoOut dimensions.
-// nil while a submission holds the renderer, or if the address was not drawn.
+// Waits for a submission being encoded; nil if the address was not drawn.
 - (nullable id<MTLTexture>)copyTargetAtAddress:(uint64_t)address
                                        width:(uint32_t)width height:(uint32_t)height
     NS_SWIFT_NAME(copyTarget(address:width:height:));
