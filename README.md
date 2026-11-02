@@ -56,7 +56,7 @@ Un jeu qui bloque laisse un rapport dans **MaxPS4 › Rapports** : partage-le su
 
 ## Installer et jouer
 
-1. Télécharger l'IPA produite par le workflow [MaxPS4 FEXCore SideStore IPA](https://github.com/MaxFRdev/MaxPS4/actions/workflows/fexcore-app.yml) (artefact **MaxPS4-FEXCore-SideStore**) et l'installer avec **SideStore**.
+1. Télécharger l'IPA produite par le workflow [MaxPS4 FEXCore SideStore IPA](https://github.com/MaxFRdev/MaxPS4/actions/workflows/fexcore-app.yml) (artefact **MaxPS4-FEXCore-SideStore.ipa**, téléchargé directement en .ipa, sans zip) et l'installer avec **SideStore**.
 2. Activer le JIT avec **StikDebug** depuis MaxPS4 (bouton **JIT**). Voir [le protocole SideStore + StikDebug](docs/fexcore-stikdebug-jit.md).
 3. Copier le dossier complet de ton jeu (`eboot.bin`, `sce_module`, `sce_sys` et ses données) dans **Sur mon iPhone › MaxPS4 › Jeux**, puis toucher **Jouer**.
 
