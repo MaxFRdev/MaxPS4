@@ -452,7 +452,7 @@ struct MaxPS4GameView: View {
         return state
     }
     // The touch buttons and sticks; with `stickAsDpad` the left stick also
-    // presses the D-pad, which replaced the touch arrows.
+    // presses the D-pad (the touch arrows stay beside it).
     private var touchPad: MaxPS4PadState {
         typealias P = MaxPS4PadState
         func axis(_ value: CGFloat) -> UInt8 { UInt8(max(0, min(255, ((value + 1) * 127.5).rounded()))) }
@@ -494,7 +494,19 @@ struct MaxPS4GameView: View {
                 Spacer(minLength: 0)
             }.padding(.top, 56)
             HStack(alignment: .bottom, spacing: 0) {
-                stickControl($leftStick, name: "L", label: "Stick gauche", size: size * 2.2)
+                // The D-pad, then the left stick beside it.
+                HStack(alignment: .bottom, spacing: size * 0.25) {
+                    VStack(spacing: 0) {
+                        control("↑", label: "Haut", bit: 0x10, size: size)
+                        HStack(spacing: 0) {
+                            control("←", label: "Gauche", bit: 0x80, size: size)
+                            Color.clear.frame(width: size, height: size).allowsHitTesting(false)
+                            control("→", label: "Droite", bit: 0x20, size: size)
+                        }
+                        control("↓", label: "Bas", bit: 0x40, size: size)
+                    }
+                    stickControl($leftStick, name: "L", label: "Stick gauche", size: size * 2)
+                }
                 Spacer(minLength: 0)
                 // Where a DualShock 4 has it: below and left of the face buttons.
                 if rightStickShown {
