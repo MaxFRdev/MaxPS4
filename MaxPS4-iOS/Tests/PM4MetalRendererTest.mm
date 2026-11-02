@@ -339,6 +339,9 @@ int main() {
                 });
                 [command commit]; [command waitUntilCompleted];
                 assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
+                if (stats.rendered != 3 || stats.failed != 0 || renderer.lastRanges != 2)
+                    std::printf("BC%u%s: %u rendered, %u failed (%s), %u ranges\n", format - 34, native ? " native" : "",
+                                stats.rendered, stats.failed, stats.error.c_str(), renderer.lastRanges);
                 assert(stats.rendered == 3 && stats.failed == 0 && renderer.lastRanges == 2);
                 assert(renderer.nativeDraws == 0);
                 std::uint8_t pixels[width * height * 4] = {};
