@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <unistd.h>
 #include <vector>
 
 namespace maxps4::gpu {
@@ -283,16 +284,29 @@ void PM4MetalRenderer::copyGuest(std::uint64_t address, std::uint8_t* out, std::
     }
 }
 
-id<MTLBuffer> PM4MetalRenderer::sharedRange(std::uint64_t base, std::uint64_t size, id<MTLCommandBuffer> commands) {
+PM4MetalRenderer::Shared PM4MetalRenderer::sharedRange(std::uint64_t base, std::uint64_t size, bool texture,
+                                                        id<MTLCommandBuffer> commands) {
     const auto found = shared_.find({base, size});
     if (found != shared_.end()) return found->second;
-    // At its guest address modulo 256, as in a draw's buffer (native texture views).
-    id<MTLBuffer> buffer = uploadBuffer(size + (base & 255), commands);
-    if (!buffer) return nil;
-    copyGuest(base, static_cast<std::uint8_t*>(buffer.contents) + (base & 255), size);
+    Shared shared{nil, 0};
+    if (texture && hostView) {
+        // The whole host pages around the range, read in place.
+        const std::uint64_t page = getpagesize(), start = base & ~(page - 1), end = (base + size + page - 1) & ~(page - 1);
+        const void* host = hostView(start, end - start);
+        if (host && reinterpret_cast<std::uintptr_t>(host) % page == 0)
+            shared = {[device_ newBufferWithBytesNoCopy:const_cast<void*>(host) length:end - start
+                                                options:MTLResourceStorageModeShared deallocator:nil], base - start};
+        if (shared.buffer) ++rangesMapped;
+    }
+    if (!shared.buffer) {
+        // At its guest address modulo 256, as in a draw's buffer (native texture views).
+        shared = {uploadBuffer(size + (base & 255), commands), base & 255};
+        if (!shared.buffer) return shared;
+        copyGuest(base, static_cast<std::uint8_t*>(shared.buffer.contents) + shared.offset, size);
+    }
     ++rangesShared;
-    shared_[{base, size}] = buffer;
-    return buffer;
+    shared_[{base, size}] = shared;
+    return shared;
 }
 
 id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands) {
@@ -419,10 +433,15 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             drawState.ranges[3 * k] = ranges[k].base;
             drawState.ranges[3 * k + 1] = ranges[k].size;
             if (own[k]) {
-                id<MTLBuffer> buffer = sharedRange(ranges[k].base, ranges[k].size, commands);
-                if (!buffer) return fail("shared memory buffer");
-                slots[slotsUsed] = buffer;
-                drawState.ranges[3 * k + 2] = std::uint64_t(++slotsUsed) << 48 | (ranges[k].base & 255);
+                bool texture = false;
+                for (const auto& t : scanner_.images()) {
+                    const std::uint64_t image = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
+                    texture = texture || (image >= ranges[k].base && image - ranges[k].base < ranges[k].size);
+                }
+                const Shared shared = sharedRange(ranges[k].base, ranges[k].size, texture, commands);
+                if (!shared.buffer) return fail("shared memory buffer");
+                slots[slotsUsed] = shared.buffer;
+                drawState.ranges[3 * k + 2] = std::uint64_t(++slotsUsed) << 48 | shared.offset;
                 continue;
             }
             offset += (ranges[k].base - offset) & 255;

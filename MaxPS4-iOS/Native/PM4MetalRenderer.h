@@ -21,6 +21,7 @@
 #import <Metal/Metal.h>
 #include "PM4DrawCollector.hpp"
 #include "PM4ResourceScan.hpp"
+#include <functional>
 #include <map>
 #include <string>
 #include <tuple>
@@ -68,6 +69,12 @@ public:
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;
     unsigned rangesShared = 0; // large ranges copied once for a submission's draws (copy mode)
+    unsigned rangesMapped = 0; // of which, textures read in place through hostView instead
+    // The host bytes backing guest [address, address + size), or null. When
+    // set, a large range holding a T# is a no-copy buffer over them: the GPU
+    // reads the texture in place. Vertex and constant ranges stay copied (the
+    // game may rewrite them while the GPU still runs).
+    std::function<const void*(std::uint64_t, std::size_t)> hostView;
     unsigned nativeDraws = 0; // draws given a native texture (nativeTextures)
     unsigned targetReads = 0; // of which, a colour target an earlier draw rendered
     // T#s refused: none captured (per draw), format/tiling, outside the copied
@@ -108,9 +115,10 @@ private:
     // submission sampling one atlas share its copy.
     static constexpr unsigned slotCount = 6;
     static constexpr std::uint64_t sharedRangeBytes = 1ull << 20;
-    std::map<std::pair<std::uint64_t, std::uint64_t>, id<MTLBuffer>> shared_;
+    struct Shared { id<MTLBuffer> buffer; std::uint64_t offset; }; // the range's first byte in `buffer`
+    std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
     id<MTLCommandBuffer> sharedOwner_ = nil;
-    id<MTLBuffer> sharedRange(std::uint64_t base, std::uint64_t size, id<MTLCommandBuffer> commands);
+    Shared sharedRange(std::uint64_t base, std::uint64_t size, bool texture, id<MTLCommandBuffer> commands);
     // Guest [address, address + size) into `out`; unreadable pages read as zero.
     void copyGuest(std::uint64_t address, std::uint8_t* out, std::uint64_t size) const;
     id<MTLRenderPipelineState> pipeline(const PM4Draw& draw, MTLPixelFormat format);

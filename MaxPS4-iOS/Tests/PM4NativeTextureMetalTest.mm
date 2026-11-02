@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <sys/mman.h>
+#include <unistd.h>
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
@@ -169,6 +171,12 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             const auto* p = static_cast<const uint8_t*>(readback.contents);
             return std::vector<uint8_t>(p, p + screenW * screenH * 4);
         };
+        // The arena's bytes on whole host pages (Arena::start is page-aligned).
+        struct { std::uint8_t* bytes; std::size_t size; } host;
+        host.size = (arena.bytes.size() + getpagesize() - 1) / getpagesize() * getpagesize();
+        host.bytes = static_cast<std::uint8_t*>(mmap(nullptr, host.size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+        assert(host.bytes != MAP_FAILED && Arena::start % getpagesize() == 0);
+        std::memcpy(host.bytes, arena.bytes.data(), arena.bytes.size());
         for (unsigned f = 0; f < 2; ++f) for (unsigned wrap : {0u, 2u}) {
             const unsigned dfmt = f ? 16 : 10;
             const uint32_t t[12] = {std::uint32_t(image >> 8), dfmt << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
@@ -217,7 +225,19 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                         f ? "5_6_5" : "8_8_8_8", imageW, imageH, screenW, screenH, wrap, gpu[0], cpu[0], gpu[1], cpu[1],
                         native.nativeDraws, same ? "identical" : "DIFFERENT");
             assert(same);
+            // The same draw with the texture read in place (a no-copy buffer
+            // over page-aligned host memory, as the game's guest memory).
+            PM4MetalRenderer mapped(device, arena.memory, nil, 0, true);
+            mapped.hostView = [&](uint64_t a, size_t n) -> const void* {
+                return a >= Arena::start && a - Arena::start + n <= host.size ? host.bytes + (a - Arena::start) : nullptr;
+            };
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            assert(mapped.encode(d, command));
+            [command commit]; [command waitUntilCompleted];
+            assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
+            assert(mapped.rangesShared == shared && mapped.rangesMapped == shared);
+            assert(pixels(mapped.target(target)) == drawn);
         }
-        std::puts("PASS native textures through PM4MetalRenderer: identical 1920x1080 pixels; timings are CI GPU, not iPhone game FPS");
+        std::puts("PASS native textures through PM4MetalRenderer: identical 1920x1080 pixels, also read in place; timings are CI GPU, not iPhone game FPS");
     }
 }

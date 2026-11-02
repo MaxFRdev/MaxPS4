@@ -8,12 +8,19 @@ NS_ASSUME_NONNULL_BEGIN
 // Reader is invoked only synchronously during submit, while the guest's
 // submitting thread is paused. Neither reader nor submit may reenter GNM.
 typedef BOOL (^MaxPS4GameMemoryReader)(uint64_t, void*, size_t);
+// The host bytes backing guest memory (maxps4_fex_engine_gpu_view), or NULL:
+// large textures become no-copy buffers the GPU reads in place.
+typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
 @interface MaxPS4GameMetalBridge : NSObject
 - (nullable instancetype)initWithDevice:(id<MTLDevice>)device
                                 reader:(MaxPS4GameMemoryReader)reader;
 // Experimental: native Metal texel reads (PM4MetalRenderer nativeTextures).
 - (nullable instancetype)initWithDevice:(id<MTLDevice>)device
                                 reader:(MaxPS4GameMemoryReader)reader
+                        nativeTextures:(BOOL)nativeTextures;
+- (nullable instancetype)initWithDevice:(id<MTLDevice>)device
+                                reader:(MaxPS4GameMemoryReader)reader
+                                  view:(nullable MaxPS4GameMemoryView)view
                         nativeTextures:(BOOL)nativeTextures;
 - (int32_t)submit:(const uint32_t*)words count:(size_t)count;
 // Returns an owned, immutable display copy, cropped to VideoOut dimensions.
