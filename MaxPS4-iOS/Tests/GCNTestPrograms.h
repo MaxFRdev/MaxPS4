@@ -120,4 +120,15 @@ inline void loadComputeCS(Arena& arena) {
     for (unsigned n = 0; n < 40; ++n)
         for (unsigned c = 0; c < 4; ++c) arena.put(computeSource + 16 * n + 4 * c, bits(float((n * 7 + c * 3) % 13) / 8.0f - 0.25f));
 }
+// A VS exporting image_get_resinfo of the T# in s[0:7] at mip level v0 (the
+// vertex index) as its position bits: a 1024x512 2D image with 4 levels.
+constexpr std::uint64_t resinfoVS = 0x11e00;
+inline const std::uint32_t resinfoSgprs[8] = {0x20000, 10u << 20, 1023 | (511u << 14), (9u << 28) | (3u << 16) | 0xfac, 1023u << 13, 0, 0, 0};
+inline void loadResinfoVS(Arena& arena) {
+    arena.code(resinfoVS, {
+        0xf0380f00, 0x00000400, // image_get_resinfo v[4:7], v0, s[0:7] dmask:0xf
+        0xbf8c1f70,             // s_waitcnt vmcnt(0)
+        0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
+        0xbf810000});
+}
 } // namespace gcn_test

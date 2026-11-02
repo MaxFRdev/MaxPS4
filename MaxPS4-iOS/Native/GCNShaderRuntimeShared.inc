@@ -325,6 +325,16 @@ GCN_FN void gcn_image_store(GCNMemory M, GCNRes8 t, uint x, uint y, uint4 value,
     for (uint c = 0u; c < channels; ++c)
         gcn_store_bits(M, at + c * (bits / 8u), bits, ((dmask >> c) & 1u) != 0u ? gcn_pack(value[c], bits, nfmt) : 0u);
 }
+// image_get_resinfo: width, height, depth (3D) or slices, and mip levels
+// of T# `t` at mip level `lod`, as integers.
+GCN_FN uint4 gcn_image_resinfo(GCNRes8 t, uint lod) {
+    uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u; uint d = (t.d[4] & 0x1fffu) + 1u;
+    uint base = (t.d[3] >> 12) & 15u; uint last = (t.d[3] >> 16) & 15u; uint type = t.d[3] >> 28;
+    uint shift = lod > 31u ? 31u : lod;
+    w = w >> shift; h = h >> shift;
+    if (type == 10u) d = d >> shift;
+    return uint4(w > 0u ? w : 1u, h > 0u ? h : 1u, d > 0u ? d : 1u, last >= base ? last - base + 1u : 1u);
+}
 GCN_FN float4 gcn_image_load(GCNMemory M, GCNRes8 t, uint x, uint y) {
     uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
     if (((t.d[3] >> 20) & 0x1fu) != 8u || x >= w || y >= h) return float4(0.0f, 0.0f, 0.0f, 0.0f);

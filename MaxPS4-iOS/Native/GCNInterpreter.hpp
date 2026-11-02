@@ -878,6 +878,22 @@ private:
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
         if (rsrc > s.size() - 8) return fail("image resource register range");
         const std::uint32_t* d = &s[rsrc];
+        if (i.opcode == 14) {
+            // image_get_resinfo: width, height, depth (3D) or slices, and mip
+            // levels at the lane's mip level, as integers; any image type.
+            const unsigned base = (d[3] >> 12) & 15, last = (d[3] >> 16) & 15;
+            for (unsigned lane = 0; lane < lanes_; ++lane) {
+                if (!active(lane)) continue;
+                const unsigned shift = std::min<std::uint32_t>(v(vaddr, lane), 31);
+                const std::uint32_t depth = (d[4] & 0x1fff) + 1;
+                const std::uint32_t r[4] = {std::max<std::uint32_t>(((d[2] & 0x3fff) + 1) >> shift, 1),
+                                            std::max<std::uint32_t>((((d[2] >> 14) & 0x3fff) + 1) >> shift, 1),
+                                            (d[3] >> 28) == 10 ? std::max<std::uint32_t>(depth >> shift, 1) : depth,
+                                            last >= base ? last - base + 1 : 1};
+                for (unsigned n = 0, out = 0; n < 4; ++n) if ((dmask >> n) & 1) v(vdata + out++, lane) = r[n];
+            }
+            return true;
+        }
         Image t{(std::uint64_t(d[0]) | std::uint64_t(d[1] & 0xff) << 32) << 8,
                 (d[2] & 0x3fff) + 1, ((d[2] >> 14) & 0x3fff) + 1, ((d[4] >> 13) & 0x3fff) + 1,
                 (d[1] >> 20) & 0x3f, (d[1] >> 26) & 15, (d[3] >> 20) & 0x1f, d[3] >> 28,

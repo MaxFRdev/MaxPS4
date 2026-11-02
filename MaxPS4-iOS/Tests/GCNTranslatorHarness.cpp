@@ -29,7 +29,7 @@ rt::GCNMemory window(const Arena& arena) { return {arena.bytes.data(), Arena::st
 }
 int main() {
     Arena arena;
-    loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena);
+    loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena);
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     // Vertex programs: one lane per vertex, against one interpreter wave.
@@ -83,6 +83,22 @@ int main() {
         assert(R.pos[0] == 5 && R.pos[1] == 6 && R.param[0][0] == 5 * 9 + 6);
         // Outside every range reads zero.
         assert(rt::gcn_ld32(P, 0x10e00 + 48) == 0 && rt::gcn_ld32(P, Arena::start) == 0);
+    }
+    // image_get_resinfo per mip level (the lane), against the interpreter.
+    {
+        GCNWave wave(arena.memory, 4);
+        for (unsigned n = 0; n < 8; ++n) wave.s[n] = resinfoSgprs[n];
+        for (unsigned lane = 0; lane < 4; ++lane) wave.v(0, lane) = lane;
+        assert(wave.run(resinfoVS));
+        for (unsigned lane = 0; lane < 4; ++lane) {
+            rt::GCNLane L;
+            for (unsigned n = 0; n < 8; ++n) L.user[n] = resinfoSgprs[n];
+            L.vinit[0] = lane;
+            rt::vs_resinfo(L, M, unusedQuad);
+            for (unsigned c = 0; c < 4; ++c) assert(gcn_detail::u32(L.pos[c]) == wave.exports[0].value[c][lane]);
+            const std::uint32_t expected[4] = {std::max(1024u >> lane, 1u), std::max(512u >> lane, 1u), 1, 4};
+            for (unsigned c = 0; c < 4; ++c) assert(wave.exports[0].value[c][lane] == expected[c]);
+        }
     }
     // The pixel quad: four lanes on four threads in lockstep, lane 3 a helper.
     {

@@ -699,7 +699,15 @@ private:
             body_ += std::to_string(dmask) + "u); }";
             sregs_.insert(126);
             return out_.error.empty();
-        } else return fail("unsupported image access");
+        } else if (op == 14) {
+            // image_get_resinfo: integer sizes, not texels.
+            body_ += "if (" + std::string(ex()) + ") { " + res + "uint4 c = gcn_image_resinfo(t, " + v(vaddr) + "); ";
+            for (unsigned n = 0, out = 0; n < 4; ++n)
+                if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = c[" + std::to_string(n) + "]; ";
+            body_ += "}";
+            sregs_.insert(126);
+            return out_.error.empty();
+        } else return fail("unsupported image access " + in.name);
         body_ += "if (" + std::string(ex()) + ") { " + res + "float4 c = " + call + "; ";
         for (unsigned n = 0, out = 0; n < 4; ++n)
             if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(c[" + std::to_string(n) + "]); ";
