@@ -22,6 +22,8 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
     var scaling = "fit" { didSet { if scaling != oldValue { needsRedraw = true } } }
     var report: (String) -> Void
     var failed: (String) -> Void
+    // New game images shown per second, once per second (the on-screen counter).
+    var fps: (Double) -> Void = { _ in }
     init(device: MTLDevice, report: @escaping (String) -> Void, failed: @escaping (String) -> Void) throws {
         guard let queue = device.makeCommandQueue() else { throw NSError(domain: "MaxPS4.Game", code: -12) }
         self.queue = queue; self.pipeline = try MaxPS4VideoOutMetal.make(device: device)
@@ -85,6 +87,7 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
                         let power = (info.isLowPowerModeEnabled ? " (économie d’énergie)" : "")
                             + (info.thermalState == .serious ? " (chauffe)" : info.thermalState == .critical ? " (chauffe critique)" : "")
                         self.report(String(format: "%.1f images/s · écran %.0f Hz%@ · préparation image %.2f ms · ", fps, hertz, power, ms) + frame.report)
+                        self.fps(fps)
                         self.reportTime = now; self.reportFrames = 0; self.preparationSeconds = 0; self.refreshes = 0
                     }
                     // Shown on the next refresh, which also starts the next copy.
@@ -125,6 +128,7 @@ private struct GameMetalSurface: UIViewRepresentable {
     let scaling: String
     let report: (String) -> Void
     let failed: (String) -> Void
+    let fps: (Double) -> Void
     final class Coordinator { var renderer: GameMetalDisplay? }
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> MTKView {
@@ -143,6 +147,7 @@ private struct GameMetalSurface: UIViewRepresentable {
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.report = report
         context.coordinator.renderer?.failed = failed
+        context.coordinator.renderer?.fps = fps
         context.coordinator.renderer?.scaling = scaling
         context.coordinator.renderer?.use(source)
         view.isPaused = !active || context.coordinator.renderer == nil
@@ -181,6 +186,9 @@ struct MaxPS4GameView: View {
     @AppStorage("maxps4.display.scaling") private var scaling = "fit"
     @AppStorage("maxps4.video.height") private var outputHeight = 1080
     @AppStorage("maxps4.fex.profile") private var profiling = false
+    // The images-per-second counter in the top right corner (all games).
+    @AppStorage("maxps4.display.fpsCounter") private var fpsCounter = false
+    @State private var fps = 0.0
     // Réglages › Mode développeur: test options and the technical session report.
     @AppStorage("maxps4.developer") private var developer = false
     private let poll = Timer.publish(every: 1.0 / 60, on: .main, in: .common).autoconnect()
@@ -210,9 +218,25 @@ struct MaxPS4GameView: View {
             if let device {
                 GameMetalSurface(device: device, source: session.source,
                     active: session.running && scenePhase == .active, scaling: scaling,
-                    report: session.presented, failed: session.failed)
+                    report: session.presented, failed: session.failed,
+                    fps: { value in if fpsCounter { fps = value } })
                     .ignoresSafeArea()
                     .accessibilityIdentifier("maxps4.game.surface")
+                if fpsCounter && session.running && session.hasPresented {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Text(verbatim: String(format: "%.0f fps", fps))
+                                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                .foregroundStyle(fps >= 50 ? Color.green : fps >= 25 ? Color.yellow : Color.red)
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(.black.opacity(0.55), in: Capsule())
+                        }
+                        Spacer()
+                    }
+                    .padding(12).allowsHitTesting(false)
+                    .accessibilityIdentifier("maxps4.game.fps")
+                }
                 // A connected controller replaces the touch controls.
                 if session.running && !showingMenu && !gamepad { screenControls }
                 if session.running && !session.hasPresented {
@@ -330,6 +354,8 @@ struct MaxPS4GameView: View {
                                 Text("Remplir").tag("fill")
                                 Text("Étirer").tag("stretch")
                             }.pickerStyle(.segmented)
+                            Toggle("Afficher les images par seconde", isOn: $fpsCounter)
+                                .font(.subheadline).tint(.cyan)
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Commandes").font(.headline)
                                 Toggle("Stick gauche comme croix directionnelle", isOn: $stickAsDpad)
