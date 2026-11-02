@@ -192,14 +192,17 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                     gpu[mode] += (command.GPUEndTime - command.GPUStartTime) * 1000; cpu[mode] += encodeMs; ++timed[mode];
                 }
             }
-            // The V# table, then the vertices merged with the texture, which is
-            // copied into a shared buffer once per command buffer.
-            assert(native.lastRanges == 2 && native.rangesShared == runs && buffered.rangesShared == runs);
+            // The V# table, then the vertices merged with the texture: 1 MiB of
+            // 8_8_8_8 texels, copied into a shared buffer once per command buffer
+            // (5_6_5's 512 KiB stay in the draw's buffer).
+            const unsigned shared = f ? 0u : 1u;
+            assert(native.lastRanges == 2 && native.rangesShared == shared * runs && buffered.rangesShared == shared * runs);
             {
                 id<MTLCommandBuffer> command = [queue commandBuffer];
                 assert(buffered.encode(d, command) && buffered.encode(d, command));
                 [command commit]; [command waitUntilCompleted];
-                assert(command.status == MTLCommandBufferStatusCompleted && !command.error && buffered.rangesShared == runs + 1);
+                assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
+                assert(buffered.rangesShared == shared * (runs + 1));
             }
             if (native.nativeDraws != (formatNative[f] ? runs : 0u))
                 std::printf("native refusals %u/%u/%u/%u/%u, last: %s\n", native.nativeMisses[0], native.nativeMisses[1],
