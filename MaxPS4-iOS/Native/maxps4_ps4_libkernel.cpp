@@ -1631,6 +1631,27 @@ int PS4Libkernel::parent(size_t mount, const char* relative, char* leaf, Error& 
     }
     return parent_from(mounts_[mount].root, relative, leaf, error);
 }
+// The PS4's file system ignores case and the iPhone's does not: a name that
+// does not exist is looked up again among the directory's entries, ignoring
+// ASCII case (Mortal Kombat: Legacy Kollection opens /app0/video/... and
+// /app0/properties/... in lower case). The entry found replaces the name in
+// place (same length); the caller still opens it without following links.
+static void fold_case(int directory, char* name) {
+    struct stat info{};
+    if (!*name || ::fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) return;
+    const int listing = ::openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (listing < 0) return;
+    DIR* entries = ::fdopendir(listing);
+    if (!entries) { ::close(listing); return; }
+    const size_t length = std::strlen(name);
+    while (const dirent* entry = ::readdir(entries)) {
+        if (std::strlen(entry->d_name) == length && ::strncasecmp(entry->d_name, name, length) == 0) {
+            std::memcpy(name, entry->d_name, length);
+            break;
+        }
+    }
+    ::closedir(entries);
+}
 int PS4Libkernel::parent_from(int root, const char* relative, char* leaf, Error& error) const {
     // Walk from a held directory descriptor; reject symlinks at EVERY component.
     // Do not canonicalize then reopen a host path (a race can escape the mount).
@@ -1641,11 +1662,13 @@ int PS4Libkernel::parent_from(int root, const char* relative, char* leaf, Error&
     char* component = path;
     while (char* separator = std::strchr(component, '/')) {
         *separator = '\0';
+        fold_case(directory.fd, component);
         const int next = ::openat(directory.fd, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (next < 0) { error = host_error(errno); return -1; }
         ::close(directory.fd); directory.fd = next;
         component = separator + 1;
     }
+    fold_case(directory.fd, component);
     std::strcpy(leaf, component);
     error = ok;
     const int result = directory.fd;

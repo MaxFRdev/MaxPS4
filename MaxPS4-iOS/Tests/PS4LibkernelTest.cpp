@@ -79,6 +79,16 @@ int main() {
     const auto nested = call(S::open, 0x10000);
     assert(nested == 3 && call(S::read, nested, 0x11000, 4) == 4);
     assert(call(S::close, nested) == 0);
+    // Names in another case reach the same files (the PS4 ignores case);
+    // a link reached that way is still refused.
+    for (const char* folded : {"/app0/SUB/Nested", "/app0/Data.BIN"}) {
+        path(folded);
+        const auto other = call(S::open, 0x10000);
+        assert(other == 3 && call(S::read, other, 0x11000, 4) == 4);
+        assert(memory.read(0x11000, bytes, 4) && std::memcmp(bytes, "Kero", 4) == 0);
+        assert(call(S::close, other) == 0);
+    }
+    path("/app0/LINK"); assert(call(S::open, 0x10000) == kernel_error(loop));
     for (const char* invalid : {"/app0/../data.bin", "/app0//data.bin", "/app0/./data.bin", "relative"}) {
         path(invalid); assert(call(S::open, 0x10000) == kernel_error(inval));
     }
