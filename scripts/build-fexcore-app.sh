@@ -69,9 +69,11 @@ PYREVISION
 EMBEDDED=build/Payload/MaxPS4.app/Frameworks/MaxPS4FEXRuntime.framework
 codesign --force --sign - "$EMBEDDED"
 codesign --verify --strict --verbose=2 "$EMBEDDED"
-# Retain only the developer debugging entitlement requested by StikDebug.
+# The developer debugging entitlement requested by StikDebug, and extended
+# virtual addressing: without it iOS left the app about 6.75 GiB of address
+# space, and Mortal Kombat: Legacy Kollection ran out of memory in 5 GiB.
 # This ad-hoc signature grants no provisioning rights; SideStore must supply a
-# valid profile permitting get-task-allow and re-sign BOTH app and framework.
+# valid profile permitting both and re-sign BOTH app and framework.
 codesign --force --sign - --entitlements MaxPS4-iOS/MaxPS4.entitlements build/Payload/MaxPS4.app
 codesign --verify --strict --verbose=2 build/Payload/MaxPS4.app
 codesign -d --entitlements - build/Payload/MaxPS4.app > build/diagnostics/fex-app-entitlements.plist

@@ -459,7 +459,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
                             missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
                             "Derniers appels PS4 :", recentCalls(opened), "",
-                            "Sortie du jeu :", console(opened), "", memoryLayout(opened), "", live].joined(separator: "\n")
+                            "Sortie du jeu :", console(opened), "", memoryLayout(opened), movedMappings(opened), "", live].joined(separator: "\n")
                 outcome = Outcome(missing: missing.called, crashed: crashed, report: MaxPS4Reports.save(text, for: url))
                 // The run ended normally: its final report replaces the live one.
                 lock.lock(); let liveFile = liveReport; liveReport = nil; lock.unlock()
