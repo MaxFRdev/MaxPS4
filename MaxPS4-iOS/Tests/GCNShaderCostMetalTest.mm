@@ -86,7 +86,14 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"c01 = bx0 || by1 ? gcn_border_color(s) : gcn_texel_at(M, t, wx0, wy1, resolved, offset)", "c01 = gcn_fetch_at(M, t, s, x0, y0 + 1, resolved, offset)"},
             {"c11 = bx1 || by1 ? gcn_border_color(s) : gcn_texel_at(M, t, wx1, wy1, resolved, offset)", "c11 = gcn_fetch_at(M, t, s, x0 + 1, y0 + 1, resolved, offset)"}};
         for (const auto& [from, to] : taps) previousWrap = replaced(previousWrap, from, to);
-        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; };
+        // Native textures as the game binds them (GCNNativeTexture at buffer(3)):
+        // Metal's sampler filters (50aaa47), the texture is only read per texel
+        // (before 50aaa47), or no T# matches and GCN filters with the larger code.
+        const std::string nativeEntry = gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", 0x302, inputCntl, true);
+        const std::string nativePrelude = gcnMetalPrelude(true);
+        const std::string texelOnly = replaced(nativePrelude, "    if (!gcn_native_match(M, t)) return false;\n    const uint w",
+                                               "    if (true) return false;\n    const uint w");
+        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
             {"trivial Metal fragment", vs.source + ps.source + entry + trivial, "trivial_fragment", true},
@@ -103,6 +110,9 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"sample: clamp instead of wrap", vs.source + ps.source + entry, "gcn_fragment", true, clampOnly},
             {"sample: one tap (nearest)", vs.source + ps.source + entry, "gcn_fragment", true, oneTap},
             {"sample: no range lookup", vs.source + ps.source + entry, "gcn_fragment", true, noLookup},
+            {"native: Metal sampler filters", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 1},
+            {"native: texel reads (before 50aaa47)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, texelOnly, 1},
+            {"native: no T# match (GCN filters)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 0},
         };
         MTLCompileOptions* options = [MTLCompileOptions new];
         if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeSafe;
@@ -140,6 +150,29 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         id<MTLTexture> metalImage = [device newTextureWithDescriptor:imageDescriptor];
         [metalImage replaceRegion:MTLRegionMake2D(0, 0, imageW, imageH) mipmapLevel:0
                         withBytes:arena.bytes.data() + (image - Arena::start) bytesPerRow:imageW * 4];
+        // The game's native textures are linear views over guest memory.
+        id<MTLBuffer> linearBytes = [device newBufferWithBytes:arena.bytes.data() + (image - Arena::start) length:imageW * imageH * 4
+                                                       options:MTLResourceStorageModeShared];
+        imageDescriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> linearImage = [linearBytes newTextureWithDescriptor:imageDescriptor offset:0 bytesPerRow:imageW * 4];
+        assert(linearImage);
+        MTLArgumentDescriptor* fields[4];
+        const MTLDataType types[4] = {MTLDataTypeTexture, MTLDataTypeUInt, MTLDataTypeUInt4, MTLDataTypeUInt4};
+        for (unsigned k = 0; k < 4; ++k) {
+            fields[k] = [MTLArgumentDescriptor argumentDescriptor];
+            fields[k].dataType = types[k]; fields[k].index = k;
+            if (types[k] == MTLDataTypeTexture) fields[k].textureType = MTLTextureType2D;
+        }
+        id<MTLArgumentEncoder> nativeArguments = [device newArgumentEncoderWithArguments:[NSArray arrayWithObjects:fields count:4]];
+        id<MTLBuffer> nativeTables[2];
+        for (unsigned enabled = 0; enabled < 2; ++enabled) {
+            nativeTables[enabled] = [device newBufferWithLength:nativeArguments.encodedLength options:MTLResourceStorageModeShared];
+            [nativeArguments setArgumentBuffer:nativeTables[enabled] offset:0];
+            [nativeArguments setTexture:linearImage atIndex:0];
+            *static_cast<uint32_t*>([nativeArguments constantDataAtIndex:1]) = enabled;
+            std::memcpy([nativeArguments constantDataAtIndex:2], t, 16);
+            std::memcpy([nativeArguments constantDataAtIndex:3], t + 4, 16);
+        }
         id<MTLCommandQueue> queue = [device newCommandQueue];
         std::vector<std::vector<double>> samples(variants.size());
         constexpr unsigned runs = 34, warmup = 4;
@@ -158,6 +191,11 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                 [encoder setVertexBytes:&state length:sizeof state atIndex:1]; [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
                 [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
                 [encoder setFragmentTexture:metalImage atIndex:0];
+                if (variants[k].native >= 0) {
+                    [encoder setVertexBuffer:nativeTables[variants[k].native] offset:0 atIndex:3];
+                    [encoder setFragmentBuffer:nativeTables[variants[k].native] offset:0 atIndex:3];
+                    [encoder useResource:linearImage usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];
+                }
                 [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             }
             [encoder endEncoding]; [command commit]; [command waitUntilCompleted];
