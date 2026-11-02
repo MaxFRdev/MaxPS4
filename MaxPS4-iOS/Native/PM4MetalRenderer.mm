@@ -393,6 +393,34 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     return view ? view : miss(4, alignment);
 }
 
+MTLSamplerDescriptor* PM4MetalRenderer::nativeSamplerDescriptor(const std::array<std::uint32_t, 4>& s) {
+    // S# CLAMP_X/Y: wrap, mirror, clamp to last texel; XY_MAG/MIN_FILTER:
+    // point, bilinear (anisotropic filters read as bilinear); DEPTH_COMPARE.
+    auto mode = [](std::uint32_t clamp, MTLSamplerAddressMode& out) {
+        if (clamp > 2) return false;
+        out = clamp == 0 ? MTLSamplerAddressModeRepeat : clamp == 1 ? MTLSamplerAddressModeMirrorRepeat : MTLSamplerAddressModeClampToEdge;
+        return true;
+    };
+    MTLSamplerAddressMode x, y;
+    if (!mode(s[0] & 7, x) || !mode((s[0] >> 3) & 7, y) || ((s[0] >> 12) & 7)) return nil;
+    MTLSamplerDescriptor* descriptor = [MTLSamplerDescriptor new];
+    descriptor.sAddressMode = x; descriptor.tAddressMode = y;
+    descriptor.magFilter = ((s[2] >> 20) & 3) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+    descriptor.minFilter = ((s[2] >> 22) & 3) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+    descriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    descriptor.supportArgumentBuffers = YES;
+    return descriptor;
+}
+
+id<MTLSamplerState> PM4MetalRenderer::nativeSampler(const std::array<std::uint32_t, 4>& s) {
+    const auto found = samplers_.find(s);
+    if (found != samplers_.end()) return found->second;
+    MTLSamplerDescriptor* descriptor = nativeSamplerDescriptor(s);
+    id<MTLSamplerState> sampler = descriptor ? [device_ newSamplerStateWithDescriptor:descriptor] : nil;
+    samplers_[s] = sampler;
+    return sampler;
+}
+
 bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     error.clear();
     if (d.swap > 1) return fail("colour target component swap " + std::to_string(d.swap));
@@ -519,28 +547,39 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                                                                           argument(MTLDataTypeUInt4, 2), argument(MTLDataTypeUInt4, 3),
                                                                           argument(MTLDataTypeTexture, 4), argument(MTLDataTypeUInt4, 5),
                                                                           argument(MTLDataTypeUInt4, 6), argument(MTLDataTypeTexture, 7),
-                                                                          argument(MTLDataTypeUInt4, 8), argument(MTLDataTypeUInt4, 9)]];
+                                                                          argument(MTLDataTypeUInt4, 8), argument(MTLDataTypeUInt4, 9),
+                                                                          argument(MTLDataTypeSampler, 10), argument(MTLDataTypeSampler, 11),
+                                                                          argument(MTLDataTypeSampler, 12), argument(MTLDataTypeUInt4, 13),
+                                                                          argument(MTLDataTypeUInt4, 14), argument(MTLDataTypeUInt4, 15)]];
         }
         // Up to three T#s (a video's Y, U and V planes), each at texture
         // index 0, 4 or 7 with its descriptor's halves after it.
         id<MTLTexture> images[3] = {};
+        id<MTLSamplerState> samplers[3] = {};
         std::array<std::uint32_t, 8> descriptors[3] = {};
-        unsigned found = 0;
+        std::array<std::uint32_t, 4> samplerWords[3] = {};
+        unsigned found = 0, sampled = 0;
         if (scanner_.images().empty()) ++nativeMisses[0];
-        for (const auto& t : scanner_.images())
-            if (found < 3 && (images[found] = nativeTexture(t, memory, slots, drawState.ranges, drawState.rangeCount, target.texture)))
-                descriptors[found++] = t;
+        for (std::size_t k = 0; k < scanner_.images().size() && found < 3; ++k) {
+            const auto& t = scanner_.images()[k];
+            if (!(images[found] = nativeTexture(t, memory, slots, drawState.ranges, drawState.rangeCount, target.texture))) continue;
+            samplerWords[found] = scanner_.samplers()[k];
+            if ((samplers[found] = nativeSampler(samplerWords[found]))) sampled |= 16u << found;
+            descriptors[found++] = t;
+        }
         id<MTLBuffer> arguments = nativeArguments_ ? uploadBuffer(nativeArguments_.encodedLength, commands) : nil;
         if (!arguments) {
             if (!batching_) [encoder endEncoding];
             return fail("native texture arguments");
         }
         [nativeArguments_ setArgumentBuffer:arguments offset:0];
-        *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = (1u << found) - 1;
+        *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = ((1u << found) - 1) | sampled;
         static const NSUInteger fields[3] = {0, 4, 7};
         for (unsigned k = 0; k < 3; ++k) {
             const NSUInteger at = fields[k], low = k ? at + 1 : 2;
             [nativeArguments_ setTexture:images[k] atIndex:at];
+            [nativeArguments_ setSamplerState:samplers[k] atIndex:10 + k];
+            std::memcpy([nativeArguments_ constantDataAtIndex:13 + k], samplerWords[k].data(), 16);
             std::memcpy([nativeArguments_ constantDataAtIndex:low], descriptors[k].data(), 16);
             std::memcpy([nativeArguments_ constantDataAtIndex:low + 1], descriptors[k].data() + 4, 16);
             if (images[k]) [encoder useResource:images[k] usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];

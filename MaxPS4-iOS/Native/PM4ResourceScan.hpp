@@ -27,7 +27,7 @@ public:
     // guest values are read again on every draw. Not a concurrent scanner.
     const std::vector<PM4Range>& scan(const PM4Draw& d) {
     constexpr std::uint64_t largest = 256ull << 20;
-    found_.clear(); merged_.clear(); cache_.clear(); images_.clear();
+    found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear();
     auto note = [&](std::uint64_t base, std::uint64_t bytes) {
         if (bytes && bytes <= largest && base + bytes > base) found_.push_back({base, bytes});
     };
@@ -101,7 +101,7 @@ public:
     // are not written; their resources are also given by stored(). Images
     // the program addresses are captured whatever captureImages.
     const std::vector<PM4Range>& scan(const PM4Dispatch& c) {
-        found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); stored_.clear();
+        found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); stored_.clear();
         constexpr std::uint64_t largest = 256ull << 20;
         auto& wave = wave_;
         wave.reset();
@@ -131,6 +131,8 @@ public:
     }
     const std::vector<PM4Range>& stored() const { return stored_; }
     const std::vector<std::array<std::uint32_t, 8>>& images() const { return images_; }
+    // The S# first sampling each of images() (zeros: read without a sampler).
+    const std::vector<std::array<std::uint32_t, 4>>& samplers() const { return samplers_; }
     // The last scanned draw's vertex lane: (target, x, y, z, w) per export.
     const std::vector<std::array<std::uint32_t, 5>>& vertexExports() const { return vsExports_; }
     bool vertexRan() const { return vsRan_; }
@@ -148,8 +150,12 @@ private:
     std::string vsError_, psError_;
     std::vector<std::array<std::uint32_t, 8>> images_;
     bool captureImages_;
+    std::vector<std::array<std::uint32_t, 4>> samplers_;
     void image(const std::array<std::uint32_t, 8>& descriptor) {
-        if (images_.size() < 8 && std::find(images_.begin(), images_.end(), descriptor) == images_.end()) images_.push_back(descriptor);
+        if (images_.size() < 8 && std::find(images_.begin(), images_.end(), descriptor) == images_.end()) {
+            images_.push_back(descriptor);
+            samplers_.push_back(wave_.imageSampler);
+        }
     }
 };
 

@@ -791,7 +791,8 @@ struct GCNRes8 { uint d[8]; };
 struct GCNRes4 { uint d[4]; };
 #if GCN_NATIVE_TEXTURES
 // Up to three of a draw's T#s viewed as Metal textures (a video's Y, U and V
-// planes); bit k of `enabled` marks texture k valid.
+// planes); bit k of `enabled` marks texture k valid, bit 4 + k its Metal
+// sampler, built on the CPU from S# `sdesc` (the one the draw samples it with).
 struct GCNNativeTexture {
     texture2d<float> image [[id(0)]];
     uint enabled [[id(1)]];
@@ -803,6 +804,12 @@ struct GCNNativeTexture {
     texture2d<float> image2 [[id(7)]];
     uint4 low2 [[id(8)]];
     uint4 high2 [[id(9)]];
+    sampler samp [[id(10)]];
+    sampler samp1 [[id(11)]];
+    sampler samp2 [[id(12)]];
+    uint4 sdesc [[id(13)]];
+    uint4 sdesc1 [[id(14)]];
+    uint4 sdesc2 [[id(15)]];
 };
 #endif
 // Large ranges live in buffers of their own (buffer(5) up), shared by the
@@ -912,36 +919,21 @@ GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
 GCN_FN float4 gcn_native_order(GCNRes8 t, float4 value) {
     return ((t.d[1] >> 20) & 63u) == 16u ? float4(value.b, value.g, value.r, 1.0f) : value;
 }
-// Metal's sampler for S# address modes wrap (0) or clamp to edge (2) on
-// each axis, or mirror (1) on both, point or bilinear: ten samplers, within
-// Metal's sixteen per function. gcn_hw_modes says which pairs it covers.
-GCN_FN bool gcn_hw_modes(uint mx, uint my) { return (mx == 1u && my == 1u) || ((mx == 0u || mx == 2u) && (my == 0u || my == 2u)); }
-#define GCN_HW_SAMPLE(SX, SY) { \
-    if (linear) { constexpr sampler q(s_address::SX, t_address::SY, filter::linear); return image.sample(q, uv, level(0.0f)); } \
-    constexpr sampler q(s_address::SX, t_address::SY, filter::nearest); return image.sample(q, uv, level(0.0f)); }
-GCN_FN float4 gcn_hw_sample(texture2d<float> image, float2 uv, uint mx, uint my, bool linear) {
-    if (mx == 1u) GCN_HW_SAMPLE(mirrored_repeat, mirrored_repeat)
-    if (mx == 0u) { if (my == 0u) GCN_HW_SAMPLE(repeat, repeat) GCN_HW_SAMPLE(repeat, clamp_to_edge) }
-    if (my == 0u) GCN_HW_SAMPLE(clamp_to_edge, repeat) GCN_HW_SAMPLE(clamp_to_edge, clamp_to_edge)
-}
-#undef GCN_HW_SAMPLE
 GCN_FN bool gcn_native_read(texture2d<float> image, GCNRes8 t, int x, int y, thread float4& value) {
     if (x < 0 || y < 0 || uint(x) >= image.get_width() || uint(y) >= image.get_height()) return false;
     value = gcn_native_order(t, image.read(uint2(x,y)));
     return true;
 }
-// The whole sample filtered by Metal's sampler: the texture must be exactly
-// the T#'s size and the S# modes in gcn_hw_modes (8-bit
-// filtering, within a level of GCN's own). False: gcn_sample filters itself.
-GCN_FN bool gcn_native_filter(texture2d<float> image, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v, thread float4& value) {
+// The whole sample filtered by Metal's sampler (one sample instruction: the
+// CPU built it from this S#): the texture must be exactly the T#'s size
+// (8-bit filtering, within a level of GCN's own). False: gcn_sample filters itself.
+GCN_FN bool gcn_native_filter(texture2d<float> image, sampler q, bool usable, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v,
+                              thread float4& value) {
     const uint w = (t.d[2] & 0x3fffu) + 1u, h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
-    if (image.get_width() != w || image.get_height() != h) return false;
-    const uint mx = s.d[0] & 7u, my = (s.d[0] >> 3) & 7u;
-    if (!gcn_hw_modes(mx, my)) return false;
+    if (!usable || image.get_width() != w || image.get_height() != h) return false;
     const bool un = unorm || ((s.d[0] >> 15) & 1u) != 0u;
-    const bool linear = ((s.d[2] >> 20) & 3u) == 1u || ((s.d[2] >> 22) & 3u) == 1u;
     const float2 uv = un ? float2(u / float(w), v / float(h)) : float2(u, v);
-    value = gcn_native_order(t, gcn_hw_sample(image, uv, mx, my, linear));
+    value = gcn_native_order(t, image.sample(q, uv, level(0.0f)));
     return true;
 }
 #endif
@@ -959,8 +951,12 @@ GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, flo
 #if GCN_NATIVE_TEXTURES
     const int k = gcn_native_match(M, t);
     if (k < 0) return false;
-    return k == 0 ? gcn_native_filter(M.native->image, t, s, unorm, u, v, value) :
-           k == 1 ? gcn_native_filter(M.native->image1, t, s, unorm, u, v, value) : gcn_native_filter(M.native->image2, t, s, unorm, u, v, value);
+    const uint4 sd = uint4(s.d[0], s.d[1], s.d[2], s.d[3]);
+    const bool usable = ((M.native->enabled >> (4 + k)) & 1u) != 0u &&
+        all(sd == (k == 0 ? M.native->sdesc : k == 1 ? M.native->sdesc1 : M.native->sdesc2));
+    return k == 0 ? gcn_native_filter(M.native->image, M.native->samp, usable, t, s, unorm, u, v, value) :
+           k == 1 ? gcn_native_filter(M.native->image1, M.native->samp1, usable, t, s, unorm, u, v, value) :
+                    gcn_native_filter(M.native->image2, M.native->samp2, usable, t, s, unorm, u, v, value);
 #else
     return false;
 #endif

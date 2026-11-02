@@ -91,8 +91,8 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         // (before 50aaa47), or no T# matches and GCN filters with the larger code.
         const std::string nativeEntry = gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", 0x302, inputCntl, true);
         const std::string nativePrelude = gcnMetalPrelude(true);
-        const std::string texelOnly = replaced(nativePrelude, "    if (k < 0) return false;\n    return k == 0 ? gcn_native_filter",
-                                               "    if (true) return false;\n    return k == 0 ? gcn_native_filter");
+        const std::string texelOnly = replaced(nativePrelude, "    if (k < 0) return false;\n    const uint4 sd",
+                                               "    if (true) return false;\n    const uint4 sd");
         struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
@@ -121,14 +121,18 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             if (!variants[k].draws) continue;
             NSError* error = nil;
             const std::string source = (variants[k].prelude.empty() ? prelude : variants[k].prelude) + variants[k].source;
+            NSDate* compiling = [NSDate date];
             id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&error];
+            std::printf("SHADER COMPILE %-36s %8.1f ms\n", variants[k].name, -[compiling timeIntervalSinceNow] * 1000);
             if (!library) std::printf("%s MSL: %s\n", variants[k].name, error.localizedDescription.UTF8String);
             assert(library);
             MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
             descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
             descriptor.fragmentFunction = [library newFunctionWithName:[NSString stringWithUTF8String:variants[k].fragment]];
             descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            compiling = [NSDate date];
             pipelines[k] = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+            std::printf("SHADER PIPELINE %-35s %8.1f ms\n", variants[k].name, -[compiling timeIntervalSinceNow] * 1000);
             if (!pipelines[k]) std::printf("%s pipeline: %s\n", variants[k].name, error.localizedDescription.UTF8String);
             assert(pipelines[k]);
         }
@@ -156,21 +160,30 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         imageDescriptor.storageMode = MTLStorageModeShared;
         id<MTLTexture> linearImage = [linearBytes newTextureWithDescriptor:imageDescriptor offset:0 bytesPerRow:imageW * 4];
         assert(linearImage);
-        MTLArgumentDescriptor* fields[10];
-        const MTLDataType types[10] = {MTLDataTypeTexture, MTLDataTypeUInt, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture,
-                                       MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture, MTLDataTypeUInt4, MTLDataTypeUInt4};
-        for (unsigned k = 0; k < 10; ++k) {
+        MTLArgumentDescriptor* fields[16];
+        const MTLDataType types[16] = {MTLDataTypeTexture, MTLDataTypeUInt, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture,
+                                       MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture, MTLDataTypeUInt4, MTLDataTypeUInt4,
+                                       MTLDataTypeSampler, MTLDataTypeSampler, MTLDataTypeSampler, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeUInt4};
+        for (unsigned k = 0; k < 16; ++k) {
             fields[k] = [MTLArgumentDescriptor argumentDescriptor];
             fields[k].dataType = types[k]; fields[k].index = k;
             if (types[k] == MTLDataTypeTexture) fields[k].textureType = MTLTextureType2D;
         }
-        id<MTLArgumentEncoder> nativeArguments = [device newArgumentEncoderWithArguments:[NSArray arrayWithObjects:fields count:10]];
+        id<MTLArgumentEncoder> nativeArguments = [device newArgumentEncoderWithArguments:[NSArray arrayWithObjects:fields count:16]];
+        // The S# (t[8..11]): wrap, bilinear, as PM4MetalRenderer builds its sampler.
+        MTLSamplerDescriptor* samplerDescriptor = [MTLSamplerDescriptor new];
+        samplerDescriptor.minFilter = samplerDescriptor.magFilter = MTLSamplerMinMagFilterLinear;
+        samplerDescriptor.sAddressMode = samplerDescriptor.tAddressMode = MTLSamplerAddressModeRepeat;
+        samplerDescriptor.supportArgumentBuffers = YES;
+        id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:samplerDescriptor];
         id<MTLBuffer> nativeTables[2];
         for (unsigned enabled = 0; enabled < 2; ++enabled) {
             nativeTables[enabled] = [device newBufferWithLength:nativeArguments.encodedLength options:MTLResourceStorageModeShared];
             [nativeArguments setArgumentBuffer:nativeTables[enabled] offset:0];
             [nativeArguments setTexture:linearImage atIndex:0];
-            *static_cast<uint32_t*>([nativeArguments constantDataAtIndex:1]) = enabled;
+            [nativeArguments setSamplerState:sampler atIndex:10];
+            std::memcpy([nativeArguments constantDataAtIndex:13], t + 8, 16);
+            *static_cast<uint32_t*>([nativeArguments constantDataAtIndex:1]) = enabled ? 0x11u : 0u;
             std::memcpy([nativeArguments constantDataAtIndex:2], t, 16);
             std::memcpy([nativeArguments constantDataAtIndex:3], t + 4, 16);
         }

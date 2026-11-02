@@ -142,6 +142,8 @@ public:
     // guest memory is built from these (PM4ResourceScan.hpp).
     std::function<void(std::uint64_t base, std::uint64_t bytes)> resource;
     std::function<void(const std::array<std::uint32_t, 8>&)> imageResource;
+    // During imageResource: the S# of a sampling instruction, zeros otherwise.
+    std::array<std::uint32_t, 4> imageSampler{};
     // Called as `resource` for the resources a store instruction writes.
     std::function<void(std::uint64_t base, std::uint64_t bytes)> stored;
     // Called with every V# access: its extent, stride and the address the
@@ -909,6 +911,8 @@ private:
         if (resource) resource(t.base, imageSize(t, bytes));
         if (i.opcode == 8 && stored) stored(t.base, imageSize(t, bytes));
         if (imageResource) {
+            imageSampler = {};
+            if (i.opcode >= 32 && i.opcode < 64 && samp <= s.size() - 4) std::copy_n(&s[samp], 4, imageSampler.begin());
             std::array<std::uint32_t, 8> descriptor{};
             std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);
         }

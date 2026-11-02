@@ -82,6 +82,10 @@ public:
     // ranges, alignment, Metal view refused; and the last refused T#.
     unsigned nativeMisses[5] = {};
     std::string nativeLastMiss;
+    // A Metal sampler with S# `s`'s address modes and filters, for an argument
+    // buffer; nil for modes Metal has no match for (border, mirror once) or
+    // depth compare, which keep GCN's filtering.
+    static MTLSamplerDescriptor* nativeSamplerDescriptor(const std::array<std::uint32_t, 4>& s);
 
 private:
     using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned>;
@@ -127,6 +131,9 @@ private:
     // window. An offset's bits 48 and up select slots[n - 1] instead of `memory`.
     id<MTLTexture> nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
                                  const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing);
+    // The Metal sampler for S# `s` (cached), nil when Metal's cannot match it.
+    std::map<std::array<std::uint32_t, 4>, id<MTLSamplerState>> samplers_;
+    id<MTLSamplerState> nativeSampler(const std::array<std::uint32_t, 4>& s);
     bool fail(const std::string& message) { error = message; return false; }
 };
 } // namespace maxps4::gpu

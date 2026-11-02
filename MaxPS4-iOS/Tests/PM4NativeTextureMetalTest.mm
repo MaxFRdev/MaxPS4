@@ -35,7 +35,10 @@ id<MTLArgumentEncoder> nativeEncoder(id<MTLDevice> device) {
                                                      argument(MTLDataTypeUInt4, 2), argument(MTLDataTypeUInt4, 3),
                                                      argument(MTLDataTypeTexture, 4), argument(MTLDataTypeUInt4, 5),
                                                      argument(MTLDataTypeUInt4, 6), argument(MTLDataTypeTexture, 7),
-                                                     argument(MTLDataTypeUInt4, 8), argument(MTLDataTypeUInt4, 9)]];
+                                                     argument(MTLDataTypeUInt4, 8), argument(MTLDataTypeUInt4, 9),
+                                                     argument(MTLDataTypeSampler, 10), argument(MTLDataTypeSampler, 11),
+                                                     argument(MTLDataTypeSampler, 12), argument(MTLDataTypeUInt4, 13),
+                                                     argument(MTLDataTypeUInt4, 14), argument(MTLDataTypeUInt4, 15)]];
 }
 uint32_t noise(uint32_t n) { n *= 2654435761u; n ^= n >> 13; n *= 0x5bd1e995u; return n ^ (n >> 15); }
 }
@@ -103,7 +106,13 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             const unsigned slot = (wrap + linear + size) % 3, field[3] = {0, 4, 7}, low[3] = {2, 5, 8};
             [arguments setArgumentBuffer:table offset:0];
             [arguments setTexture:image atIndex:field[slot]];
-            *static_cast<uint32_t*>([arguments constantDataAtIndex:1]) = 1u << slot;
+            // The renderer's Metal sampler for this S#, as the game's draws get it.
+            const std::array<uint32_t, 4> sampler = {t[8], t[9], t[10], t[11]};
+            MTLSamplerDescriptor* samplerDescriptor = PM4MetalRenderer::nativeSamplerDescriptor(sampler);
+            assert(samplerDescriptor);
+            [arguments setSamplerState:[device newSamplerStateWithDescriptor:samplerDescriptor] atIndex:10 + slot];
+            std::memcpy([arguments constantDataAtIndex:13 + slot], sampler.data(), 16);
+            *static_cast<uint32_t*>([arguments constantDataAtIndex:1]) = (1u << slot) | (16u << slot);
             std::memcpy([arguments constantDataAtIndex:low[slot]], t, 16);
             std::memcpy([arguments constantDataAtIndex:low[slot] + 1], t + 4, 16);
             id<MTLBuffer> output = [device newBufferWithLength:samples * 2 * 16 options:MTLResourceStorageModeShared];
