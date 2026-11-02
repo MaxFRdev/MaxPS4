@@ -91,8 +91,8 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         // (before 50aaa47), or no T# matches and GCN filters with the larger code.
         const std::string nativeEntry = gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", 0x302, inputCntl, true);
         const std::string nativePrelude = gcnMetalPrelude(true);
-        const std::string texelOnly = replaced(nativePrelude, "    if (!gcn_native_match(M, t)) return false;\n    const uint w",
-                                               "    if (true) return false;\n    const uint w");
+        const std::string texelOnly = replaced(nativePrelude, "    if (k < 0) return false;\n    return k == 0 ? gcn_native_filter",
+                                               "    if (true) return false;\n    return k == 0 ? gcn_native_filter");
         struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
@@ -156,14 +156,15 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         imageDescriptor.storageMode = MTLStorageModeShared;
         id<MTLTexture> linearImage = [linearBytes newTextureWithDescriptor:imageDescriptor offset:0 bytesPerRow:imageW * 4];
         assert(linearImage);
-        MTLArgumentDescriptor* fields[4];
-        const MTLDataType types[4] = {MTLDataTypeTexture, MTLDataTypeUInt, MTLDataTypeUInt4, MTLDataTypeUInt4};
-        for (unsigned k = 0; k < 4; ++k) {
+        MTLArgumentDescriptor* fields[10];
+        const MTLDataType types[10] = {MTLDataTypeTexture, MTLDataTypeUInt, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture,
+                                       MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture, MTLDataTypeUInt4, MTLDataTypeUInt4};
+        for (unsigned k = 0; k < 10; ++k) {
             fields[k] = [MTLArgumentDescriptor argumentDescriptor];
             fields[k].dataType = types[k]; fields[k].index = k;
             if (types[k] == MTLDataTypeTexture) fields[k].textureType = MTLTextureType2D;
         }
-        id<MTLArgumentEncoder> nativeArguments = [device newArgumentEncoderWithArguments:[NSArray arrayWithObjects:fields count:4]];
+        id<MTLArgumentEncoder> nativeArguments = [device newArgumentEncoderWithArguments:[NSArray arrayWithObjects:fields count:10]];
         id<MTLBuffer> nativeTables[2];
         for (unsigned enabled = 0; enabled < 2; ++enabled) {
             nativeTables[enabled] = [device newBufferWithLength:nativeArguments.encodedLength options:MTLResourceStorageModeShared];

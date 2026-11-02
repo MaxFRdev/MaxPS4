@@ -790,11 +790,19 @@ using namespace metal;
 struct GCNRes8 { uint d[8]; };
 struct GCNRes4 { uint d[4]; };
 #if GCN_NATIVE_TEXTURES
+// Up to three of a draw's T#s viewed as Metal textures (a video's Y, U and V
+// planes); bit k of `enabled` marks texture k valid.
 struct GCNNativeTexture {
     texture2d<float> image [[id(0)]];
     uint enabled [[id(1)]];
     uint4 low [[id(2)]];
     uint4 high [[id(3)]];
+    texture2d<float> image1 [[id(4)]];
+    uint4 low1 [[id(5)]];
+    uint4 high1 [[id(6)]];
+    texture2d<float> image2 [[id(7)]];
+    uint4 low2 [[id(8)]];
+    uint4 high2 [[id(9)]];
 };
 #endif
 // Large ranges live in buffers of their own (buffer(5) up), shared by the
@@ -889,11 +897,16 @@ GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_loca
 GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 2ul, o)) *(device ushort*)(M.p + o) = ushort(v); }
 GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 1ul, o)) *(device uchar*)(M.p + o) = uchar(v); }
 #if GCN_NATIVE_TEXTURES
-// The draw's Metal texture, when T# `t` is the one it views.
-GCN_FN bool gcn_native_match(GCNMemory M, GCNRes8 t) {
+// Which of the draw's Metal textures (0 to 2) views T# `t`, or -1.
+GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
     const uint dfmt = (t.d[1] >> 20) & 63u;
-    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u)) return false;
-    return all(M.native->low == uint4(t.d[0],t.d[1],t.d[2],t.d[3])) && all(M.native->high == uint4(t.d[4],t.d[5],t.d[6],t.d[7]));
+    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u)) return -1;
+    const uint4 low = uint4(t.d[0],t.d[1],t.d[2],t.d[3]), high = uint4(t.d[4],t.d[5],t.d[6],t.d[7]);
+    const uint enabled = M.native->enabled;
+    if ((enabled & 1u) && all(M.native->low == low) && all(M.native->high == high)) return 0;
+    if ((enabled & 2u) && all(M.native->low1 == low) && all(M.native->high1 == high)) return 1;
+    if ((enabled & 4u) && all(M.native->low2 == low) && all(M.native->high2 == high)) return 2;
+    return -1;
 }
 // 5_6_5 viewed as B5G6R5Unorm: GCN's first component is the low 5 bits, Metal's blue.
 GCN_FN float4 gcn_native_order(GCNRes8 t, float4 value) {
@@ -912,32 +925,42 @@ GCN_FN float4 gcn_hw_sample(texture2d<float> image, float2 uv, uint mx, uint my,
     if (my == 0u) GCN_HW_SAMPLE(clamp_to_edge, repeat) GCN_HW_SAMPLE(clamp_to_edge, clamp_to_edge)
 }
 #undef GCN_HW_SAMPLE
-#endif
-GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4& value) {
-#if GCN_NATIVE_TEXTURES
-    if (!gcn_native_match(M, t)) return false;
-    if (x < 0 || y < 0 || uint(x) >= M.native->image.get_width() || uint(y) >= M.native->image.get_height()) return false;
-    value = gcn_native_order(t, M.native->image.read(uint2(x,y)));
+GCN_FN bool gcn_native_read(texture2d<float> image, GCNRes8 t, int x, int y, thread float4& value) {
+    if (x < 0 || y < 0 || uint(x) >= image.get_width() || uint(y) >= image.get_height()) return false;
+    value = gcn_native_order(t, image.read(uint2(x,y)));
     return true;
-#else
-    return false;
-#endif
 }
 // The whole sample filtered by Metal's sampler: the texture must be exactly
 // the T#'s size and the S# modes in gcn_hw_modes (8-bit
 // filtering, within a level of GCN's own). False: gcn_sample filters itself.
-GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v, thread float4& value) {
-#if GCN_NATIVE_TEXTURES
-    if (!gcn_native_match(M, t)) return false;
+GCN_FN bool gcn_native_filter(texture2d<float> image, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v, thread float4& value) {
     const uint w = (t.d[2] & 0x3fffu) + 1u, h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
-    if (M.native->image.get_width() != w || M.native->image.get_height() != h) return false;
+    if (image.get_width() != w || image.get_height() != h) return false;
     const uint mx = s.d[0] & 7u, my = (s.d[0] >> 3) & 7u;
     if (!gcn_hw_modes(mx, my)) return false;
     const bool un = unorm || ((s.d[0] >> 15) & 1u) != 0u;
     const bool linear = ((s.d[2] >> 20) & 3u) == 1u || ((s.d[2] >> 22) & 3u) == 1u;
     const float2 uv = un ? float2(u / float(w), v / float(h)) : float2(u, v);
-    value = gcn_native_order(t, gcn_hw_sample(M.native->image, uv, mx, my, linear));
+    value = gcn_native_order(t, gcn_hw_sample(image, uv, mx, my, linear));
     return true;
+}
+#endif
+GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4& value) {
+#if GCN_NATIVE_TEXTURES
+    const int k = gcn_native_match(M, t);
+    if (k < 0) return false;
+    return k == 0 ? gcn_native_read(M.native->image, t, x, y, value) :
+           k == 1 ? gcn_native_read(M.native->image1, t, x, y, value) : gcn_native_read(M.native->image2, t, x, y, value);
+#else
+    return false;
+#endif
+}
+GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v, thread float4& value) {
+#if GCN_NATIVE_TEXTURES
+    const int k = gcn_native_match(M, t);
+    if (k < 0) return false;
+    return k == 0 ? gcn_native_filter(M.native->image, t, s, unorm, u, v, value) :
+           k == 1 ? gcn_native_filter(M.native->image1, t, s, unorm, u, v, value) : gcn_native_filter(M.native->image2, t, s, unorm, u, v, value);
 #else
     return false;
 #endif

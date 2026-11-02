@@ -76,6 +76,7 @@ public:
     // game may rewrite them while the GPU still runs).
     std::function<const void*(std::uint64_t, std::size_t)> hostView;
     unsigned nativeDraws = 0; // draws given a native texture (nativeTextures)
+    unsigned nativeViews = 0; // native textures given to those draws, up to 3 each
     unsigned targetReads = 0; // of which, a colour target an earlier draw rendered
     // T#s refused: none captured (per draw), format/tiling, outside the copied
     // ranges, alignment, Metal view refused; and the last refused T#.

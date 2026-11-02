@@ -84,6 +84,7 @@ public:
         }
         wave.attribute = [](unsigned, unsigned) { return GCNAttributePlane{}; };
         wave.run(d.ps);
+        psError_ = wave.error;
     }
     // Sorted, with overlapping or nearly adjacent (4 KiB) ranges merged.
     wave.resource = {}; // Do not retain the callback to this scan's stack.
@@ -134,6 +135,8 @@ public:
     const std::vector<std::array<std::uint32_t, 5>>& vertexExports() const { return vsExports_; }
     bool vertexRan() const { return vsRan_; }
     const std::string& vertexError() const { return vsError_; }
+    // Why the last scanned draw's pixel lane stopped early (empty: it ended).
+    const std::string& pixelError() const { return psError_; }
 private:
     // Half the span copied around an oversized V#'s access outside the vertex program.
     static constexpr std::uint64_t window = 1ull << 20;
@@ -142,7 +145,7 @@ private:
     std::vector<PM4Range> found_, merged_, stored_;
     std::vector<std::array<std::uint32_t, 5>> vsExports_;
     bool vsRan_ = false;
-    std::string vsError_;
+    std::string vsError_, psError_;
     std::vector<std::array<std::uint32_t, 8>> images_;
     bool captureImages_;
     void image(const std::array<std::uint32_t, 8>& descriptor) {

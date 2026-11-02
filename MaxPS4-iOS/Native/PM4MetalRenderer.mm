@@ -516,29 +516,39 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                 return a;
             };
             nativeArguments_ = [device_ newArgumentEncoderWithArguments:@[argument(MTLDataTypeTexture, 0), argument(MTLDataTypeUInt, 1),
-                                                                          argument(MTLDataTypeUInt4, 2), argument(MTLDataTypeUInt4, 3)]];
+                                                                          argument(MTLDataTypeUInt4, 2), argument(MTLDataTypeUInt4, 3),
+                                                                          argument(MTLDataTypeTexture, 4), argument(MTLDataTypeUInt4, 5),
+                                                                          argument(MTLDataTypeUInt4, 6), argument(MTLDataTypeTexture, 7),
+                                                                          argument(MTLDataTypeUInt4, 8), argument(MTLDataTypeUInt4, 9)]];
         }
-        id<MTLTexture> image = nil;
-        std::array<std::uint32_t, 8> descriptor{};
+        // Up to three T#s (a video's Y, U and V planes), each at texture
+        // index 0, 4 or 7 with its descriptor's halves after it.
+        id<MTLTexture> images[3] = {};
+        std::array<std::uint32_t, 8> descriptors[3] = {};
+        unsigned found = 0;
         if (scanner_.images().empty()) ++nativeMisses[0];
         for (const auto& t : scanner_.images())
-            if ((image = nativeTexture(t, memory, slots, drawState.ranges, drawState.rangeCount, target.texture))) { descriptor = t; break; }
+            if (found < 3 && (images[found] = nativeTexture(t, memory, slots, drawState.ranges, drawState.rangeCount, target.texture)))
+                descriptors[found++] = t;
         id<MTLBuffer> arguments = nativeArguments_ ? uploadBuffer(nativeArguments_.encodedLength, commands) : nil;
         if (!arguments) {
             if (!batching_) [encoder endEncoding];
             return fail("native texture arguments");
         }
         [nativeArguments_ setArgumentBuffer:arguments offset:0];
-        [nativeArguments_ setTexture:image atIndex:0];
-        *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = image ? 1 : 0;
-        std::memcpy([nativeArguments_ constantDataAtIndex:2], descriptor.data(), 16);
-        std::memcpy([nativeArguments_ constantDataAtIndex:3], descriptor.data() + 4, 16);
+        *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = (1u << found) - 1;
+        static const NSUInteger fields[3] = {0, 4, 7};
+        for (unsigned k = 0; k < 3; ++k) {
+            const NSUInteger at = fields[k], low = k ? at + 1 : 2;
+            [nativeArguments_ setTexture:images[k] atIndex:at];
+            std::memcpy([nativeArguments_ constantDataAtIndex:low], descriptors[k].data(), 16);
+            std::memcpy([nativeArguments_ constantDataAtIndex:low + 1], descriptors[k].data() + 4, 16);
+            if (images[k]) [encoder useResource:images[k] usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];
+        }
         [encoder setVertexBuffer:arguments offset:0 atIndex:3];
         [encoder setFragmentBuffer:arguments offset:0 atIndex:3];
-        if (image) {
-            [encoder useResource:image usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];
-            ++nativeDraws;
-        }
+        if (found) ++nativeDraws;
+        nativeViews += found;
     }
     const std::size_t bytes = d.indices.size() * sizeof(std::uint32_t);
     if (bytes <= 4096) [encoder setVertexBytes:d.indices.data() length:bytes atIndex:2];
@@ -581,8 +591,10 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         listProgram("PS", d.ps, d.psUser, d.psUserCount);
         if (native_) {
             unsigned shown = 0;
+            // A pixel lane that stopped before its image instructions names no texture: say why.
+            if (!scanner_.pixelError().empty()) batchDraws += ", PS interprété : " + scanner_.pixelError();
             for (const auto& t : scanner_.images()) {
-                if (shown++ == 2) break;
+                if (shown++ == 3) break;
                 const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
                 std::snprintf(text, sizeof text, ", texture dfmt %u nfmt %u %ux%u tuilage %u 0x%llx%s", (t[1] >> 20) & 63, (t[1] >> 26) & 15,
                               (t[2] & 0x3fff) + 1, ((t[2] >> 14) & 0x3fff) + 1, (t[3] >> 20) & 31, (unsigned long long)base,

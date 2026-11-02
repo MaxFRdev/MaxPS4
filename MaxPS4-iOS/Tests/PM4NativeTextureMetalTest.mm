@@ -32,7 +32,10 @@ id<MTLArgumentEncoder> nativeEncoder(id<MTLDevice> device) {
         return a;
     };
     return [device newArgumentEncoderWithArguments:@[argument(MTLDataTypeTexture, 0), argument(MTLDataTypeUInt, 1),
-                                                     argument(MTLDataTypeUInt4, 2), argument(MTLDataTypeUInt4, 3)]];
+                                                     argument(MTLDataTypeUInt4, 2), argument(MTLDataTypeUInt4, 3),
+                                                     argument(MTLDataTypeTexture, 4), argument(MTLDataTypeUInt4, 5),
+                                                     argument(MTLDataTypeUInt4, 6), argument(MTLDataTypeTexture, 7),
+                                                     argument(MTLDataTypeUInt4, 8), argument(MTLDataTypeUInt4, 9)]];
 }
 uint32_t noise(uint32_t n) { n *= 2654435761u; n ^= n >> 13; n *= 0x5bd1e995u; return n ^ (n >> 15); }
 }
@@ -96,11 +99,13 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                                     wrap | (wrap << 3), 0, linear ? 0x500000u : 0u, 0};
             std::memcpy(state.ps, t, sizeof t);
             id<MTLBuffer> table = [device newBufferWithLength:arguments.encodedLength options:MTLResourceStorageModeShared];
+            // Each of the three native slots in turn (a video's Y, U and V planes).
+            const unsigned slot = (wrap + linear + size) % 3, field[3] = {0, 4, 7}, low[3] = {2, 5, 8};
             [arguments setArgumentBuffer:table offset:0];
-            [arguments setTexture:image atIndex:0];
-            *static_cast<uint32_t*>([arguments constantDataAtIndex:1]) = 1;
-            std::memcpy([arguments constantDataAtIndex:2], t, 16);
-            std::memcpy([arguments constantDataAtIndex:3], t + 4, 16);
+            [arguments setTexture:image atIndex:field[slot]];
+            *static_cast<uint32_t*>([arguments constantDataAtIndex:1]) = 1u << slot;
+            std::memcpy([arguments constantDataAtIndex:low[slot]], t, 16);
+            std::memcpy([arguments constantDataAtIndex:low[slot] + 1], t + 4, 16);
             id<MTLBuffer> output = [device newBufferWithLength:samples * 2 * 16 options:MTLResourceStorageModeShared];
             id<MTLBuffer> used = [device newBufferWithLength:4 options:MTLResourceStorageModeShared];
             id<MTLCommandBuffer> command = [queue commandBuffer];
