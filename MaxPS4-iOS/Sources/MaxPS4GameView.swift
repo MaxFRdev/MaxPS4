@@ -279,8 +279,6 @@ struct MaxPS4GameView: View {
                         }
                         Text("Ces réglages sont mémorisés pour ce jeu.")
                             .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: 320)
-                        Text("Tourne l’iPhone pour jouer en paysage.")
-                            .font(.caption).foregroundStyle(.secondary)
                     }
                     .padding(28)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
@@ -312,6 +310,10 @@ struct MaxPS4GameView: View {
         }
         .preferredColorScheme(.dark)
         .statusBarHidden(true)
+        // Games are played in landscape: turn the iPhone there while this
+        // screen is shown, and back to portrait for the library after.
+        .onAppear { MaxPS4Orientation.landscape() }
+        .onDisappear { MaxPS4Orientation.release() }
         .persistentSystemOverlays(.hidden)
         .sheet(isPresented: $showingMenu) {
             NavigationStack {

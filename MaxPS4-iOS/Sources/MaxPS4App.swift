@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct MaxPS4App: App {
+    @UIApplicationDelegateAdaptor(MaxPS4AppDelegate.self) private var appDelegate
     @StateObject private var emulator = MaxPS4Emulator()
     @AppStorage(MaxPS4Language.key) private var language = ""
 
