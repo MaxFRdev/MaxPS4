@@ -899,15 +899,17 @@ GCN_FN bool gcn_native_match(GCNMemory M, GCNRes8 t) {
 GCN_FN float4 gcn_native_order(GCNRes8 t, float4 value) {
     return ((t.d[1] >> 20) & 63u) == 16u ? float4(value.b, value.g, value.r, 1.0f) : value;
 }
-// Metal's sampler for S# address modes wrap (0), mirror (1) and clamp to
-// edge (2) on each axis, point or bilinear.
+// Metal's sampler for S# address modes wrap (0) or clamp to edge (2) on
+// each axis, or mirror (1) on both, point or bilinear: ten samplers, within
+// Metal's sixteen per function. gcn_hw_modes says which pairs it covers.
+GCN_FN bool gcn_hw_modes(uint mx, uint my) { return (mx == 1u && my == 1u) || ((mx == 0u || mx == 2u) && (my == 0u || my == 2u)); }
 #define GCN_HW_SAMPLE(SX, SY) { \
     if (linear) { constexpr sampler q(s_address::SX, t_address::SY, filter::linear); return image.sample(q, uv, level(0.0f)); } \
     constexpr sampler q(s_address::SX, t_address::SY, filter::nearest); return image.sample(q, uv, level(0.0f)); }
 GCN_FN float4 gcn_hw_sample(texture2d<float> image, float2 uv, uint mx, uint my, bool linear) {
-    if (mx == 0u) { if (my == 0u) GCN_HW_SAMPLE(repeat, repeat) if (my == 1u) GCN_HW_SAMPLE(repeat, mirrored_repeat) GCN_HW_SAMPLE(repeat, clamp_to_edge) }
-    if (mx == 1u) { if (my == 0u) GCN_HW_SAMPLE(mirrored_repeat, repeat) if (my == 1u) GCN_HW_SAMPLE(mirrored_repeat, mirrored_repeat) GCN_HW_SAMPLE(mirrored_repeat, clamp_to_edge) }
-    if (my == 0u) GCN_HW_SAMPLE(clamp_to_edge, repeat) if (my == 1u) GCN_HW_SAMPLE(clamp_to_edge, mirrored_repeat) GCN_HW_SAMPLE(clamp_to_edge, clamp_to_edge)
+    if (mx == 1u) GCN_HW_SAMPLE(mirrored_repeat, mirrored_repeat)
+    if (mx == 0u) { if (my == 0u) GCN_HW_SAMPLE(repeat, repeat) GCN_HW_SAMPLE(repeat, clamp_to_edge) }
+    if (my == 0u) GCN_HW_SAMPLE(clamp_to_edge, repeat) GCN_HW_SAMPLE(clamp_to_edge, clamp_to_edge)
 }
 #undef GCN_HW_SAMPLE
 #endif
@@ -922,7 +924,7 @@ GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4
 #endif
 }
 // The whole sample filtered by Metal's sampler: the texture must be exactly
-// the T#'s size and the S# modes wrap, mirror or clamp to edge (8-bit
+// the T#'s size and the S# modes in gcn_hw_modes (8-bit
 // filtering, within a level of GCN's own). False: gcn_sample filters itself.
 GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v, thread float4& value) {
 #if GCN_NATIVE_TEXTURES
@@ -930,7 +932,7 @@ GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, flo
     const uint w = (t.d[2] & 0x3fffu) + 1u, h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
     if (M.native->image.get_width() != w || M.native->image.get_height() != h) return false;
     const uint mx = s.d[0] & 7u, my = (s.d[0] >> 3) & 7u;
-    if (mx > 2u || my > 2u) return false;
+    if (!gcn_hw_modes(mx, my)) return false;
     const bool un = unorm || ((s.d[0] >> 15) & 1u) != 0u;
     const bool linear = ((s.d[2] >> 20) & 3u) == 1u || ((s.d[2] >> 22) & 3u) == 1u;
     const float2 uv = un ? float2(u / float(w), v / float(h)) : float2(u, v);
