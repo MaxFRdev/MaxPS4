@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <sys/mman.h>
+#include <limits>
 #include <unistd.h>
 #include <cerrno>
 #include <mutex>
@@ -124,6 +125,14 @@ public:
     std::mutex recent_lock;
     std::array<RecentCall, 128> recent {};
     uint64_t recent_next = 0;
+    // The last calls that returned a PS4 error, kept apart (same lock): the
+    // recent calls are often all audio output by the time a game stops.
+    std::array<RecentCall, 64> failed {};
+    uint64_t failed_next = 0;
+    static bool error_result(int64_t result) {
+        const uint64_t bits = uint64_t(result);
+        return (result < 0 && result >= std::numeric_limits<int32_t>::min()) || (bits >> 32 == 0 && (bits & 0xff000000u) == 0x80000000u);
+    }
     static bool frequent(maxps4::PS4KernelService s) {
         using S = maxps4::PS4KernelService;
         switch (s) {
@@ -262,6 +271,7 @@ public:
                     (void)memory->read_cstring(call.rdi, entry.path, sizeof(entry.path));
                 std::lock_guard<std::mutex> guard(recent_lock);
                 recent[recent_next++ % recent.size()] = entry;
+                if (error_result(result)) failed[failed_next++ % failed.size()] = entry;
             }
             ++calls;
             char path[256] = {};
@@ -1929,15 +1939,15 @@ extern "C" int32_t maxps4_fex_engine_moved_mappings(maxps4_fex_engine* engine, c
     std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
     return int32_t(std::min<size_t>(total, INT32_MAX));
 }
-extern "C" int32_t maxps4_fex_engine_recent_calls(maxps4_fex_engine* engine, char* text, size_t capacity) {
-    if (!engine || !text || !capacity) return -EINVAL;
-    auto& probe = engine->probe;
-    std::lock_guard<std::mutex> guard(probe.recent_lock);
-    const uint64_t count = std::min<uint64_t>(probe.recent_next, probe.recent.size());
+// One call per line, oldest first, from a ring of RecentCall (under recent_lock).
+template <size_t N>
+static int32_t format_calls(maxps4_fex_engine* engine, const std::array<ProbeAddressSpace::RecentCall, N>& ring,
+                            uint64_t next, char* text, size_t capacity) {
+    const uint64_t count = std::min<uint64_t>(next, N);
     std::string out;
     char line[256];
-    for (uint64_t i = probe.recent_next - count; i < probe.recent_next; ++i) {
-        const auto& c = probe.recent[i % probe.recent.size()];
+    for (uint64_t i = next - count; i < next; ++i) {
+        const auto& c = ring[i % N];
         const auto service = static_cast<maxps4::PS4KernelService>(c.service);
         std::string name;
         if (c.service >= maxps4::missing_import_token) {
@@ -1956,6 +1966,16 @@ extern "C" int32_t maxps4_fex_engine_recent_calls(maxps4_fex_engine* engine, cha
     }
     std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
     return int32_t(count);
+}
+extern "C" int32_t maxps4_fex_engine_recent_calls(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
+    return format_calls(engine, engine->probe.recent, engine->probe.recent_next, text, capacity);
+}
+extern "C" int32_t maxps4_fex_engine_failed_calls(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
+    return format_calls(engine, engine->probe.failed, engine->probe.failed_next, text, capacity);
 }
 extern "C" int32_t maxps4_fex_engine_missing_imports(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || (!text && capacity)) return -EINVAL;

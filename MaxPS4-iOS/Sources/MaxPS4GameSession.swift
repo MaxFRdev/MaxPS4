@@ -157,7 +157,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let text = compatibility + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
         if let liveReport {
-            MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 :\n" + recentCalls(engine)
+            MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
+                + "\nDerniers appels PS4 :\n" + recentCalls(engine)
                 + "\n" + memoryLayout(engine), to: liveReport)
         }
         return text
@@ -192,6 +193,11 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private func recentCalls(_ engine: OpaquePointer) -> String {
         var text = [CChar](repeating: 0, count: 32768)
         return maxps4_fex_engine_recent_calls(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
+    }
+    // The last calls that returned an error: what MaxPS4 refused the game.
+    private func failedCalls(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 16384)
+        return maxps4_fex_engine_failed_calls(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
     }
     // The game's imports MaxPS4 stubs: those it called ("<library> <NID> (n appels)"), and how many exist.
     private func missingImports(_ engine: OpaquePointer) -> (called: [String], total: Int) {
@@ -458,6 +464,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
                 let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP),
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
                             missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
+                            "Derniers appels PS4 en échec :", failedCalls(opened), "",
                             "Derniers appels PS4 :", recentCalls(opened), "",
                             "Sortie du jeu :", console(opened), "", memoryLayout(opened), movedMappings(opened), "", live].joined(separator: "\n")
                 outcome = Outcome(missing: missing.called, crashed: crashed, report: MaxPS4Reports.save(text, for: url))
