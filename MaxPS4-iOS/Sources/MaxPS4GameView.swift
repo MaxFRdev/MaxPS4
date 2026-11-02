@@ -389,6 +389,8 @@ struct MaxPS4GameView: View {
                 }
             }
             Button(hasLaunched ? "Rejouer" : "Jouer") {
+                // Shown only with a Metal device (see body).
+                guard let device else { return }
                 touch = 0; leftStick = .zero; rightStick = .zero; hasLaunched = true
                 MaxPS4GameFolders.shared.remember(directory)
                 let update = MaxPS4GameFolders.useUpdate(for: directory) ? MaxPS4GameFolders.shared.update(for: directory)?.url : nil
