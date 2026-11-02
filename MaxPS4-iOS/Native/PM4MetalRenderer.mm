@@ -362,9 +362,11 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
             return texture;
         }
     }
-    if ((dfmt != 10 && dfmt != 16) || ((t[3] >> 20) & 31) != 8 || pitch < width) return miss(1, 0);
-    const MTLPixelFormat format = dfmt == 10 ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatB5G6R5Unorm;
-    const std::uint64_t rowBytes = pitch * (dfmt == 10 ? 4 : 2), bytes = rowBytes * height;
+    // 8_8_8_8, 5_6_5 or 8 (video planes): read, and filtered by Metal's sampler, through a view.
+    if ((dfmt != 10 && dfmt != 16 && dfmt != 1) || (dfmt == 1 && ((t[1] >> 26) & 15) != 0) ||
+        ((t[3] >> 20) & 31) != 8 || pitch < width) return miss(1, 0);
+    const MTLPixelFormat format = dfmt == 10 ? MTLPixelFormatRGBA8Unorm : dfmt == 16 ? MTLPixelFormatB5G6R5Unorm : MTLPixelFormatR8Unorm;
+    const std::uint64_t rowBytes = pitch * (dfmt == 10 ? 4 : dfmt == 16 ? 2 : 1), bytes = rowBytes * height;
     std::uint64_t offset = 0;
     bool inside = false;
     if (!rangeCount) {

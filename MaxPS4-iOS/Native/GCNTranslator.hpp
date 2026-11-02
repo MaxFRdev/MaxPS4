@@ -888,16 +888,53 @@ GCN_FN uint gcn_packed8(GCNMemory M, ulong o) { return uint(*gcn_at(M, o)); }
 GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 4ul, o)) *(device uint*)(M.p + o) = v; }
 GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 2ul, o)) *(device ushort*)(M.p + o) = ushort(v); }
 GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 1ul, o)) *(device uchar*)(M.p + o) = uchar(v); }
+#if GCN_NATIVE_TEXTURES
+// The draw's Metal texture, when T# `t` is the one it views.
+GCN_FN bool gcn_native_match(GCNMemory M, GCNRes8 t) {
+    const uint dfmt = (t.d[1] >> 20) & 63u;
+    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u)) return false;
+    return all(M.native->low == uint4(t.d[0],t.d[1],t.d[2],t.d[3])) && all(M.native->high == uint4(t.d[4],t.d[5],t.d[6],t.d[7]));
+}
+// 5_6_5 viewed as B5G6R5Unorm: GCN's first component is the low 5 bits, Metal's blue.
+GCN_FN float4 gcn_native_order(GCNRes8 t, float4 value) {
+    return ((t.d[1] >> 20) & 63u) == 16u ? float4(value.b, value.g, value.r, 1.0f) : value;
+}
+// Metal's sampler for S# address modes wrap (0), mirror (1) and clamp to
+// edge (2) on each axis, point or bilinear.
+#define GCN_HW_SAMPLE(SX, SY) { \
+    if (linear) { constexpr sampler q(s_address::SX, t_address::SY, filter::linear); return image.sample(q, uv, level(0.0f)); } \
+    constexpr sampler q(s_address::SX, t_address::SY, filter::nearest); return image.sample(q, uv, level(0.0f)); }
+GCN_FN float4 gcn_hw_sample(texture2d<float> image, float2 uv, uint mx, uint my, bool linear) {
+    if (mx == 0u) { if (my == 0u) GCN_HW_SAMPLE(repeat, repeat) if (my == 1u) GCN_HW_SAMPLE(repeat, mirrored_repeat) GCN_HW_SAMPLE(repeat, clamp_to_edge) }
+    if (mx == 1u) { if (my == 0u) GCN_HW_SAMPLE(mirrored_repeat, repeat) if (my == 1u) GCN_HW_SAMPLE(mirrored_repeat, mirrored_repeat) GCN_HW_SAMPLE(mirrored_repeat, clamp_to_edge) }
+    if (my == 0u) GCN_HW_SAMPLE(clamp_to_edge, repeat) if (my == 1u) GCN_HW_SAMPLE(clamp_to_edge, mirrored_repeat) GCN_HW_SAMPLE(clamp_to_edge, clamp_to_edge)
+}
+#undef GCN_HW_SAMPLE
+#endif
 GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4& value) {
 #if GCN_NATIVE_TEXTURES
-    const uint dfmt = (t.d[1] >> 20) & 63u;
-    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u)) return false;
-    if (any(M.native->low != uint4(t.d[0],t.d[1],t.d[2],t.d[3])) ||
-        any(M.native->high != uint4(t.d[4],t.d[5],t.d[6],t.d[7]))) return false;
+    if (!gcn_native_match(M, t)) return false;
     if (x < 0 || y < 0 || uint(x) >= M.native->image.get_width() || uint(y) >= M.native->image.get_height()) return false;
-    value = M.native->image.read(uint2(x,y));
-    // 5_6_5 viewed as B5G6R5Unorm: GCN's first component is the low 5 bits, Metal's blue.
-    if (dfmt == 16u) value = float4(value.b, value.g, value.r, 1.0f);
+    value = gcn_native_order(t, M.native->image.read(uint2(x,y)));
+    return true;
+#else
+    return false;
+#endif
+}
+// The whole sample filtered by Metal's sampler: the texture must be exactly
+// the T#'s size and the S# modes wrap, mirror or clamp to edge (8-bit
+// filtering, within a level of GCN's own). False: gcn_sample filters itself.
+GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v, thread float4& value) {
+#if GCN_NATIVE_TEXTURES
+    if (!gcn_native_match(M, t)) return false;
+    const uint w = (t.d[2] & 0x3fffu) + 1u, h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
+    if (M.native->image.get_width() != w || M.native->image.get_height() != h) return false;
+    const uint mx = s.d[0] & 7u, my = (s.d[0] >> 3) & 7u;
+    if (mx > 2u || my > 2u) return false;
+    const bool un = unorm || ((s.d[0] >> 15) & 1u) != 0u;
+    const bool linear = ((s.d[2] >> 20) & 3u) == 1u || ((s.d[2] >> 22) & 3u) == 1u;
+    const float2 uv = un ? float2(u / float(w), v / float(h)) : float2(u, v);
+    value = gcn_native_order(t, gcn_hw_sample(M.native->image, uv, mx, my, linear));
     return true;
 #else
     return false;

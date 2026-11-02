@@ -289,6 +289,8 @@ GCN_FN float4 gcn_sample_at(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float
 }
 GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v) {
     if (((t.d[3] >> 20) & 0x1fu) != 8u) return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 filtered;
+    if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);
     ulong base = (ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8;
     uint width = (t.d[2] & 0x3fffu) + 1u, height = ((t.d[2] >> 14) & 0x3fffu) + 1u;
     uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u, dfmt = (t.d[1] >> 20) & 0x3fu;

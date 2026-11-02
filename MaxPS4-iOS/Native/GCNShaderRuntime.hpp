@@ -117,6 +117,7 @@ GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o; if (gcn_locate(M, 
 GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o; std::uint16_t h = std::uint16_t(v); if (gcn_locate(M, a, 2, o)) std::memcpy(const_cast<unsigned char*>(M.p) + o, &h, 2); }
 GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o; if (gcn_locate(M, a, 1, o)) const_cast<unsigned char*>(M.p)[o] = (unsigned char)v; }
 GCN_FN bool gcn_native_texel(GCNMemory, GCNRes8, int, int, float4&) { return false; }
+GCN_FN bool gcn_native_sample(GCNMemory, GCNRes8, GCNRes4, bool, float, float, float4&) { return false; }
 #define GCN_SHARED_SOURCE(...) __VA_ARGS__
 #include "GCNShaderRuntimeShared.inc"
 #undef GCN_SHARED_SOURCE
