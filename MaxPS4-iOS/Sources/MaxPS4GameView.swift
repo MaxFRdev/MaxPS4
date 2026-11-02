@@ -249,64 +249,8 @@ struct MaxPS4GameView: View {
                     .padding(30).allowsHitTesting(false)
                 }
                 if !session.running {
-                    VStack(spacing: 18) {
-                        Text(directory.lastPathComponent).font(.title2.bold())
-                        if hasLaunched {
-                            Text("Session terminée. Consulte le menu pour les détails.")
-                                .font(.footnote).foregroundStyle(.secondary)
-                            // Why a game stopped, for the player, with the report to send.
-                            let outcome = session.outcome
-                            if !outcome.missing.isEmpty {
-                                Text("Ce jeu a appelé \(outcome.missing.count) fonctions PS4 que MaxPS4 ne gère pas encore : c’est sans doute ce qui le bloque.")
-                                    .font(.footnote).multilineTextAlignment(.center).frame(maxWidth: 320)
-                            }
-                            if outcome.crashed {
-                                Text("Le jeu s’est arrêté sur une erreur.").font(.footnote).foregroundStyle(.orange)
-                            }
-                            if let report = outcome.report {
-                                ShareLink(item: report) { Label("Partager le rapport de compatibilité", systemImage: "square.and.arrow.up") }
-                                    .font(.footnote).tint(.cyan)
-                                Text("Rapport enregistré dans Fichiers › MaxPS4 › Rapports.")
-                                    .font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
-                        Button(hasLaunched ? "Rejouer" : "Jouer") {
-                            touch = 0; leftStick = .zero; rightStick = .zero; hasLaunched = true
-                            MaxPS4GameFolders.shared.remember(directory)
-                            let update = MaxPS4GameFolders.useUpdate(for: directory) ? MaxPS4GameFolders.shared.update(for: directory)?.url : nil
-                            let addons = MaxPS4GameFolders.shared.addons(for: directory)
-                            // Without developer mode the options take their default
-                            // values whatever was stored: TSO and native textures on
-                            // (Sonic Mania stutters without TSO), the profiler off.
-                            session.start(url: directory, update: update, addons: addons, device: device,
-                                          nativeTextures: !developer || nativeTextures, tso: !developer || tso,
-                                          outputHeight: outputHeight, profiling: developer && profiling)
-                        }.buttonStyle(.borderedProminent).tint(.cyan)
-                        Picker("Affichage", selection: $scaling) {
-                            Text("Ajuster").tag("fit")
-                            Text("Remplir").tag("fill")
-                            Text("Étirer").tag("stretch")
-                        }.pickerStyle(.segmented).frame(maxWidth: 320)
-                        Picker("Résolution du jeu", selection: $outputHeight) {
-                            Text("1080p").tag(1080)
-                            Text("720p").tag(720)
-                        }.pickerStyle(.segmented).frame(maxWidth: 320)
-                        Text("Résolution annoncée au jeu : 720p peut alléger le rendu si le jeu s’y adapte.")
-                            .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 320)
-                        if developer {
-                            Toggle("Textures Metal natives (expérimental)", isOn: $nativeTextures)
-                                .font(.footnote).frame(maxWidth: 320)
-                            Toggle("Ordre mémoire x86 (TSO)", isOn: $tso)
-                                .font(.footnote).frame(maxWidth: 320)
-                            Toggle("Profileur processeur (diagnostic)", isOn: $profiling)
-                                .font(.footnote).frame(maxWidth: 320)
-                        }
-                        Text("Ces réglages sont mémorisés pour ce jeu.")
-                            .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: 320)
-                    }
-                    .padding(28)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
-                    .padding(24)
+                    // In landscape the panel can be taller than the screen: it scrolls then.
+                    ViewThatFits(in: .vertical) { sessionPanel; ScrollView { sessionPanel } }
                 }
             } else { Text("Metal indisponible sur cet appareil.") }
 #else
@@ -421,6 +365,67 @@ struct MaxPS4GameView: View {
 #endif
     }
 #if MAXPS4_FEX_APP
+    // Start, end-of-session outcome and per-game settings, shown while no game runs.
+    private var sessionPanel: some View {
+        VStack(spacing: 18) {
+            Text(directory.lastPathComponent).font(.title2.bold())
+            if hasLaunched {
+                Text("Session terminée. Consulte le menu pour les détails.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                // Why a game stopped, for the player, with the report to send.
+                let outcome = session.outcome
+                if !outcome.missing.isEmpty {
+                    Text("Ce jeu a appelé \(outcome.missing.count) fonctions PS4 que MaxPS4 ne gère pas encore : c’est sans doute ce qui le bloque.")
+                        .font(.footnote).multilineTextAlignment(.center).frame(maxWidth: 320)
+                }
+                if outcome.crashed {
+                    Text("Le jeu s’est arrêté sur une erreur.").font(.footnote).foregroundStyle(.orange)
+                }
+                if let report = outcome.report {
+                    ShareLink(item: report) { Label("Partager le rapport de compatibilité", systemImage: "square.and.arrow.up") }
+                        .font(.footnote).tint(.cyan)
+                    Text("Rapport enregistré dans Fichiers › MaxPS4 › Rapports.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Button(hasLaunched ? "Rejouer" : "Jouer") {
+                touch = 0; leftStick = .zero; rightStick = .zero; hasLaunched = true
+                MaxPS4GameFolders.shared.remember(directory)
+                let update = MaxPS4GameFolders.useUpdate(for: directory) ? MaxPS4GameFolders.shared.update(for: directory)?.url : nil
+                let addons = MaxPS4GameFolders.shared.addons(for: directory)
+                // Without developer mode the options take their default
+                // values whatever was stored: TSO and native textures on
+                // (Sonic Mania stutters without TSO), the profiler off.
+                session.start(url: directory, update: update, addons: addons, device: device,
+                              nativeTextures: !developer || nativeTextures, tso: !developer || tso,
+                              outputHeight: outputHeight, profiling: developer && profiling)
+            }.buttonStyle(.borderedProminent).tint(.cyan)
+            Picker("Affichage", selection: $scaling) {
+                Text("Ajuster").tag("fit")
+                Text("Remplir").tag("fill")
+                Text("Étirer").tag("stretch")
+            }.pickerStyle(.segmented).frame(maxWidth: 320)
+            Picker("Résolution du jeu", selection: $outputHeight) {
+                Text("1080p").tag(1080)
+                Text("720p").tag(720)
+            }.pickerStyle(.segmented).frame(maxWidth: 320)
+            Text("Résolution annoncée au jeu : 720p peut alléger le rendu si le jeu s’y adapte.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 320)
+            if developer {
+                Toggle("Textures Metal natives (expérimental)", isOn: $nativeTextures)
+                    .font(.footnote).frame(maxWidth: 320)
+                Toggle("Ordre mémoire x86 (TSO)", isOn: $tso)
+                    .font(.footnote).frame(maxWidth: 320)
+                Toggle("Profileur processeur (diagnostic)", isOn: $profiling)
+                    .font(.footnote).frame(maxWidth: 320)
+            }
+            Text("Ces réglages sont mémorisés pour ce jeu.")
+                .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: 320)
+        }
+        .padding(28)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+        .padding(24)
+    }
     // The touch controls plus every connected controller, as one DualShock 4.
     // `stickAsDpad` also presses the D-pad with the left stick (2D games that
     // read only the D-pad); the stick's analog position is always sent.
