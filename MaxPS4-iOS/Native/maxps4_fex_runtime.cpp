@@ -1902,6 +1902,9 @@ extern "C" int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine* engine, ui
     if (!engine->staged_ps4.heap(*window, *window_size)) *window = *window_size = 0;
     return 0;
 }
+extern "C" uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine* engine) {
+    return engine ? engine->staged_ps4.spare_address_space() : 0;
+}
 extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     std::string out = engine->libkernel.console();

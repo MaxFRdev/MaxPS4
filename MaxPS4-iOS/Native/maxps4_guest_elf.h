@@ -138,6 +138,7 @@ public:
     uint64_t write_entry_params();
     // General images: the sceKernelMmap window (guest = host addresses);
     // false otherwise. Not part of segments(): translate() ignores it.
+    uint64_t spare_address_space() const { return spare_bytes; }
     bool heap(uint64_t& address, uint64_t& bytes) const {
         address = heap_address; bytes = heap_bytes;
         return heap_bytes != 0;
@@ -179,6 +180,7 @@ private:
     size_t arena_size = 0;
     bool identity = false;
     uint64_t heap_window = 0; // The mmap window size the reservation holds.
+    uint64_t spare_bytes = 0; // Address space left after the reservation (256 MiB steps, 16 GiB at most).
     uint64_t stack_address = 0, stack_bytes = 0, heap_address = 0, heap_bytes = 0,
              entry_params_address = 0, threads_address = 0, thread_slot_bytes = 0,
              thread_return_address = 0;

@@ -321,6 +321,9 @@ int32_t maxps4_fex_engine_console(maxps4_fex_engine *engine, char *text, size_t 
 // Where game memory lives: the PS4 application area reserved at load (0
 // when the host refused it, with the host's answer in app_area_status) and
 // the loaded game's mmap window (0 if none).
+// Address space iOS still granted right after the game's reservation, in
+// 256 MiB steps (16 GiB at most).
+uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine *engine);
 int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine *engine, uint64_t *app_area,
     uint64_t *app_area_size, uint64_t *window, uint64_t *window_size, int32_t *app_area_status);
 // A game directory as the boot probe loads it: <directory>/sce_module/*.prx

@@ -52,9 +52,10 @@ public:
     size_t contiguous(uint64_t address, size_t limit, uint32_t permissions) const override;
     void reset();
     size_t allocated() const { return used_; }
-    // Fixed PS4 addresses outside the window the host refused, newest last:
-    // the span was placed at `result` instead (0: refused), and a game that
-    // ignores the returned address writes into host memory at `hint`.
+    // Placements that did not go as asked, newest last: a fixed PS4 address
+    // outside the window the host refused, placed at `result` instead (a game
+    // that ignores it writes into host memory at `hint`; `status` is the
+    // host's answer), or a refused request (`result` 0, `status` the error).
     struct Moved { uint64_t hint = 0, size = 0, result = 0; int status = 0; };
     static constexpr size_t moved_limit = 16;
     // Copies the last records (oldest first); returns how many moves happened.
@@ -83,6 +84,8 @@ private:
     std::array<Moved, moved_limit> moved_ {};
     size_t moved_total_ = 0;
     void record_move(uint64_t hint, uint64_t size, uint64_t result, int status);
+    ps4::Error place_unrecorded(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
+                                bool fixed, uint64_t& result);
     static ps4::Error permissions(uint32_t protection, uint8_t& result);
     static bool rounded(uint64_t length, uint64_t& result);
     Region* range(uint64_t address, uint64_t length);

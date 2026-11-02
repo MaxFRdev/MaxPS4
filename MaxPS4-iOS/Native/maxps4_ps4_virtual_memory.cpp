@@ -159,6 +159,15 @@ void PS4VirtualMemory::release(uint64_t address, uint64_t size) {
 }
 Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
     bool fixed, uint64_t& result) {
+    // Refusals are recorded too (result 0, the PS4 error): a game that runs
+    // out of memory usually only says so in its own way (Mortal Kombat's
+    // video decoder: VPX_CODEC_MEM_ERROR).
+    const Error e = place_unrecorded(hint, length, alignment, protection, fixed, result);
+    if (e) record_move(hint, length, 0, int(e));
+    return e;
+}
+Error PS4VirtualMemory::place_unrecorded(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
+    bool fixed, uint64_t& result) {
     uint8_t permission;
     Error e = permissions(protection, permission);
     if (e) return e;
@@ -207,7 +216,7 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
                 return ok;
             }
         }
-        if (size > window_bytes) { record_move(hint, size, 0, moved_status); return nomem; }
+        if (size > window_bytes) return nomem;
         moved_hint = hint;
         fixed = false;
         hint = 0;

@@ -283,6 +283,19 @@ int GuestELF::prepare_orbis_general(const std::vector<OrbisLinker::Input>& input
         // Owned from here: clear() releases it on every later failure. Guest and
         // host addresses coincide inside it (translate is the identity).
         arena = reserved; arena_size = size; heap_window = window;
+        // What iOS still grants after it, in 256 MiB spans (up to 16 GiB):
+        // the room left for FEX's per-thread caches and everything else.
+        {
+            constexpr size_t span = size_t(256) << 20;
+            std::vector<void*> spans;
+            for (int i = 0; i < 64; ++i) {
+                void* spare = ::mmap(nullptr, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                if (spare == MAP_FAILED) break;
+                spans.push_back(spare);
+            }
+            spare_bytes = uint64_t(spans.size()) * span;
+            for (void* spare : spans) ::munmap(spare, span);
+        }
         guest_base = reinterpret_cast<uintptr_t>(reserved);
         const uint64_t base = (guest_base + generalAlignment - 1) & ~(generalAlignment - 1);
         if (base + (high - low) + tail > user_end)

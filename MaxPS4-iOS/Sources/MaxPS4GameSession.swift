@@ -167,8 +167,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private func movedMappings(_ engine: OpaquePointer) -> String {
         var text = [CChar](repeating: 0, count: 4096)
         let total = maxps4_fex_engine_moved_mappings(engine, &text, text.count)
-        guard total > 0 else { return "Adresses fixes déplacées : aucune" }
-        return "Adresses fixes déplacées (\(total)) :\n" + String(cString: text)
+        guard total > 0 else { return "Mémoire refusée ou déplacée : rien" }
+        return "Mémoire refusée (-> 0x0, code d'erreur PS4) ou déplacée (\(total)) :\n" + String(cString: text)
     }
     // Whether the PS4 application area and the mmap window were granted, and where.
     private func memoryLayout(_ engine: OpaquePointer) -> String {
@@ -178,7 +178,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let gib = { (bytes: UInt64) in bytes >> 30 }
         let zone = areaSize == 0 ? "zone PS4 0x1000000000 refusée par iOS (code \(status))"
             : "zone PS4 0x\(String(area, radix: 16)) (\(gib(areaSize)) Gio)"
-        return "Mémoire : \(zone) · fenêtre 0x\(String(window, radix: 16)) (\(gib(windowSize)) Gio)"
+        let spare = maxps4_fex_engine_spare_address_space(engine) >> 20
+        return "Mémoire : \(zone) · fenêtre 0x\(String(window, radix: 16)) (\(gib(windowSize)) Gio) · encore libre après elle : \(spare) Mio"
     }
     // What the game printed last (its own error messages), invalid UTF-8 replaced.
     private func console(_ engine: OpaquePointer) -> String {
