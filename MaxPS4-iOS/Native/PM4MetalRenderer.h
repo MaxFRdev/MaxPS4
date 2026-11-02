@@ -44,7 +44,6 @@ public:
     // The draws of the current batch, described for the session report, and
     // the disassembly of the first programs drawn (VS and PS, with user SGPRs).
     std::string batchDraws, programListings;
-    std::string probeReport; // the first draws re-run on the GPU's memory copy and on the GPU
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
     void beginBatch() {
@@ -90,11 +89,6 @@ private:
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
     id<MTLLibrary> library(const std::string& source);
-    // Diagnostics: the positions the draw's vertex program computes on the
-    // GPU for its first vertices, from the same memory copy (first draws only).
-    std::string probeVertices(const PM4Draw& draw, id<MTLBuffer> memory, const void* state, std::size_t stateBytes);
-    unsigned probes_ = 0;
-    id<MTLCommandQueue> probeQueue_ = nil;
     std::map<std::uint64_t, Target> targets_;
     std::vector<std::uint64_t> listed_;
     id<MTLBuffer> visibility_ = nil;
