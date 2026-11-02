@@ -97,6 +97,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var started: TimeInterval?
     // Rewritten each heartbeat so a run that crashes the app leaves its state.
     private var liveReport: URL?
+    private var folderListing = "" // What /app0 holds, read once per run, under lock.
     private var vblanksSent = 0 // With vblankPort, under inputLock.
     private var vblankPort: UInt64 = 1
     private var lastTicket: UInt64 = 0
@@ -158,8 +159,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
         lastBeat = text
         if let liveReport {
             MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
+                + "\nFichiers ouverts par le jeu :\n" + openedFiles(engine)
                 + "\nDerniers appels PS4 :\n" + recentCalls(engine)
-                + "\n" + memoryLayout(engine), to: liveReport)
+                + "\n" + memoryLayout(engine) + "\n\n" + folderListing, to: liveReport)
         }
         return text
     }
@@ -198,6 +200,43 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private func failedCalls(_ engine: OpaquePointer) -> String {
         var text = [CChar](repeating: 0, count: 16384)
         return maxps4_fex_engine_failed_calls(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
+    }
+    // The last files the game opened: where its data really is.
+    private func openedFiles(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 8192)
+        return maxps4_fex_engine_opened_files(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
+    }
+    // The game folder's (and update's) top level: each folder with its file
+    // count and size, so a file the game cannot find can be looked for.
+    static func listing(of folders: [URL]) -> String {
+        let manager = FileManager.default
+        let mib = { (bytes: UInt64) in String(format: "%.1f Mio", Double(bytes) / 1_048_576) }
+        var lines: [String] = []
+        for folder in folders {
+            lines.append("Dossier \(folder.lastPathComponent) :")
+            guard let entries = try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey]) else {
+                lines.append("  illisible"); continue
+            }
+            for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }).prefix(60) {
+                let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                guard values?.isDirectory == true else {
+                    lines.append("  \(entry.lastPathComponent) · \(mib(UInt64(values?.fileSize ?? 0)))"); continue
+                }
+                var files = 0, bytes: UInt64 = 0
+                var names: [String] = []
+                let walker = manager.enumerator(at: entry, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])
+                while let file = walker?.nextObject() as? URL, files < 20000 {
+                    let info = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                    guard info?.isRegularFile == true else { continue }
+                    files += 1; bytes += UInt64(info?.fileSize ?? 0)
+                    if names.count < 4 { names.append(file.lastPathComponent) }
+                }
+                lines.append("  \(entry.lastPathComponent)/ · \(files) fichiers · \(mib(bytes))"
+                    + (names.isEmpty ? "" : " · ex. " + names.joined(separator: ", ")))
+            }
+            if entries.count > 60 { lines.append("  … \(entries.count - 60) autres") }
+        }
+        return lines.joined(separator: "\n")
     }
     // The game's imports MaxPS4 stubs: those it called ("<library> <NID> (n appels)"), and how many exist.
     private func missingImports(_ engine: OpaquePointer) -> (called: [String], total: Int) {
@@ -425,10 +464,12 @@ final class MaxPS4GameSource: @unchecked Sendable {
             progress(String(localized: "Initialisation du JIT…", bundle: .maxps4))
             let initialized = maxps4_fex_engine_initialize(opened)
             guard initialized == 0 else { throw failure(String(localized: "Activer le JIT avec StikDebug puis réessayer", bundle: .maxps4), initialized) }
+            let listing = Self.listing(of: [url] + (update.map { [$0] } ?? []))
             lock.lock()
             bridge = metal; ready = !stopped
             started = ProcessInfo.processInfo.systemUptime
             liveReport = MaxPS4Reports.live(for: url)
+            folderListing = listing
             self.relocation = relocation
             let cancelled = stopped
             if ready {
@@ -465,8 +506,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
                             missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
                             "Derniers appels PS4 en échec :", failedCalls(opened), "",
+                            "Fichiers ouverts par le jeu :", openedFiles(opened), "",
                             "Derniers appels PS4 :", recentCalls(opened), "",
-                            "Sortie du jeu :", console(opened), "", memoryLayout(opened), movedMappings(opened), "", live].joined(separator: "\n")
+                            "Sortie du jeu :", console(opened), "", memoryLayout(opened), movedMappings(opened), "", live, "", folderListing].joined(separator: "\n")
                 outcome = Outcome(missing: missing.called, crashed: crashed, report: MaxPS4Reports.save(text, for: url))
                 // The run ended normally: its final report replaces the live one.
                 lock.lock(); let liveFile = liveReport; liveReport = nil; lock.unlock()

@@ -314,6 +314,8 @@ int32_t maxps4_fex_engine_missing_imports(maxps4_fex_engine *engine, char *text,
 int32_t maxps4_fex_engine_recent_calls(maxps4_fex_engine *engine, char *text, size_t capacity);
 // The run's last PS4 calls that returned an error, same format, oldest first.
 int32_t maxps4_fex_engine_failed_calls(maxps4_fex_engine *engine, char *text, size_t capacity);
+// The last 32 sceKernelOpen calls that succeeded, with their paths (same format).
+int32_t maxps4_fex_engine_opened_files(maxps4_fex_engine *engine, char *text, size_t capacity);
 // Fixed PS4 addresses the host refused, one "0x<hint> + 0x<size> -> 0x<result>
 // (code <status>)" line each, oldest first; returns how many moves happened.
 int32_t maxps4_fex_engine_moved_mappings(maxps4_fex_engine *engine, char *text, size_t capacity);

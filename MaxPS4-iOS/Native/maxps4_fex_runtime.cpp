@@ -129,6 +129,9 @@ public:
     // recent calls are often all audio output by the time a game stops.
     std::array<RecentCall, 64> failed {};
     uint64_t failed_next = 0;
+    // The last files the game did open (same lock): where its data really is.
+    std::array<RecentCall, 32> opened {};
+    uint64_t opened_next = 0;
     static bool error_result(int64_t result) {
         const uint64_t bits = uint64_t(result);
         return (result < 0 && result >= std::numeric_limits<int32_t>::min()) || (bits >> 32 == 0 && (bits & 0xff000000u) == 0x80000000u);
@@ -272,6 +275,7 @@ public:
                 std::lock_guard<std::mutex> guard(recent_lock);
                 recent[recent_next++ % recent.size()] = entry;
                 if (error_result(result)) failed[failed_next++ % failed.size()] = entry;
+                else if (orbis == maxps4::PS4KernelService::open) opened[opened_next++ % opened.size()] = entry;
             }
             ++calls;
             char path[256] = {};
@@ -1976,6 +1980,11 @@ extern "C" int32_t maxps4_fex_engine_failed_calls(maxps4_fex_engine* engine, cha
     if (!engine || !text || !capacity) return -EINVAL;
     std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
     return format_calls(engine, engine->probe.failed, engine->probe.failed_next, text, capacity);
+}
+extern "C" int32_t maxps4_fex_engine_opened_files(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
+    return format_calls(engine, engine->probe.opened, engine->probe.opened_next, text, capacity);
 }
 extern "C" int32_t maxps4_fex_engine_missing_imports(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || (!text && capacity)) return -EINVAL;
