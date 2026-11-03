@@ -110,7 +110,8 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         // on without the draws (a new screen's large programs took the iPhone
         // over 10 s each, the game's image frozen meanwhile).
         auto async = async_;
-        { std::lock_guard<std::mutex> lock(async->mutex); async->pending.insert(key); }
+        { std::lock_guard<std::mutex> lock(async->mutex);
+          async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation"}; }
         auto finish = [async, key](id<MTLRenderPipelineState> state, NSError* error) {
             std::lock_guard<std::mutex> lock(async->mutex);
             async->pending.erase(key);
@@ -121,6 +122,9 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:compileOptions()
                     completionHandler:^(id<MTLLibrary> library, NSError* error) {
             if (!library) { finish(nil, error); return; }
+            { std::lock_guard<std::mutex> lock(async->mutex);
+              const auto pending = async->pending.find(key);
+              if (pending != async->pending.end()) pending->second.stage = "render pipeline creation"; }
             descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
             descriptor.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
             [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
@@ -141,6 +145,19 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     ++pipelinesBuilt;
     pipelines_[key] = state;
     return state;
+}
+
+std::string PM4MetalRenderer::pipelineStatus() const {
+    std::lock_guard<std::mutex> lock(async_->mutex);
+    if (async_->pending.empty()) return {};
+    const auto oldest = std::min_element(async_->pending.begin(), async_->pending.end(),
+        [](const auto& a, const auto& b) { return a.second.since < b.second.since; });
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - oldest->second.since).count();
+    char text[192];
+    std::snprintf(text, sizeof text, " · plus ancien : %s %.1f s, VS 0x%llx / PS 0x%llx",
+                  oldest->second.stage, seconds, (unsigned long long)std::get<0>(oldest->first),
+                  (unsigned long long)std::get<1>(oldest->first));
+    return text;
 }
 
 MTLCompileOptions* PM4MetalRenderer::compileOptions() {
@@ -186,6 +203,7 @@ id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
 
 bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> commands) {
     error.clear();
+    lastDispatchNote_.clear();
     if (!c.program || !c.groups[0] || !c.groups[1] || !c.groups[2]) return true; // nothing to run
     const std::uint64_t tx = std::max(1u, c.threads[0]), ty = std::max(1u, c.threads[1]), tz = std::max(1u, c.threads[2]);
     // Copies of the ranges the program addresses, as for a draw (copy mode only).
@@ -204,6 +222,10 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
         const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
         const unsigned dfmt = (t[1] >> 20) & 63, tiling = (t[3] >> 20) & 31;
         const unsigned pitch = ((t[4] >> 13) & 0x3fff) + 1, height = ((t[2] >> 14) & 0x3fff) + 1;
+        if (tiling != 8 && stored(base, 1)) {
+            lastDispatchNote_ = "compute refusé : écriture dans une image tuilée non prise en charge";
+            return fail("compute writes a tiled image; tiled compute stores are unsupported");
+        }
         if (dfmt == 10 && tiling == 8 && !targets_.count(base) && stored(base, std::uint64_t(pitch) * height * 4))
             outputs.push_back({base, pitch, height});
     }
@@ -211,8 +233,17 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     // receives the rest): a kernel storing nothing else changes nothing.
     bool visible = !outputs.empty();
     for (const auto& [address, target] : targets_)
-        if (target.texture && stored(address, std::uint64_t(target.texture.width) * 4 * target.texture.height)) visible = true;
-    if (!visible) { ++dispatchesWithoutEffect; return true; }
+        if (target.texture && stored(address, 1)) visible = true;
+    if (!visible) {
+        if (!scanner_.stored().empty()) {
+            lastDispatchNote_ = "compute refusé : écritures mémoire hors des images visibles, writeback invité non pris en charge";
+            return fail("compute writes guest memory outside visible images; guest writeback is unsupported");
+        }
+        ++dispatchesWithoutEffect;
+        lastDispatchNote_ = "aucune écriture atteinte par la lane de diagnostic";
+        return true;
+    }
+    lastDispatchNote_ = "écriture vers une image visible détectée";
     id<MTLComputePipelineState> state = kernel(c);
     if (!state) return false;
     if (tx * ty * tz > state.maxTotalThreadsPerThreadgroup) return fail("threads per group");

@@ -260,10 +260,13 @@ final class MaxPS4GameSource: @unchecked Sendable {
         defer { lastRates = (now, requested, displayed, submitMs) }
         guard let last = lastRates, now > last.time else { return "" }
         let span = now - last.time
-        let game = Double(requested - last.requested) / span
-        let shown = Double(displayed - last.displayed) / span
+        let requestedDelta = requested >= last.requested ? requested - last.requested : 0
+        let displayedDelta = max(0, displayed - last.displayed)
+        let game = Double(requestedDelta) / span
+        let shown = Double(displayedDelta) / span
         let metal = (submitMs - last.submitMs) / (span * 10)
-        return String(format: "Cadence : jeu %.1f images/s · affichées %.1f/s · rendu Metal %.0f %% du temps du jeu\n", game, shown, metal)
+        return String(format: "Cadence : jeu %.1f images/s · affichées %.1f/s · rendu Metal %.0f %% · fenêtre %.1f s (+%llu demandées, +%d affichées)\n",
+                      game, shown, metal, span, requestedDelta, displayedDelta)
     }
     private func audioStatus(_ engine: OpaquePointer) -> String {
         if let audioFailure { return "Audio : sortie iOS indisponible (\(audioFailure))" }

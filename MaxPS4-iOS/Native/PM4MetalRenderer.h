@@ -22,6 +22,7 @@
 #include "PM4DrawCollector.hpp"
 #include "PM4ResourceScan.hpp"
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -46,6 +47,7 @@ public:
     // (and nothing encoded) when it cannot be expressed.
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     unsigned kernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
+    const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     // The draws of the current batch, described for the session report, and
     // the disassembly of the first programs drawn (VS and PS, with user SGPRs).
     std::string batchDraws, programListings;
@@ -79,6 +81,7 @@ public:
     unsigned pipelinesPending() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->pending.size()); }
     unsigned pipelinesRefused() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->refused.size()); }
     std::string pipelineError() const { std::lock_guard<std::mutex> lock(async_->mutex); return async_->lastError; }
+    std::string pipelineStatus() const;
     unsigned lastRanges = 0; // memory ranges copied for the last draw (copy mode)
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;
@@ -115,13 +118,16 @@ private:
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
     struct AsyncPipelines {
+        struct Pending { std::chrono::steady_clock::time_point since; const char* stage; };
         std::mutex mutex;
-        std::set<PipelineKey> pending, refused;
+        std::map<PipelineKey, Pending> pending;
+        std::set<PipelineKey> refused;
         std::map<PipelineKey, id<MTLRenderPipelineState>> ready; // nil: refused
         std::string lastError;
     };
     std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
     bool deferred_ = false; // the last pipeline() call left its draw to a pending build
+    std::string lastDispatchNote_;
     static MTLCompileOptions* compileOptions();
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);

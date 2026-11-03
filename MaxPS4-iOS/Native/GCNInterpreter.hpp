@@ -901,6 +901,10 @@ private:
                 (d[1] >> 20) & 0x3f, (d[1] >> 26) & 15, (d[3] >> 20) & 0x1f, d[3] >> 28,
                 {d[3] & 7, (d[3] >> 3) & 7, (d[3] >> 6) & 7, (d[3] >> 9) & 7}};
         if (t.type != 9) return fail("image type " + std::to_string(t.type));
+        // Preserve the destination address even when its tiled layout cannot
+        // be interpreted by this CPU-side resource scan. The renderer uses
+        // this to refuse unsupported writes instead of silently dropping them.
+        if (i.opcode == 8 && stored) stored(t.base, 1);
         if (t.tiling != 8) {
             // Still named to imageResource: a tiled T# is often a colour target
             // the Metal renderer holds as a texture.
