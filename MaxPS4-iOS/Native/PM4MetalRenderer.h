@@ -21,6 +21,7 @@
 #import <Metal/Metal.h>
 #include "PM4DrawCollector.hpp"
 #include "PM4ResourceScan.hpp"
+#include <atomic>
 #include <functional>
 #include <map>
 #include <string>
@@ -65,6 +66,9 @@ public:
     template <class F> void forEachTarget(F&& f) const { for (const auto& [address, t] : targets_) f(address, t.texture); }
     std::string error;
     unsigned pipelinesBuilt = 0;
+    // Read from other threads while encoding: 1 compiling MSL, 2 building a
+    // render pipeline, 3 translating GCN programs, 0 none of these.
+    std::atomic<int> compiling{0};
     unsigned lastRanges = 0; // memory ranges copied for the last draw (copy mode)
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;

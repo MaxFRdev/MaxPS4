@@ -46,6 +46,14 @@ struct GameMetalState {
     std::string samples;      // visibility results of the last batch's draws
     bool centreBGRA = false;
     bool nativeTextures;
+    // Where the submission in progress is, read without the lock by the live
+    // report: 0 none, 1 waiting for the previous one's GPU work, 2 waiting for
+    // the lock, 3 encoding draw `phaseDraw` (PS `phasePS`), 4 committing.
+    std::atomic<int> phase{0};
+    std::atomic<long long> phaseSince{0};
+    std::atomic<unsigned> phaseDraw{0};
+    std::atomic<unsigned long long> phasePS{0};
+    void enter(int p) { phase = p; phaseSince = Clock::now().time_since_epoch().count(); }
     NSString* report() const {
         const unsigned* m = renderer.nativeMisses;
         NSString* native = nativeTextures ? [NSString stringWithFormat:
@@ -107,9 +115,13 @@ struct GameMetalState {
         // copies follow on the same queue. One submission at a time stays in
         // flight: the next one waits for it here, after the game's CPU work in
         // between, without the lock, so display copies go on meanwhile.
+        struct Leave { GameMetalState& s; ~Leave() { s.phase = 0; } } leave{s};
         id<MTLCommandBuffer> previous = nil;
+        s.enter(2);
         { std::lock_guard<std::mutex> peek(s.mutex); previous = s.inflight; }
+        s.enter(1);
         if (previous) [previous waitUntilCompleted];
+        s.enter(2);
         std::lock_guard<std::mutex> lock(s.mutex);
         if (!s.error.empty()) return -EIO;
         if (previous) {
@@ -127,7 +139,10 @@ struct GameMetalState {
         const unsigned failed = s.stats.failed;
         const unsigned rendered = s.stats.rendered;
         s.renderer.beginBatch();
+        s.phaseDraw = 0; s.phasePS = 0;
+        s.enter(3);
         s.collector.execute(words, count, [&](const PM4Draw& draw) {
+            ++s.phaseDraw; s.phasePS = draw.ps;
             if (s.stats.failed != failed) return;
             if (s.renderer.encode(draw, command)) ++s.stats.rendered;
             else {
@@ -142,6 +157,7 @@ struct GameMetalState {
             if (s.renderer.dispatch(dispatch, command)) ++s.computeRun;
             else { ++s.computeRefused; s.computeError = s.renderer.error; }
         });
+        s.enter(4);
         s.renderer.endBatch();
         if (!s.renderer.batchDraws.empty()) s.lastDraws = s.renderer.batchDraws;
         if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }
@@ -236,7 +252,17 @@ struct GameMetalState {
 - (NSString*)report {
     // An immutable atomic snapshot: reading diagnostics must not wait for the
     // next submission's encoding, shader compilation or GPU completion.
-    return self.lastReport;
+    // A submission stuck for over half a second says where, from atomics.
+    auto& s = *state_;
+    const int phase = s.phase;
+    const double seconds = std::chrono::duration<double>(Clock::now().time_since_epoch() -
+                                                         Clock::duration(s.phaseSince.load())).count();
+    if (!phase || seconds < 0.5) return self.lastReport;
+    static const char* const phases[] = {"", "attente du GPU (lot précédent)", "attente du verrou Metal", "encodage", "fin du lot"};
+    static const char* const work[] = {"", " · compilation MSL", " · création du pipeline", " · traduction GCN"};
+    const int compiling = s.renderer.compiling;
+    return [NSString stringWithFormat:@"Soumission en cours depuis %.1f s : %s, dessin %u (PS 0x%llx)%s\n%@", seconds, phases[phase],
+            s.phaseDraw.load(), s.phasePS.load(), compiling > 0 && compiling < 4 ? work[compiling] : "", self.lastReport];
 }
 - (NSString*)failure {
     auto& s = *state_;

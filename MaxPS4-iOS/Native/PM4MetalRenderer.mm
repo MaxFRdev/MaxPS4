@@ -61,9 +61,11 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     GCNTranslateOptions psOptions;
     psOptions.name = "ps_program"; psOptions.userCount = d.psUserCount;
     for (unsigned k = 0; k < 16; ++k) psOptions.userData[k] = d.psUser[k];
+    compiling = 3;
     const auto vs = translateGCN(code_, d.vs, vsOptions);
-    if (!vs) { fail("VS translation: " + vs.error); return nil; }
     const auto ps = translateGCN(code_, d.ps, psOptions);
+    compiling = 0;
+    if (!vs) { fail("VS translation: " + vs.error); return nil; }
     if (!ps) { fail("PS translation: " + ps.error); return nil; }
     const std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
                                gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
@@ -95,7 +97,9 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         color.sourceRGBBlendFactor = cs; color.destinationRGBBlendFactor = cd;
         color.sourceAlphaBlendFactor = as; color.destinationAlphaBlendFactor = ad;
     }
+    compiling = 2;
     id<MTLRenderPipelineState> state = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
+    compiling = 0;
     if (!state) { fail(std::string("pipeline: ") + failure.localizedDescription.UTF8String); return nil; }
     ++pipelinesBuilt;
     pipelines_[key] = state;
@@ -112,7 +116,9 @@ id<MTLLibrary> PM4MetalRenderer::library(const std::string& source) {
 #pragma clang diagnostic pop
     }
     NSError* failure = nil;
+    compiling = 1;
     id<MTLLibrary> library = [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&failure];
+    compiling = 0;
     if (!library) fail(std::string("MSL: ") + failure.localizedDescription.UTF8String);
     return library;
 }
