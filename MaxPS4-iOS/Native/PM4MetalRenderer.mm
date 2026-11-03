@@ -360,8 +360,13 @@ bool PM4MetalRenderer::writebackGuestWrites() {
     for (const auto& write : pendingGuestWrites_) {
         const auto* source = static_cast<const std::uint8_t*>(write.buffer.contents) + write.offset;
         if (!writeGuest_(write.address, source, write.size)) {
+            char detail[160];
+            std::snprintf(detail, sizeof(detail),
+                          "compute guest-memory writeback failed at 0x%llx (%llu bytes)",
+                          static_cast<unsigned long long>(write.address),
+                          static_cast<unsigned long long>(write.size));
             pendingGuestWrites_.clear();
-            return fail("compute guest-memory writeback failed");
+            return fail(detail);
         }
     }
     pendingGuestWrites_.clear();
