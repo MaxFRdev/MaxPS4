@@ -456,6 +456,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
             progress(String(localized: "Jeu chargé. Préparation du rendu Metal…", bundle: .maxps4))
             guard let metal = MaxPS4GameMetalBridge(device: device, reader: { address, destination, count in
                 maxps4_fex_engine_read_memory(opened, address, destination, count) == 0
+            }, writer: { address, source, count in
+                maxps4_fex_engine_write_memory(opened, address, source, count) == 0
             }, view: { address, count in
                 var pointer: UnsafeRawPointer?
                 return maxps4_fex_engine_gpu_view(opened, address, count, &pointer) == 0 ? pointer : nil

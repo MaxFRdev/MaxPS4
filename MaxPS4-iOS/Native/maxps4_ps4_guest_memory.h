@@ -50,6 +50,16 @@ public:
         std::memmove(const_cast<uint8_t*>(destination), source, length);
         return true;
     }
+    // A paused host consumer may write a GPU result to any guest range whose
+    // mapping grants WRITE. Unlike syscall output helpers, this must support
+    // ordinary readable and writable heap/data pages as well.
+    bool write_host_result(uint64_t address, const void* source, size_t length) {
+        if (!source || !length) return false;
+        const auto* destination = translate(address, length, 2);
+        if (!destination) return false;
+        std::memmove(const_cast<uint8_t*>(destination), source, length);
+        return true;
+    }
     // The host bytes behind readable guest memory, for the GPU only (a Metal
     // no-copy buffer over a guest texture); CPU clients copy through read().
     const uint8_t* gpu_view(uint64_t address, size_t length) const {

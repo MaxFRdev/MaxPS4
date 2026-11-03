@@ -8,6 +8,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Reader is invoked only synchronously during submit, while the guest's
 // submitting thread is paused. Neither reader nor submit may reenter GNM.
 typedef BOOL (^MaxPS4GameMemoryReader)(uint64_t, void*, size_t);
+// Writer is invoked only synchronously while the guest submission is paused.
+typedef BOOL (^MaxPS4GameMemoryWriter)(uint64_t, const void*, size_t);
 // The host bytes backing guest memory (maxps4_fex_engine_gpu_view), or NULL:
 // large textures become no-copy buffers the GPU reads in place.
 typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
@@ -20,6 +22,11 @@ typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
                         nativeTextures:(BOOL)nativeTextures;
 - (nullable instancetype)initWithDevice:(id<MTLDevice>)device
                                 reader:(MaxPS4GameMemoryReader)reader
+                                  view:(nullable MaxPS4GameMemoryView)view
+                        nativeTextures:(BOOL)nativeTextures;
+- (nullable instancetype)initWithDevice:(id<MTLDevice>)device
+                                reader:(MaxPS4GameMemoryReader)reader
+                                writer:(nullable MaxPS4GameMemoryWriter)writer
                                   view:(nullable MaxPS4GameMemoryView)view
                         nativeTextures:(BOOL)nativeTextures;
 - (int32_t)submit:(const uint32_t*)words count:(size_t)count;

@@ -77,9 +77,12 @@ struct GameMetalState {
             // Why rendering stopped (the draw that failed is in no batch list).
             error.empty() ? @"" : [NSString stringWithFormat:@"\nÉchec Metal : %s", error.c_str()]];
     }
-    GameMetalState(id<MTLDevice> device, MaxPS4GameMemoryReader reader, bool nativeTextures)
+    GameMetalState(id<MTLDevice> device, MaxPS4GameMemoryReader reader,
+                   MaxPS4GameMemoryWriter writer, bool nativeTextures)
         : memory{[reader](uint64_t a, void* d, size_t n) { return bool(reader(a,d,n)); }, {}},
-          collector(memory, stats), renderer(device, memory, nil, 0, nativeTextures), device(device),
+          collector(memory, stats), renderer(device, memory, nil, 0, nativeTextures,
+              writer ? std::function<bool(uint64_t,const void*,size_t)>([writer](uint64_t a, const void* d, size_t n) { return bool(writer(a,d,n)); }) :
+                       std::function<bool(uint64_t,const void*,size_t)>{}), device(device),
           queue([device newCommandQueue]), nativeTextures(nativeTextures) {}
 };
 }
@@ -91,16 +94,21 @@ struct GameMetalState {
     std::unique_ptr<GameMetalState> state_;
 }
 - (instancetype)initWithDevice:(id<MTLDevice>)device reader:(MaxPS4GameMemoryReader)reader {
-    return [self initWithDevice:device reader:reader nativeTextures:NO];
+    return [self initWithDevice:device reader:reader writer:nil view:nil nativeTextures:NO];
 }
 - (instancetype)initWithDevice:(id<MTLDevice>)device reader:(MaxPS4GameMemoryReader)reader nativeTextures:(BOOL)nativeTextures {
-    return [self initWithDevice:device reader:reader view:nil nativeTextures:nativeTextures];
+    return [self initWithDevice:device reader:reader writer:nil view:nil nativeTextures:nativeTextures];
 }
 - (instancetype)initWithDevice:(id<MTLDevice>)device reader:(MaxPS4GameMemoryReader)reader
                           view:(MaxPS4GameMemoryView)view nativeTextures:(BOOL)nativeTextures {
+    return [self initWithDevice:device reader:reader writer:nil view:view nativeTextures:nativeTextures];
+}
+- (instancetype)initWithDevice:(id<MTLDevice>)device reader:(MaxPS4GameMemoryReader)reader
+                         writer:(MaxPS4GameMemoryWriter)writer
+                           view:(MaxPS4GameMemoryView)view nativeTextures:(BOOL)nativeTextures {
     if ((self = [super init])) {
         self.lastReport = @"Metal : préparation du premier rendu";
-        state_ = std::make_unique<GameMetalState>(device, [reader copy], nativeTextures);
+        state_ = std::make_unique<GameMetalState>(device, [reader copy], [writer copy], nativeTextures);
         if (!state_->queue) return nil;
         if (view) {
             MaxPS4GameMemoryView held = [view copy];
@@ -144,13 +152,39 @@ struct GameMetalState {
         if (!command) { s.error = "Metal command buffer allocation"; return -ENOMEM; }
         const unsigned failed = s.stats.failed;
         const unsigned rendered = s.stats.rendered;
+        bool segmentEncoded = false;
+        bool barrierFailure = false;
+        const auto flushComputeWrites = [&]() {
+            s.renderer.endBatch();
+            [command commit];
+            [command waitUntilCompleted];
+            if (command.status != MTLCommandBufferStatusCompleted || command.error) {
+                s.error = command.error ? command.error.localizedDescription.UTF8String : "Metal compute barrier failed";
+                barrierFailure = true;
+                return;
+            }
+            if (gpuMs(command) >= 0) s.renderGpuMs = gpuMs(command);
+            if (!s.renderer.writebackGuestWrites()) {
+                s.error = s.renderer.error;
+                barrierFailure = true;
+                return;
+            }
+            command = [s.queue commandBuffer];
+            if (!command) {
+                s.error = "Metal command buffer allocation after compute barrier";
+                barrierFailure = true;
+                return;
+            }
+            segmentEncoded = false;
+            s.renderer.resumeBatch();
+        };
         s.renderer.beginBatch();
         s.phaseDraw = 0; s.phasePS = 0;
         s.enter(3);
         s.collector.execute(words, count, [&](const PM4Draw& draw) {
             ++s.phaseDraw; s.phasePS = draw.ps;
-            if (s.stats.failed != failed) return;
-            if (s.renderer.encode(draw, command)) ++s.stats.rendered;
+            if (s.stats.failed != failed || barrierFailure) return;
+            if (s.renderer.encode(draw, command)) { ++s.stats.rendered; segmentEncoded = true; }
             else {
                 char where[96];
                 std::snprintf(where, sizeof where, " (VS 0x%llx, PS 0x%llx, cible 0x%llx)", (unsigned long long)draw.vs,
@@ -159,17 +193,23 @@ struct GameMetalState {
             }
         }, [&](const PM4Dispatch& dispatch) {
             // A dispatch that cannot run is skipped, as before compute support.
-            if (s.stats.failed != failed) return;
-            if (s.renderer.dispatch(dispatch, command)) ++s.computeRun;
+            if (s.stats.failed != failed || barrierFailure) return;
+            const unsigned encodedBefore = s.renderer.dispatchesEncoded;
+            if (s.renderer.dispatch(dispatch, command)) {
+                ++s.computeRun;
+                if (s.renderer.dispatchesEncoded != encodedBefore) segmentEncoded = true;
+                if (s.renderer.hasPendingGuestWrites()) flushComputeWrites();
+            }
             else { ++s.computeRefused; s.computeError = s.renderer.error; }
         });
         s.enter(4);
         s.renderer.endBatch();
         if (!s.renderer.batchDraws.empty()) s.lastDraws = s.renderer.batchDraws;
+        if (barrierFailure) return -EIO;
         if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }
         const double encoding = elapsedMs(encodingStarted);
         [command commit];
-        if (s.stats.rendered != rendered) {
+        if (segmentEncoded || s.stats.rendered != rendered) {
             s.encodeMs = encoding;
             s.inflight = command;
         }

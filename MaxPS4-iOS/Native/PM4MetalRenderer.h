@@ -36,10 +36,11 @@ class PM4MetalRenderer {
 public:
     // `guest` nil: each draw copies the memory ranges its programs read.
     PM4MetalRenderer(id<MTLDevice> device, const GCNMemory& code, id<MTLBuffer> guest, std::uint64_t guestBase,
-                     bool nativeTextures = false)
+                     bool nativeTextures = false,
+                     std::function<bool(std::uint64_t, const void*, std::size_t)> writeGuest = {})
         : device_(device), code_(code), guest_(guest), guestBase_(guestBase),
           scanMemory_{code.read, [](std::uint64_t, const void*, std::size_t) { return true; }},
-          scanner_(scanMemory_, nativeTextures), native_(nativeTextures) {}
+          scanner_(scanMemory_, nativeTextures), native_(nativeTextures), writeGuest_(std::move(writeGuest)) {}
     // Encodes one draw as a render pass into `commands`. False with `error`
     // set (and nothing encoded) when the draw cannot be expressed.
     bool encode(const PM4Draw& draw, id<MTLCommandBuffer> commands);
@@ -47,7 +48,10 @@ public:
     // (and nothing encoded) when it cannot be expressed.
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     unsigned kernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
+    unsigned dispatchesEncoded = 0;
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
+    bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
+    bool writebackGuestWrites();
     // The draws of the current batch, described for the session report, and
     // the disassembly of the first programs drawn (VS and PS, with user SGPRs).
     std::string batchDraws, programListings;
@@ -64,6 +68,14 @@ public:
     id<MTLBuffer> lastVisibility = nil;
     unsigned lastVisibilityCount = 0;
     void endBatch();
+    // Start another render segment in the same logical PM4 submission after
+    // a synchronous compute writeback barrier. Existing draw diagnostics stay.
+    void resumeBatch() {
+        batching_ = true;
+        visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
+        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
+        visibilityCount_ = 0;
+    }
     // The texture holding colour target `address`, or nil if never drawn.
     id<MTLTexture> target(std::uint64_t address) const;
     std::size_t targetCount() const { return targets_.size(); }
@@ -114,6 +126,7 @@ private:
     GCNMemory scanMemory_; // code_ reads; scanned lanes' stores are dropped
     PM4ResourceScanner scanner_;
     bool native_;
+    std::function<bool(std::uint64_t, const void*, std::size_t)> writeGuest_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
@@ -128,6 +141,8 @@ private:
     std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
     bool deferred_ = false; // the last pipeline() call left its draw to a pending build
     std::string lastDispatchNote_;
+    struct PendingGuestWrite { std::uint64_t address, size, offset; id<MTLBuffer> buffer; };
+    std::vector<PendingGuestWrite> pendingGuestWrites_;
     static MTLCompileOptions* compileOptions();
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);

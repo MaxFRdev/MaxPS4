@@ -234,7 +234,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     bool visible = !outputs.empty();
     for (const auto& [address, target] : targets_)
         if (target.texture && stored(address, 1)) visible = true;
-    if (!visible) {
+    if (!visible && (scanner_.stored().empty() || !writeGuest_)) {
         if (!scanner_.stored().empty()) {
             lastDispatchNote_ = "compute refusé : écritures mémoire hors des images visibles, writeback invité non pris en charge";
             return fail("compute writes guest memory outside visible images; guest writeback is unsupported");
@@ -275,6 +275,37 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
             }
         return false;
     };
+    std::vector<PM4Range> stores = scanner_.stored();
+    std::sort(stores.begin(), stores.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
+    std::vector<PM4Range> guestWrites;
+    for (const auto& span : stores) {
+        if (!guestWrites.empty() && span.base <= guestWrites.back().base + guestWrites.back().size) {
+            const auto end = std::max(guestWrites.back().base + guestWrites.back().size, span.base + span.size);
+            guestWrites.back().size = end - guestWrites.back().base;
+        } else guestWrites.push_back(span);
+    }
+    auto subtractTexture = [&](std::uint64_t base, std::uint64_t length) {
+        if (!length || base > UINT64_MAX - length) return;
+        const std::uint64_t end = base + length;
+        std::vector<PM4Range> remaining;
+        for (const auto& span : guestWrites) {
+            const auto spanEnd = span.base + span.size;
+            if (end <= span.base || base >= spanEnd) { remaining.push_back(span); continue; }
+            if (span.base < base) remaining.push_back({span.base, base - span.base});
+            if (end < spanEnd) remaining.push_back({end, spanEnd - end});
+        }
+        guestWrites.swap(remaining);
+    };
+    for (const auto& output : outputs) subtractTexture(output.base, std::uint64_t(output.pitch) * output.height * 4);
+    for (const auto& [address, target] : targets_) if (target.texture)
+        subtractTexture(address, std::uint64_t(target.texture.width) * target.texture.height * 4);
+    std::vector<PendingGuestWrite> pending;
+    for (const auto& span : guestWrites) {
+        std::uint64_t at = 0;
+        if (!locate(span.base, span.size, at)) return fail("compute guest write is outside copied memory ranges");
+        pending.push_back({span.base, span.size, std::size_t(at), memory});
+    }
+    if (!pending.empty() && !writeGuest_) return fail("compute guest-memory writeback is unavailable");
     if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; }
     // Colour targets live in their textures: the kernel reads their current contents.
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
@@ -296,6 +327,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     [compute dispatchThreadgroups:MTLSizeMake(c.groups[0], c.groups[1], c.groups[2])
             threadsPerThreadgroup:MTLSizeMake(tx, ty, tz)];
     [compute endEncoding];
+    ++dispatchesEncoded;
     for (const auto& o : outputs) {
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                               width:o.pitch height:o.height mipmapped:NO];
@@ -318,6 +350,21 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
         ++targetsSynced;
     }
     [blit endEncoding];
+    pendingGuestWrites_.insert(pendingGuestWrites_.end(), pending.begin(), pending.end());
+    return true;
+}
+
+bool PM4MetalRenderer::writebackGuestWrites() {
+    if (pendingGuestWrites_.empty()) return true;
+    if (!writeGuest_) return fail("compute guest-memory writeback is unavailable");
+    for (const auto& write : pendingGuestWrites_) {
+        const auto* source = static_cast<const std::uint8_t*>(write.buffer.contents) + write.offset;
+        if (!writeGuest_(write.address, source, write.size)) {
+            pendingGuestWrites_.clear();
+            return fail("compute guest-memory writeback failed");
+        }
+    }
+    pendingGuestWrites_.clear();
     return true;
 }
 
