@@ -107,6 +107,46 @@ public:
         if (failedAddress) *failedAddress = 0;
         return 0;
     }
+    // GPU descriptors can cover a larger span than the game's mapped memory.
+    // Write back only writable guest pages; stores to unmapped/read-only parts
+    // have no guest destination and must not abort the whole dispatch.
+    int write_gpu_result(uint64_t address, const void* source, size_t length) {
+        if (!source || !length || length > UINT64_MAX - address) return -EINVAL;
+        constexpr uint64_t page = PS4VirtualMemory::page_size;
+        const auto* bytes = static_cast<const uint8_t*>(source);
+        size_t done = 0;
+        while (done < length) {
+            const uint64_t current = address + done;
+            size_t amount = 0;
+            uint8_t* destination = nullptr;
+            if (image_.translate(current, 1, 2)) {
+                for (const auto& segment : image_.segments()) {
+                    if (current < segment.address || current - segment.address >= segment.memory_size) continue;
+                    amount = std::min<uint64_t>(length - done, segment.memory_size - (current - segment.address));
+                    const auto* span = image_.translate(current, amount, 2);
+                    if (span) destination = const_cast<uint8_t*>(span);
+                    else amount = 0;
+                    break;
+                }
+            } else if (dynamic_) {
+                amount = dynamic_->contiguous(current, length - done, 2);
+                if (amount) {
+                    const auto* span = dynamic_->translate(current, amount, 2);
+                    if (span) destination = const_cast<uint8_t*>(span);
+                    else amount = 0;
+                }
+            }
+            if (destination && amount) {
+                std::memmove(destination, bytes + done, amount);
+                done += amount;
+                continue;
+            }
+            // Skip to the next guest page boundary, or the end of the buffer.
+            amount = std::min<uint64_t>(length - done, page - current % page);
+            done += amount;
+        }
+        return 0;
+    }
     bool write_host_result(uint64_t address, const void* source, size_t length) {
         return write_host_result_status(address, source, length) == 0;
     }
