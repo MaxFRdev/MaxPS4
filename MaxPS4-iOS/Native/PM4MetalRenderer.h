@@ -37,7 +37,7 @@ public:
     // `guest` nil: each draw copies the memory ranges its programs read.
     PM4MetalRenderer(id<MTLDevice> device, const GCNMemory& code, id<MTLBuffer> guest, std::uint64_t guestBase,
                      bool nativeTextures = false,
-                     std::function<std::int32_t(std::uint64_t, const void*, std::size_t)> writeGuest = {})
+                     std::function<std::int32_t(std::uint64_t, const void*, std::size_t, std::uint64_t*)> writeGuest = {})
         : device_(device), code_(code), guest_(guest), guestBase_(guestBase),
           scanMemory_{code.read, [](std::uint64_t, const void*, std::size_t) { return true; }},
           scanner_(scanMemory_, nativeTextures), native_(nativeTextures), writeGuest_(std::move(writeGuest)) {}
@@ -126,7 +126,7 @@ private:
     GCNMemory scanMemory_; // code_ reads; scanned lanes' stores are dropped
     PM4ResourceScanner scanner_;
     bool native_;
-    std::function<std::int32_t(std::uint64_t, const void*, std::size_t)> writeGuest_;
+    std::function<std::int32_t(std::uint64_t, const void*, std::size_t, std::uint64_t*)> writeGuest_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.

@@ -2063,9 +2063,10 @@ extern "C" int32_t maxps4_fex_engine_read_memory(maxps4_fex_engine* engine,
     return engine->system_memory.read(address,destination,bytes) ? 0 : -EFAULT;
 }
 extern "C" int32_t maxps4_fex_engine_write_memory(maxps4_fex_engine* engine,
-    uint64_t address, const void* source, size_t bytes) {
+    uint64_t address, const void* source, size_t bytes, uint64_t* failed_address) {
+    if (failed_address) *failed_address = address;
     if (!engine || !source || !bytes || bytes > (256ull << 20)) return -EINVAL;
-    return engine->system_memory.write_host_result_status(address,source,bytes);
+    return engine->system_memory.write_host_result_status(address,source,bytes,failed_address);
 }
 extern "C" int32_t maxps4_fex_engine_gpu_view(maxps4_fex_engine* engine,
     uint64_t address, size_t bytes, const void** pointer) {

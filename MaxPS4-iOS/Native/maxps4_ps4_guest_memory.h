@@ -57,12 +57,18 @@ public:
     // A paused host consumer may write a GPU result to any guest range whose
     // mapping grants WRITE. A result may span adjacent writable mappings, so
     // validate the full span and then copy each mapping-sized chunk.
-    int write_host_result_status(uint64_t address, const void* source, size_t length) {
+    int write_host_result_status(uint64_t address, const void* source, size_t length,
+                                 uint64_t* failedAddress = nullptr) {
+        if (failedAddress) *failedAddress = address;
         if (!source || !length || length > UINT64_MAX - address) return -EINVAL;
         struct Chunk { uint8_t* destination; size_t sourceOffset, size; };
         std::vector<Chunk> chunks;
         uint64_t current = address;
         size_t remaining = length, sourceOffset = 0;
+        const auto failAt = [&](int status) {
+            if (failedAddress) *failedAddress = current;
+            return status;
+        };
         try {
             while (remaining) {
                 size_t amount = 0;
@@ -72,32 +78,33 @@ public:
                         if (current < segment.address || current - segment.address >= segment.memory_size) continue;
                         amount = std::min<uint64_t>(remaining, segment.memory_size - (current - segment.address));
                         const auto* span = image_.translate(current, amount, 2);
-                        if (!span) return -EFAULT;
+                        if (!span) return failAt(-EFAULT);
                         destination = const_cast<uint8_t*>(span);
                         break;
                     }
                 } else if (image_.translate(current, 1, 4)) {
-                    return -EACCES;
+                    return failAt(-EACCES);
                 } else if (dynamic_) {
                     amount = dynamic_->contiguous(current, remaining, 2);
                     if (amount) {
                         const auto* span = dynamic_->translate(current, amount, 2);
-                        if (!span) return -EFAULT;
+                        if (!span) return failAt(-EFAULT);
                         destination = const_cast<uint8_t*>(span);
                     } else if (dynamic_->translate(current, 1, 4)) {
-                        return -EACCES;
+                        return failAt(-EACCES);
                     }
                 }
-                if (!amount || !destination) return -EFAULT;
+                if (!amount || !destination) return failAt(-EFAULT);
                 chunks.push_back({destination, sourceOffset, amount});
                 current += amount;
                 sourceOffset += amount;
                 remaining -= amount;
             }
-        } catch (const std::bad_alloc&) { return -ENOMEM; }
+        } catch (const std::bad_alloc&) { return failAt(-ENOMEM); }
         const auto* bytes = static_cast<const uint8_t*>(source);
         for (const auto& chunk : chunks)
             std::memmove(chunk.destination, bytes + chunk.sourceOffset, chunk.size);
+        if (failedAddress) *failedAddress = 0;
         return 0;
     }
     bool write_host_result(uint64_t address, const void* source, size_t length) {

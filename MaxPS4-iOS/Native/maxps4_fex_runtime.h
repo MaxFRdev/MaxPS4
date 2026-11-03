@@ -90,7 +90,7 @@ int32_t maxps4_fex_engine_read_memory(maxps4_fex_engine* engine,
 // guest submission thread is paused until the callback returns; caller keeps
 // the engine alive and serializes close, as for read_memory.
 int32_t maxps4_fex_engine_write_memory(maxps4_fex_engine* engine,
-    uint64_t address, const void* source, size_t bytes);
+    uint64_t address, const void* source, size_t bytes, uint64_t* failed_address);
 // The host bytes backing readable guest [address, address + bytes), for the
 // GPU to read guest textures in place (a no-copy Metal buffer). Valid until
 // the game unmaps them; same calling rules as read_memory.
