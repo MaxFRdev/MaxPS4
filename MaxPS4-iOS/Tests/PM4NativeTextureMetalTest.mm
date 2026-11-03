@@ -302,5 +302,23 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             assert(renderer.targetReads == before + 1 && read != zeros);
             std::puts("PASS tiled T# of a colour target reads the target's Metal texture");
         }
+        // 4. Asynchronous pipelines (the game bridge): the first draw is
+        //    deferred while Metal builds its pipeline, a later one draws.
+        {
+            PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
+            renderer.asyncPipelines = true;
+            id<MTLCommandBuffer> first = [queue commandBuffer];
+            assert(renderer.encode(d, first) && renderer.drawsDeferred == 1 && renderer.pipelinesBuilt == 0);
+            [first commit]; [first waitUntilCompleted];
+            for (unsigned waited = 0; renderer.pipelinesPending() && waited < 600; ++waited) usleep(50000);
+            assert(!renderer.pipelinesPending() && !renderer.pipelinesRefused());
+            id<MTLCommandBuffer> second = [queue commandBuffer];
+            assert(renderer.encode(d, second) && renderer.drawsDeferred == 1 && renderer.pipelinesBuilt == 1);
+            [second commit]; [second waitUntilCompleted];
+            assert(second.status == MTLCommandBufferStatusCompleted && !second.error);
+            const auto drawn = pixels(renderer.target(target));
+            assert(std::any_of(drawn.begin(), drawn.end(), [](uint8_t b) { return b != 0 && b != 255; }));
+            std::puts("PASS asynchronous pipelines: deferred draw, then drawn once built");
+        }
     }
 }

@@ -33,6 +33,9 @@ typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
 // (encoding, GPU and waiting), every submission included.
 @property(atomic, readonly) double submitMilliseconds;
 @property(nonatomic, readonly, copy, nullable) NSString* failure;
+// New pipelines build on Metal's threads and their draws are skipped until
+// ready, instead of the submission waiting for them. Set before submitting.
+@property(nonatomic) BOOL asynchronousPipelines;
 @end
 NS_ASSUME_NONNULL_END
 #endif

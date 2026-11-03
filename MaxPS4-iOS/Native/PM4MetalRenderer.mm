@@ -55,6 +55,18 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                           (d.blend >> 30) & 1 ? d.blend : 0u, d.mask};
     const auto found = pipelines_.find(key);
     if (found != pipelines_.end()) return found->second;
+    if (asyncPipelines) {
+        std::lock_guard<std::mutex> lock(async_->mutex);
+        const auto ready = async_->ready.find(key);
+        if (ready != async_->ready.end()) {
+            id<MTLRenderPipelineState> built = ready->second;
+            async_->ready.erase(ready);
+            // A pipeline Metal refused stays deferred: its draws are skipped.
+            if (built) { ++pipelinesBuilt; pipelines_[key] = built; return built; }
+            async_->refused.insert(key);
+        }
+        if (async_->pending.count(key) || async_->refused.count(key)) { deferred_ = true; return nil; }
+    }
     GCNTranslateOptions vsOptions;
     vsOptions.stage = GCNStage::vertex; vsOptions.name = "vs_program"; vsOptions.userCount = d.vsUserCount;
     for (unsigned k = 0; k < 16; ++k) vsOptions.userData[k] = d.vsUser[k];
@@ -69,12 +81,8 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     if (!ps) { fail("PS translation: " + ps.error); return nil; }
     const std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
                                gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
-    id<MTLLibrary> library = this->library(source);
-    if (!library) return nil;
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
     NSError* failure = nil;
-    descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
-    descriptor.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
     color.pixelFormat = format;
     color.writeMask = ((d.mask & 1) ? MTLColorWriteMaskRed : 0) | ((d.mask & 2) ? MTLColorWriteMaskGreen : 0) |
@@ -97,6 +105,35 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         color.sourceRGBBlendFactor = cs; color.destinationRGBBlendFactor = cd;
         color.sourceAlphaBlendFactor = as; color.destinationAlphaBlendFactor = ad;
     }
+    if (asyncPipelines) {
+        // Metal compiles on its own threads: this submission and the next go
+        // on without the draws (a new screen's large programs took the iPhone
+        // over 10 s each, the game's image frozen meanwhile).
+        auto async = async_;
+        { std::lock_guard<std::mutex> lock(async->mutex); async->pending.insert(key); }
+        auto finish = [async, key](id<MTLRenderPipelineState> state, NSError* error) {
+            std::lock_guard<std::mutex> lock(async->mutex);
+            async->pending.erase(key);
+            async->ready[key] = state;
+            if (!state) async->lastError = error ? error.localizedDescription.UTF8String : "unknown";
+        };
+        id<MTLDevice> device = device_;
+        [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:compileOptions()
+                    completionHandler:^(id<MTLLibrary> library, NSError* error) {
+            if (!library) { finish(nil, error); return; }
+            descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
+            descriptor.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
+            [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
+                finish(state, failed);
+            }];
+        }];
+        deferred_ = true;
+        return nil;
+    }
+    id<MTLLibrary> library = this->library(source);
+    if (!library) return nil;
+    descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
+    descriptor.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
     compiling = 2;
     id<MTLRenderPipelineState> state = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
     compiling = 0;
@@ -106,7 +143,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     return state;
 }
 
-id<MTLLibrary> PM4MetalRenderer::library(const std::string& source) {
+MTLCompileOptions* PM4MetalRenderer::compileOptions() {
     MTLCompileOptions* options = [MTLCompileOptions new];
     if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeSafe;
     else {
@@ -115,9 +152,13 @@ id<MTLLibrary> PM4MetalRenderer::library(const std::string& source) {
         options.fastMathEnabled = NO;
 #pragma clang diagnostic pop
     }
+    return options;
+}
+
+id<MTLLibrary> PM4MetalRenderer::library(const std::string& source) {
     NSError* failure = nil;
     compiling = 1;
-    id<MTLLibrary> library = [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&failure];
+    id<MTLLibrary> library = [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:compileOptions() error:&failure];
     compiling = 0;
     if (!library) fail(std::string("MSL: ") + failure.localizedDescription.UTF8String);
     return library;
@@ -433,7 +474,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     if ((d.vte & 0x3f) != 0x3f) return fail("viewport without scale and offset");
     const MTLPixelFormat format = d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
     if (d.scissor[2] <= d.scissor[0] || d.scissor[3] <= d.scissor[1]) return true; // nothing visible
+    deferred_ = false;
     id<MTLRenderPipelineState> state = pipeline(d, format);
+    if (!state && deferred_) { ++drawsDeferred; return true; } // its pipeline is still being built
     if (!state) return false;
     DrawState drawState{};
     id<MTLBuffer> memory = guest_;

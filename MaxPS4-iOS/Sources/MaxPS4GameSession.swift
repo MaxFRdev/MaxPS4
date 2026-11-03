@@ -457,6 +457,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
                 var pointer: UnsafeRawPointer?
                 return maxps4_fex_engine_gpu_view(opened, address, count, &pointer) == 0 ? pointer : nil
             }, nativeTextures: nativeTextures) else { throw failure("Création du renderer Metal", -ENOMEM) }
+            // A new screen's pipelines build on Metal's threads: the game goes on meanwhile.
+            metal.asynchronousPipelines = true
             let attached = maxps4_fex_engine_gnm_host_consumer(opened,
                 Unmanaged.passUnretained(metal).toOpaque(), { context, words, count in
                     guard let context, let words else { return -EINVAL }

@@ -24,6 +24,9 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <tuple>
 
@@ -69,6 +72,13 @@ public:
     // Read from other threads while encoding: 1 compiling MSL, 2 building a
     // render pipeline, 3 translating GCN programs, 0 none of these.
     std::atomic<int> compiling{0};
+    // Build new pipelines on Metal's threads: their draws are skipped (counted
+    // in drawsDeferred) until ready, instead of blocking the submission.
+    bool asyncPipelines = false;
+    unsigned drawsDeferred = 0;
+    unsigned pipelinesPending() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->pending.size()); }
+    unsigned pipelinesRefused() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->refused.size()); }
+    std::string pipelineError() const { std::lock_guard<std::mutex> lock(async_->mutex); return async_->lastError; }
     unsigned lastRanges = 0; // memory ranges copied for the last draw (copy mode)
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;
@@ -103,6 +113,16 @@ private:
     bool native_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
+    // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
+    struct AsyncPipelines {
+        std::mutex mutex;
+        std::set<PipelineKey> pending, refused;
+        std::map<PipelineKey, id<MTLRenderPipelineState>> ready; // nil: refused
+        std::string lastError;
+    };
+    std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
+    bool deferred_ = false; // the last pipeline() call left its draw to a pending build
+    static MTLCompileOptions* compileOptions();
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
     id<MTLLibrary> library(const std::string& source);

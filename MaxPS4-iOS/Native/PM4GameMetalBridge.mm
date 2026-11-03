@@ -60,6 +60,10 @@ struct GameMetalState {
             @"\nTextures natives : %u dessins, %u textures (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
             renderer.nativeDraws, renderer.nativeViews, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
+        const std::string refusal = renderer.pipelineError();
+        native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u en cours, %u refusés · %u dessins reportés%s%s%@",
+            renderer.pipelinesBuilt, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
+            refusal.empty() ? "" : " · dernier refus : ", refusal.c_str(), native];
         return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés, %u grandes zones partagées (%u lues sans copie)\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nÉchantillons dessinés par dessin (dernier lot) :%s\nDessins du dernier lot :%s\nProgrammes des premiers dessins :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused, renderer.rangesShared, renderer.rangesMapped,
             stats.skipped, renderer.targetCount(), stats.dispatches, computeRun - renderer.dispatchesWithoutEffect,
@@ -263,6 +267,11 @@ struct GameMetalState {
     const int compiling = s.renderer.compiling;
     return [NSString stringWithFormat:@"Soumission en cours depuis %.1f s : %s, dessin %u (PS 0x%llx)%s\n%@", seconds, phases[phase],
             s.phaseDraw.load(), s.phasePS.load(), compiling > 0 && compiling < 4 ? work[compiling] : "", self.lastReport];
+}
+- (BOOL)asynchronousPipelines { return state_->renderer.asyncPipelines; }
+- (void)setAsynchronousPipelines:(BOOL)asynchronous {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->renderer.asyncPipelines = asynchronous;
 }
 - (NSString*)failure {
     auto& s = *state_;
