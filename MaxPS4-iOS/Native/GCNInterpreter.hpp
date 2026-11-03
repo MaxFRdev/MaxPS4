@@ -901,7 +901,17 @@ private:
                 (d[1] >> 20) & 0x3f, (d[1] >> 26) & 15, (d[3] >> 20) & 0x1f, d[3] >> 28,
                 {d[3] & 7, (d[3] >> 3) & 7, (d[3] >> 6) & 7, (d[3] >> 9) & 7}};
         if (t.type != 9) return fail("image type " + std::to_string(t.type));
-        if (t.tiling != 8) return fail("tiled image (tile mode " + std::to_string(t.tiling) + ")");
+        if (t.tiling != 8) {
+            // Still named to imageResource: a tiled T# is often a colour target
+            // the Metal renderer holds as a texture.
+            if (imageResource) {
+                imageSampler = {};
+                if (i.opcode >= 32 && i.opcode < 64 && samp <= s.size() - 4) std::copy_n(&s[samp], 4, imageSampler.begin());
+                std::array<std::uint32_t, 8> descriptor{};
+                std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);
+            }
+            return fail("tiled image (tile mode " + std::to_string(t.tiling) + ")");
+        }
         unsigned bytes;
         if (!imageBytes(t.dfmt, bytes)) return fail("image data format " + std::to_string(t.dfmt));
         if (t.dfmt >= 35 && t.dfmt <= 39 &&

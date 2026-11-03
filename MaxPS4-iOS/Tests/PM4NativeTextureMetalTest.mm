@@ -268,5 +268,39 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             assert(pixels(mapped.target(target)) == natively);
         }
         std::puts("PASS native textures through PM4MetalRenderer: 1920x1080 pixels within 2 levels, also read in place; timings are CI GPU, not iPhone game FPS");
+
+        // 3. A colour target sampled through a tiled T# (tile mode 13), as
+        //    Mortal Kombat composites its menu layer: the target's Metal
+        //    texture is read; a tiled T# no target holds still reads zeros.
+        {
+            PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
+            const uint32_t linear[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
+                                         (imageW - 1) << 13, 0, 0, 0, 0, 0, 0x500000, 0};
+            std::memcpy(d.psUser, linear, sizeof linear);
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            assert(renderer.encode(d, command));
+            [command commit]; [command waitUntilCompleted];
+            const uint64_t layer = target, composed = 0x400000, elsewhere = 0x800000;
+            auto compose = [&](uint64_t source, uint64_t destination) {
+                const uint32_t tiled[12] = {std::uint32_t(source >> 8), 10u << 20, (screenW - 1) | ((screenH - 1) << 14), 0x90d00facu,
+                                            (screenW - 1) << 13, 0, 0, 0, 2 | (2 << 3), 0, 0x500000, 0};
+                PM4Draw c = d;
+                std::memcpy(c.psUser, tiled, sizeof tiled);
+                c.target = destination;
+                id<MTLCommandBuffer> commands = [queue commandBuffer];
+                const bool encoded = renderer.encode(c, commands);
+                if (!encoded) std::printf("tiled compose: %s\n", renderer.error.c_str());
+                assert(encoded);
+                [commands commit]; [commands waitUntilCompleted];
+                assert(commands.status == MTLCommandBufferStatusCompleted && !commands.error);
+                return pixels(renderer.target(destination));
+            };
+            const unsigned before = renderer.targetReads;
+            const auto read = compose(layer, composed);
+            assert(renderer.targetReads == before + 1);
+            const auto zeros = compose(elsewhere, composed + 0x800000);
+            assert(renderer.targetReads == before + 1 && read != zeros);
+            std::puts("PASS tiled T# of a colour target reads the target's Metal texture");
+        }
     }
 }
