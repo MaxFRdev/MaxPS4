@@ -1,1 +1,5 @@
 /* MaxPS4 is written in French: the keys are the French text. */
+"Configurer le PairingFile" = "Configurer le PairingFile";
+"Dans StikDebug, importe le même fichier d’appairage que pour SideStore. Active aussi le VPN si StikDebug le demande." = "Dans StikDebug, importe le même fichier d’appairage que pour SideStore. Active aussi le VPN si StikDebug le demande.";
+"Reviens ici, touche « Activer avec StikDebug », puis attends la fin de son script avant de vérifier le JIT." = "Reviens ici, touche « Activer avec StikDebug », puis attends la fin de son script avant de vérifier le JIT.";
+"Le PairingFile est propre à ton iPhone : garde-le privé et ne le joins pas aux rapports MaxPS4." = "Le PairingFile est propre à ton iPhone : garde-le privé et ne le joins pas aux rapports MaxPS4.";

@@ -101,6 +101,10 @@
 "Préparer le JIT" = "Prepare JIT";
 "Vérification de l’activation…" = "Checking activation…";
 "Activer avec StikDebug" = "Enable with StikDebug";
+"Configurer le PairingFile" = "Set up the PairingFile";
+"Dans StikDebug, importe le même fichier d’appairage que pour SideStore. Active aussi le VPN si StikDebug le demande." = "In StikDebug, import the same pairing file used for SideStore. Enable the VPN too if StikDebug asks for it.";
+"Reviens ici, touche « Activer avec StikDebug », puis attends la fin de son script avant de vérifier le JIT." = "Return here, tap “Enable with StikDebug,” and wait for its script to finish before checking JIT.";
+"Le PairingFile est propre à ton iPhone : garde-le privé et ne le joins pas aux rapports MaxPS4." = "The PairingFile is specific to your iPhone. Keep it private and do not attach it to MaxPS4 reports.";
 "Vérifier l’activation" = "Check activation";
 "Détails de l’activation" = "Activation details";
 "Réinitialiser le JIT" = "Reset JIT";
