@@ -1,7 +1,11 @@
 #pragma once
+#include <algorithm>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <new>
+#include <vector>
 #include "maxps4_guest_elf.h"
 #include "maxps4_ps4_virtual_memory.h"
 namespace maxps4 {
@@ -44,21 +48,60 @@ public:
         return true;
     }
     bool write(uint64_t address, const void* source, size_t length) {
-        if (!source || !length) return false;
+        if (!source || !length || length > UINT64_MAX - address) return false;
         const auto* destination = translate(address, length, 2);
         if (!destination || translate(address, length, 1)) return false;
         std::memmove(const_cast<uint8_t*>(destination), source, length);
         return true;
     }
     // A paused host consumer may write a GPU result to any guest range whose
-    // mapping grants WRITE. Unlike syscall output helpers, this must support
-    // ordinary readable and writable heap/data pages as well.
+    // mapping grants WRITE. A result may span adjacent writable mappings, so
+    // validate the full span and then copy each mapping-sized chunk.
+    int write_host_result_status(uint64_t address, const void* source, size_t length) {
+        if (!source || !length || length > UINT64_MAX - address) return -EINVAL;
+        struct Chunk { uint8_t* destination; size_t sourceOffset, size; };
+        std::vector<Chunk> chunks;
+        uint64_t current = address;
+        size_t remaining = length, sourceOffset = 0;
+        try {
+            while (remaining) {
+                size_t amount = 0;
+                uint8_t* destination = nullptr;
+                if (image_.translate(current, 1, 2)) {
+                    for (const auto& segment : image_.segments()) {
+                        if (current < segment.address || current - segment.address >= segment.memory_size) continue;
+                        amount = std::min<uint64_t>(remaining, segment.memory_size - (current - segment.address));
+                        const auto* span = image_.translate(current, amount, 2);
+                        if (!span) return -EFAULT;
+                        destination = const_cast<uint8_t*>(span);
+                        break;
+                    }
+                } else if (image_.translate(current, 1, 4)) {
+                    return -EACCES;
+                } else if (dynamic_) {
+                    amount = dynamic_->contiguous(current, remaining, 2);
+                    if (amount) {
+                        const auto* span = dynamic_->translate(current, amount, 2);
+                        if (!span) return -EFAULT;
+                        destination = const_cast<uint8_t*>(span);
+                    } else if (dynamic_->translate(current, 1, 4)) {
+                        return -EACCES;
+                    }
+                }
+                if (!amount || !destination) return -EFAULT;
+                chunks.push_back({destination, sourceOffset, amount});
+                current += amount;
+                sourceOffset += amount;
+                remaining -= amount;
+            }
+        } catch (const std::bad_alloc&) { return -ENOMEM; }
+        const auto* bytes = static_cast<const uint8_t*>(source);
+        for (const auto& chunk : chunks)
+            std::memmove(chunk.destination, bytes + chunk.sourceOffset, chunk.size);
+        return 0;
+    }
     bool write_host_result(uint64_t address, const void* source, size_t length) {
-        if (!source || !length) return false;
-        const auto* destination = translate(address, length, 2);
-        if (!destination) return false;
-        std::memmove(const_cast<uint8_t*>(destination), source, length);
-        return true;
+        return write_host_result_status(address, source, length) == 0;
     }
     // The host bytes behind readable guest memory, for the GPU only (a Metal
     // no-copy buffer over a guest texture); CPU clients copy through read().

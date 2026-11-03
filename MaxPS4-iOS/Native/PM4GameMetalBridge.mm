@@ -81,8 +81,8 @@ struct GameMetalState {
                    MaxPS4GameMemoryWriter writer, bool nativeTextures)
         : memory{[reader](uint64_t a, void* d, size_t n) { return bool(reader(a,d,n)); }, {}},
           collector(memory, stats), renderer(device, memory, nil, 0, nativeTextures,
-              writer ? std::function<bool(uint64_t,const void*,size_t)>([writer](uint64_t a, const void* d, size_t n) { return bool(writer(a,d,n)); }) :
-                       std::function<bool(uint64_t,const void*,size_t)>{}), device(device),
+              writer ? std::function<int32_t(uint64_t,const void*,size_t)>([writer](uint64_t a, const void* d, size_t n) { return int32_t(writer(a,d,n)); }) :
+                       std::function<int32_t(uint64_t,const void*,size_t)>{}), device(device),
           queue([device newCommandQueue]), nativeTextures(nativeTextures) {}
 };
 }
