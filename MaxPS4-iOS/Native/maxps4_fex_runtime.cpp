@@ -2320,6 +2320,7 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         tso_emulation.load() ? "émulé" : "désactivé", (unsigned long long)alignment_repairs.load(),
         (unsigned long long)last_repair_pc.load());
     std::string out = header;
+    out += engine->libkernel.graphics().submit_activity();
     const uint64_t now = ProbeAddressSpace::now_ns();
     for (const auto& a : engine->probe.activity) {
         const uint64_t thread = a.thread.load();

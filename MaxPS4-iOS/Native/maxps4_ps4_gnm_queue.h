@@ -5,12 +5,15 @@
 #include "PM4MetalDrawPlan.hpp"
 #include "PM4SoftwareRenderer.hpp"
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <cstdio>
+#include <string>
 
 namespace maxps4 {
 // Backend 1 is the existing native triangle diagnostic pipeline. Its preflight
@@ -63,6 +66,23 @@ public:
         std::lock_guard<std::mutex> lock(lock_);
         return kind_ && !failed_ && !sealed_ && jobs_.size()<queue_limit ? 1 : 0;
     }
+    std::string submit_activity() const {
+        const uint32_t stage = submit_stage_.load(std::memory_order_relaxed);
+        if (!stage) return {};
+        static constexpr const char* stages[] = {"", "attente du verrou GNM", "lecture des buffers de commandes",
+            "traitement Metal", "retrait des commandes"};
+        const uint64_t started = submit_since_ns_.load(std::memory_order_relaxed);
+        const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        const double seconds = double(now - std::min(now, started)) / 1e9;
+        char line[192];
+        const size_t stage_count = sizeof(stages) / sizeof(stages[0]);
+        std::snprintf(line, sizeof line, "Soumission GNM depuis %.1f s : %s · %u buffers · %llu DWORDs\n",
+            seconds, stage < stage_count ? stages[stage] : "état inconnu",
+            submit_buffers_.load(std::memory_order_relaxed),
+            (unsigned long long)submit_words_.load(std::memory_order_relaxed));
+        return line;
+    }
     // What the last DCB of sceGnmSubmitAndFlipCommandBuffers asks for once the
     // flip is done: its final 64 dwords are a "prepareFlip" NOP that the
     // driver turns into a label write and/or an EOP interrupt.
@@ -74,7 +94,25 @@ public:
                    PreparedFlip* flip=nullptr) {
         if (interrupts) *interrupts=0;
         if (flip) *flip={};
+        const uint64_t generation = submit_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
+        auto set_stage = [&](uint32_t stage) {
+            if (submit_generation_.load(std::memory_order_relaxed) != generation) return;
+            submit_since_ns_.store(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()), std::memory_order_relaxed);
+            submit_stage_.store(stage, std::memory_order_relaxed);
+        };
+        submit_buffers_.store(count, std::memory_order_relaxed);
+        submit_words_.store(0, std::memory_order_relaxed);
+        set_stage(1);
+        struct ResetActivity {
+            PS4GnmQueue& queue; uint64_t generation;
+            ~ResetActivity() {
+                if (queue.submit_generation_.load(std::memory_order_relaxed) == generation)
+                    queue.submit_stage_.store(0, std::memory_order_relaxed);
+            }
+        } reset{*this, generation};
         std::lock_guard<std::mutex> lock(lock_);
+        set_stage(2);
         if (!kind_ || failed_) return error(0x10ff);
         if (sealed_ || jobs_.size()>=queue_limit || next_==UINT64_MAX) return error(0x1001);
         if (!count || count>buffer_limit || !addresses || !sizes || (addresses&7) || (sizes&3)) return error(0x1000);
@@ -100,6 +138,7 @@ public:
                 if (!gpu::decodePM4Type3(words.data(),words.size())) return error(0x3013);
                 job.words.insert(job.words.end(),words.begin(),words.end());
             }
+            submit_words_.store(job.words.size(), std::memory_order_relaxed);
             if (kind_>=null) {
                 if (flip && !prepared_flip(job.words,*flip)) return error(0x1000);
                 if (kind_==software) {
@@ -107,9 +146,11 @@ public:
                     if (!renderer_) renderer_=std::make_unique<gpu::PM4SoftwareRenderer>(guest_);
                     renderer_->execute(job.words.data(),job.words.size());
                 }
+                set_stage(kind_==host ? 3 : 4);
                 if (kind_==host && host_consumer_(host_context_,job.words.data(),job.words.size())) {
                     failed_=true; return error(0x10ff);
                 }
+                set_stage(4);
                 const auto retired=retire(job.words);
                 if (retired<0) return error(0x1000);
                 if (interrupts) *interrupts=uint32_t(retired);
@@ -227,6 +268,8 @@ private:
     uint64_t next_=1;
     uint32_t kind_=none;
     bool sealed_=false, failed_=false;
+    std::atomic<uint64_t> submit_generation_{0}, submit_since_ns_{0}, submit_words_{0};
+    std::atomic<uint32_t> submit_stage_{0}, submit_buffers_{0};
     void* host_context_=nullptr;
     HostConsumer host_consumer_=nullptr;
 };
