@@ -3,12 +3,15 @@
 #include "maxps4_ps4_videoout_abi.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <string>
 #include <vector>
 
 namespace maxps4 {
@@ -99,7 +102,12 @@ public:
     // it. The host polls on its own refresh, which is not the game's vblank,
     // so keeping the older flip lost every other image.
     int64_t submit(uint64_t port, int32_t index, int32_t mode, uint64_t argument, bool copy = true, bool replace = false) {
-        std::lock_guard<std::mutex> lock(guard_);
+        submit_stage_since_.store(now(), std::memory_order_relaxed);
+        submit_stage_.store(1, std::memory_order_relaxed);
+        struct ResetActivity { std::atomic<uint32_t>& stage; ~ResetActivity() { stage.store(0, std::memory_order_relaxed); } } reset{submit_stage_};
+        std::unique_lock<std::mutex> lock(guard_);
+        submit_stage_since_.store(now(), std::memory_order_relaxed);
+        submit_stage_.store(2, std::memory_order_relaxed);
         if (!valid(port)) return error(11);
         if (index < 0 || size_t(index) >= buffers_.size() || !buffers_[size_t(index)].used) return error(10);
         if (mode != 1) return error(6);
@@ -146,15 +154,24 @@ public:
     // vblank (Sonic Mania: 93 % of its main thread): it sleeps here instead
     // until that vblank retires the flip.
     bool flip_at_vblank(bool label, uint64_t address, uint32_t value, bool interrupt) {
+        flip_stage_since_.store(now(), std::memory_order_relaxed);
+        flip_stage_.store(1, std::memory_order_relaxed);
+        struct ResetActivity { PS4VideoOut& videoout; ~ResetActivity() { videoout.flip_stage_.store(0, std::memory_order_relaxed); } } reset{*this};
         std::unique_lock<std::mutex> lock(guard_);
+        flip_stage_since_.store(now(), std::memory_order_relaxed);
+        flip_stage_.store(2, std::memory_order_relaxed);
         const uint64_t worked = now() - std::max(flip_returned_, retired_at_);
         bool written = true;
         if (port_ && vblank_count_) {
+            flip_stage_since_.store(now(), std::memory_order_relaxed);
+            flip_stage_.store(3, std::memory_order_relaxed);
             wait_paced(lock, [&] { return !deferred_.pending; });
             if (deferred_.pending) retire();
             deferred_ = {true, label, interrupt, address, value};
             if (port_ && vblank_count_ < paced_vblank_ + flip_rate_ + 1) {
                 if (worked < sleep_below_us) {
+                    flip_stage_since_.store(now(), std::memory_order_relaxed);
+                    flip_stage_.store(4, std::memory_order_relaxed);
                     wait_paced(lock, [&] { return !deferred_.pending; });
                     if (deferred_.pending) written = retire(); // Bounded wait over.
                 }
@@ -162,6 +179,31 @@ public:
             }
         } else deferred_ = {true, label, interrupt, address, value};
         written = retire(); flip_returned_ = now(); return written;
+    }
+    std::string flip_activity() const {
+        const uint32_t stage = flip_stage_.load(std::memory_order_relaxed);
+        if (!stage) return {};
+        static constexpr const char* stages[] = {"", "attente du verrou VideoOut", "verrou VideoOut", "attente du flip précédent", "attente du vblank"};
+        const uint64_t started = flip_stage_since_.load(std::memory_order_relaxed);
+        const uint64_t current = now();
+        const uint64_t elapsed = current - std::min(current, started);
+        char line[128];
+        const size_t count = sizeof(stages) / sizeof(stages[0]);
+        std::snprintf(line, sizeof line, "Flip VideoOut depuis %.1f s : %s%s\n", double(elapsed) / 1e6,
+            stage < count ? stages[stage] : "état inconnu",
+            paused_report_.load(std::memory_order_relaxed) ? " (jeu en pause)" : "");
+        return line;
+    }
+    std::string submit_activity() const {
+        const uint32_t stage = submit_stage_.load(std::memory_order_relaxed);
+        if (!stage) return {};
+        const uint64_t started = submit_stage_since_.load(std::memory_order_relaxed);
+        const uint64_t current = now();
+        const uint64_t elapsed = current - std::min(current, started);
+        char line[128];
+        std::snprintf(line, sizeof line, "Soumission VideoOut depuis %.1f s : %s\n", double(elapsed) / 1e6,
+            stage == 1 ? "attente du verrou" : "validation et publication du buffer");
+        return line;
     }
     // What sceVideoOutGetResolutionStatus reports (1920x1080 by default);
     // kept across reset, set by the host before the game runs.
@@ -204,7 +246,7 @@ public:
     // waiting past the usual bound, so a game paced on them stops where it is.
     // The host must resume before stopping a run.
     void set_paused(bool paused) {
-        std::lock_guard<std::mutex> lock(guard_); paused_ = paused; paced_.notify_all();
+        std::lock_guard<std::mutex> lock(guard_); paused_ = paused; paused_report_ = paused; paced_.notify_all();
     }
     // A stop was requested: no flip waits any more, so the game's thread goes
     // back to guest code where the stop signal lands (a thread kept waiting
@@ -284,6 +326,11 @@ private:
     bool stopping_ = false; // Until reset: the run is ending.
     uint64_t replaced_ = 0; // Dropped flips that had a ticket (requested() counts them once).
     uint64_t flip_returned_ = 0, retired_at_ = 0; // When the last flip returned / was retired (now()).
+    std::atomic<uint32_t> flip_stage_{0};
+    std::atomic<uint64_t> flip_stage_since_{0};
+    std::atomic<uint32_t> submit_stage_{0};
+    std::atomic<uint64_t> submit_stage_since_{0};
+    std::atomic<bool> paused_report_{false};
     bool valid(uint64_t port) const { return port && port == port_; }
     // Bounded wait for `done`, extended while the host has paused the game.
     template <class Done> void wait_paced(std::unique_lock<std::mutex>& lock, Done done) {
