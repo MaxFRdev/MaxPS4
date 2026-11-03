@@ -35,16 +35,32 @@ public:
     // stack accesses work unmodified. ET_SCE_EXEC (fixed addresses) is refused.
     // Guest faults are not contained here: the FEX runtime contains those of
     // generated code on ARM64 hosts.
-    static constexpr uint64_t generalAlignment = 1024 * 1024, generalStack = 1024 * 1024,
-                              generalSpan = uint64_t(1536) * 1024 * 1024;
+    // generalSpan: the largest image (all modules) a general reservation holds.
+    // generalStack: each guest thread's stack (Unreal Engine call chains run deep).
+    static constexpr uint64_t generalAlignment = 1024 * 1024, generalStack = 4 * 1024 * 1024,
+                              generalSpan = uint64_t(512) * 1024 * 1024;
     // sceKernelMmap window after the stack (PS4 16 KiB pages), PROT_NONE in
     // the host until PS4VirtualMemory maps pages in it.
     // Only reserved address space: games map their heap and GPU memory there.
+    // The largest of these sizes the host reserves (Unreal Engine games reserve
+    // 8 GiB memory pools); generalHeap, the smallest, is always required.
     static constexpr uint64_t generalHeap = uint64_t(1024) * 1024 * 1024, generalHeapPage = 0x4000;
+    static constexpr uint64_t generalHeapSizes[] = {24 * generalHeap, 16 * generalHeap, 12 * generalHeap, 8 * generalHeap,
+                                                    5 * generalHeap, 3 * generalHeap, generalHeap};
+    // Address space left free after the reservation when possible: about 9
+    // guest threads' FEX lookup caches (fexLookupCacheBytes each). iOS gives
+    // the app under 11 GiB: 3 GiB of room left Mortal Kombat: Legacy
+    // Kollection (7 threads) a 5 GiB window.
+    static constexpr uint64_t generalHeadroom = generalHeap;
+    // What FEX reserves per guest thread for its lookup cache, as
+    // scripts/patch-fexcore-lookup-cache.py sizes it: 2^34 / 4 KiB * 8 +
+    // 64 MiB of block pointers + 1 Mi * 16 bytes of L1. A failed reservation
+    // is not checked there: the thread would crash.
+    static constexpr uint64_t fexLookupCacheBytes = 112 * 1024 * 1024;
     // Child thread slots after the mmap window (scePthreadCreate): each a
     // guarded RW region holding a stack of generalStack bytes with a private
     // copy of the static TLS (blocks, then the TCB) right above it.
-    static constexpr size_t generalThreads = 8;
+    static constexpr size_t generalThreads = 64;
     int prepare_orbis_general(const std::vector<OrbisLinker::Input>& inputs,
                               const std::vector<OrbisLinker::HLE>& hle, const std::string& root,
                               std::string& diagnostic, uint64_t& relocation);
@@ -122,6 +138,7 @@ public:
     uint64_t write_entry_params();
     // General images: the sceKernelMmap window (guest = host addresses);
     // false otherwise. Not part of segments(): translate() ignores it.
+    uint64_t spare_address_space() const { return spare_bytes; }
     bool heap(uint64_t& address, uint64_t& bytes) const {
         address = heap_address; bytes = heap_bytes;
         return heap_bytes != 0;
@@ -138,6 +155,16 @@ public:
     // PT_SCE_PROCPARAM address (0 if none), for the runtime to fill and report.
     const std::vector<OrbisLinker::DataObject>& data_objects() const { return hle_data; }
     uint64_t process_param() const { return process_param_address; }
+    // The supplied modules as loaded (general images): name, address span,
+    // PT_GNU_EH_FRAME and exports (NID -> address), in load order.
+    struct ModuleRecord {
+        std::string name;
+        uint64_t base = 0, end = 0, eh_frame_hdr = 0, eh_frame_hdr_size = 0;
+        std::vector<std::pair<std::string, uint64_t>> exports;
+        struct Segment { uint64_t address, size; uint32_t protection; }; // PS4 READ 1, WRITE 2, EXEC 4.
+        std::vector<Segment> segments;
+    };
+    const std::vector<ModuleRecord>& module_records() const { return records; }
     const std::vector<Segment>& segments() const { return regions; }
 private:
     friend class PS4DynamicLinker;
@@ -152,6 +179,8 @@ private:
     void* arena = nullptr;
     size_t arena_size = 0;
     bool identity = false;
+    uint64_t heap_window = 0; // The mmap window size the reservation holds.
+    uint64_t spare_bytes = 0; // Address space left after the reservation (256 MiB steps, 16 GiB at most).
     uint64_t stack_address = 0, stack_bytes = 0, heap_address = 0, heap_bytes = 0,
              entry_params_address = 0, threads_address = 0, thread_slot_bytes = 0,
              thread_return_address = 0;
@@ -159,6 +188,7 @@ private:
     std::vector<OrbisLinker::Thunk> thunks;
     std::vector<OrbisLinker::DataObject> hle_data;
     uint64_t process_param_address = 0;
+    std::vector<ModuleRecord> records;
     std::vector<OrbisLinker::TLSBlock> tls_blocks;
     std::vector<uint8_t> tls_image; // Static TLS region as initialized (blocks + TCB).
 };

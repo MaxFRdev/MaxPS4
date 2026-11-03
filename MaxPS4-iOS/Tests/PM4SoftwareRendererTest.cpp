@@ -74,6 +74,20 @@ int main() {
     assert(renderer.stats.rendered == 2);
     for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x)
         assert((arena.at(target + (y * 16 + x) * 4)[3] == 255) == (x < 4));
+    // The same pixels must be produced through INDEX_BASE + DRAW_INDEX_OFFSET_2.
+    const std::uint16_t indices[] = {0xffff, 0, 1, 2};
+    std::memcpy(arena.at(0x10800), indices, sizeof(indices));
+    std::memset(arena.at(target), 0, 16 * 8 * 4);
+    Stream offset;
+    offset.context(0x0d, {16 | (8U << 16)});
+    offset.words.insert(offset.words.end(), {0xc0012600, 0x10800, 0, 0xc0033500, 3, 1, 3, 0});
+    renderer.execute(offset.words.data(), offset.words.size());
+    assert(renderer.stats.rendered == 3 && renderer.stats.failed == 0);
+    for (unsigned y = 0; y < 8; ++y) for (unsigned x = 0; x < 16; ++x) {
+        const auto* p = arena.at(target + (y * 16 + x) * 4);
+        const auto red = std::uint8_t(std::lround((float(x) + 0.5f) / 16 * 255));
+        assert(p[0] == 0 && p[1] == 0 && p[2] == red && p[3] == 255);
+    }
     // Target mask 0 skips the draw; an unsupported primitive is reported.
     Stream masked;
     masked.context(0x8e, {0});
@@ -82,7 +96,7 @@ int main() {
     masked.set(0x79, 0x242, {0x2});
     masked.drawAuto(3);
     renderer.execute(masked.words.data(), masked.words.size());
-    assert(renderer.stats.draws == 4 && renderer.stats.skipped == 1 && renderer.stats.failed == 1);
+    assert(renderer.stats.draws == 5 && renderer.stats.skipped == 1 && renderer.stats.failed == 1);
     assert(renderer.stats.error == "primitive type 2");
     std::puts("PASS PM4 software renderer: rect list, VS/PS programs, viewport, PS inputs, BGRA target, scissor, skips");
 }

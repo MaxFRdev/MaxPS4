@@ -86,6 +86,16 @@ int32_t maxps4_fex_engine_gnm_host_consumer(maxps4_fex_engine* engine,
 // caller serializes against engine close and guest memory mutation.
 int32_t maxps4_fex_engine_read_memory(maxps4_fex_engine* engine,
     uint64_t address, void* destination, size_t bytes);
+// Checked guest-memory write for a synchronous host-consumer callback. The
+// guest submission thread is paused until the callback returns; caller keeps
+// the engine alive and serializes close, as for read_memory.
+int32_t maxps4_fex_engine_write_memory(maxps4_fex_engine* engine,
+    uint64_t address, const void* source, size_t bytes);
+// The host bytes backing readable guest [address, address + bytes), for the
+// GPU to read guest textures in place (a no-copy Metal buffer). Valid until
+// the game unmaps them; same calling rules as read_memory.
+int32_t maxps4_fex_engine_gpu_view(maxps4_fex_engine* engine,
+    uint64_t address, size_t bytes, const void** pointer);
 // Pending flip metadata and its registered colour-target address, no CPU copy.
 int32_t maxps4_fex_engine_videoout_target(maxps4_fex_engine* engine,
     maxps4_videoout_frame* frame, uint64_t* address);
@@ -307,6 +317,29 @@ int32_t maxps4_fex_engine_set_import_probe(maxps4_fex_engine *engine, uint32_t e
 // (stubbed, returning 0): one "<library> <NID> <calls>" line each, most
 // called first, as many whole lines as fit. Returns how many there are.
 int32_t maxps4_fex_engine_missing_imports(maxps4_fex_engine *engine, char *text, size_t capacity);
+// The last PS4 calls of the run (at most 128, oldest first; lock set-up and use, time
+// and thread-data calls left out): "t<thread> <name>(rdi, rsi, rdx, rcx) =
+// <result>" with the path of an open or stat, as many whole lines as fit.
+// Returns how many calls there are.
+int32_t maxps4_fex_engine_recent_calls(maxps4_fex_engine *engine, char *text, size_t capacity);
+// The run's last PS4 calls that returned an error, same format, oldest first.
+int32_t maxps4_fex_engine_failed_calls(maxps4_fex_engine *engine, char *text, size_t capacity);
+// The last 32 sceKernelOpen calls that succeeded, with their paths (same format).
+int32_t maxps4_fex_engine_opened_files(maxps4_fex_engine *engine, char *text, size_t capacity);
+// Fixed PS4 addresses the host refused, one "0x<hint> + 0x<size> -> 0x<result>
+// (code <status>)" line each, oldest first; returns how many moves happened.
+int32_t maxps4_fex_engine_moved_mappings(maxps4_fex_engine *engine, char *text, size_t capacity);
+// The last bytes (at most 4096) the game wrote to its stdout and stderr, as
+// a C string truncated at the front to fit. Returns their length.
+int32_t maxps4_fex_engine_console(maxps4_fex_engine *engine, char *text, size_t capacity);
+// Where game memory lives: the PS4 application area reserved at load (0
+// when the host refused it, with the host's answer in app_area_status) and
+// the loaded game's mmap window (0 if none).
+// Address space iOS still granted right after the game's reservation, in
+// 256 MiB steps (16 GiB at most).
+uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine *engine);
+int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine *engine, uint64_t *app_area,
+    uint64_t *app_area_size, uint64_t *window, uint64_t *window_size, int32_t *app_area_status);
 // A game directory as the boot probe loads it: <directory>/sce_module/*.prx
 // (sorted) then <directory>/eboot.bin, each module's DT_NEEDED resolved among
 // them, placed 1 MiB aligned and apart from 0x400000, linked with

@@ -104,7 +104,7 @@ int main() {
     assert(maxps4_game_directory_report(root.c_str(),nullptr,0)==-EINVAL);
     assert(inspect(root/"missing",-EACCES).find("Rejet")!=std::string::npos);
     // Oversized input is diagnosed before allocation, cumulative bytes bounded.
-    fs::resize_file(root/"eboot.bin",64*1024*1024+1);
+    fs::resize_file(root/"eboot.bin",512*1024*1024+1);
     assert(inspect(root).find("Taille ELF invalide")!=std::string::npos);
     fs::remove_all(root); fs::create_directory(root);
     fs::path deep=root;
@@ -118,7 +118,7 @@ int main() {
     for (size_t i=0;i<129;++i) write(root/(std::to_string(i)+".prx"),{});
     assert(inspect(root,-E2BIG).find("128 exécutables")!=std::string::npos);
     fs::remove_all(root); fs::create_directory(root);
-    write(root/"a.prx",{}); fs::resize_file(root/"a.prx",64*1024*1024);
+    write(root/"a.prx",{}); fs::resize_file(root/"a.prx",512*1024*1024);
     write(root/"eboot.bin",app);
     assert(inspect(root,-E2BIG).find("Budget cumulé de lecture ELF/PRX")!=std::string::npos);
     std::cout << "PASS read-only game directory: deterministic inventory, NID/PRX, SELF/PKG refusal, TLS, symlinks/FIFO, budgets, truncation; no execution\n";

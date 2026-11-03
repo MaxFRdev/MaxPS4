@@ -13,7 +13,7 @@ using namespace maxps4::ps4;
 int main() {
     GuestELF image;
     auto file = guest_test::elf(40, 2, true);
-    guest_test::put(file, 8192, 160, 8);
+    guest_test::put(file, 0x10000, 160, 8); // 64 KiB: room for mutex_limit mutexes.
     assert(image.load(file.data(), file.size(), 6) == 0);
     PS4GuestMemory memory(image);
     PS4Libkernel kernel(memory);
@@ -74,7 +74,7 @@ int main() {
     assert(call(S::mutex_destroy) == 0);
     for (size_t i = 0; i < PS4Threads::mutex_limit; ++i)
         assert(call(S::mutex_init, 0x10000 + i * 8) == 0);
-    assert(call(S::mutex_init, 0x11000) == kernel_error(again));
+    assert(call(S::mutex_init, 0x10000 + PS4Threads::mutex_limit * 8) == kernel_error(again));
     while (threads.attach()) {}
     assert(threads.attach() == 0);
     uint8_t stale[8]; assert(memory.read(0x10000, stale, 8));
@@ -105,7 +105,7 @@ int main() {
     for (const char* unsupported : {"scePthreadCancel", "scePthreadRename", "scePthreadAttrSetstack"})
         assert(resolve_libkernel(unsupported, "libkernel", "libkernel", 1) == S::unresolved);
     // POSIX convention: -1 and the error in the calling thread's errno cell.
-    constexpr uint64_t errnos = 0x11800, progname = 0x11a00, guard = 0x11a40, request = 0x11a60;
+    constexpr uint64_t errnos = 0x18000, progname = 0x11a00, guard = 0x11a40, request = 0x11a60;
     assert(kernel.invoke(S::errno_location, {}, 1, true) == -1); // No errno table yet.
     assert(kernel.initialize_data(S::errno_table, errnos, PS4Threads::thread_limit * 8));
     assert(kernel.invoke(S::errno_location, {}, 1, true) == int64_t(errnos));

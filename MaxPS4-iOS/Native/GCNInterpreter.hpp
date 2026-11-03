@@ -50,6 +50,9 @@ using GCNCodeCache = std::unordered_map<std::uint64_t, GCNInstruction>;
 using GCNImageCache = std::unordered_map<std::uint64_t, std::vector<std::uint8_t>>;
 
 namespace gcn_detail {
+#define GCN_BC1_SOURCE(...) __VA_ARGS__
+#include "GCNBC1Shared.inc"
+#undef GCN_BC1_SOURCE
 inline float f32(std::uint32_t v) { float f; std::memcpy(&f, &v, 4); return f; }
 inline std::uint32_t u32(float f) { std::uint32_t v; std::memcpy(&v, &f, 4); return v; }
 inline std::uint16_t f16Rtz(float f) {
@@ -139,6 +142,13 @@ public:
     // guest memory is built from these (PM4ResourceScan.hpp).
     std::function<void(std::uint64_t base, std::uint64_t bytes)> resource;
     std::function<void(const std::array<std::uint32_t, 8>&)> imageResource;
+    // During imageResource: the S# of a sampling instruction, zeros otherwise.
+    std::array<std::uint32_t, 4> imageSampler{};
+    // Called as `resource` for the resources a store instruction writes.
+    std::function<void(std::uint64_t base, std::uint64_t bytes)> stored;
+    // Called with every V# access: its extent, stride and the address the
+    // first active lane reads or writes (base when no lane is active).
+    std::function<void(std::uint64_t base, std::uint64_t bytes, std::uint32_t stride, std::uint64_t address)> buffer;
 
     std::uint32_t& v(unsigned reg, unsigned lane) { return v_[std::size_t(reg & 0xff) * lanes_ + lane]; }
     std::uint64_t exec() const { return std::uint64_t(s[126]) | std::uint64_t(s[127]) << 32; }
@@ -151,7 +161,7 @@ public:
     void reset() {
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
-        attribute = {}; resource = {}; imageResource = {}; images = nullptr;
+        attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr;
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
 
@@ -694,6 +704,17 @@ private:
         unsigned channels = 1, bits = 32;
         if (format && !bufferLayout(dfmt, channels, bits)) return fail("buffer data format " + std::to_string(dfmt));
         if (resource) resource(base, stride ? std::uint64_t(records) * stride : records);
+        if (store && stored) stored(base, stride ? std::uint64_t(records) * stride : records);
+        if (buffer) {
+            std::uint64_t address = base;
+            for (unsigned lane = 0; lane < lanes_; ++lane) {
+                if (!active(lane)) continue;
+                address = base + soffset + instOffset + std::uint64_t(idxen ? v(vaddr, lane) : 0) * stride +
+                          (offen ? v(vaddr + (idxen ? 1 : 0), lane) : 0);
+                break;
+            }
+            buffer(base, stride ? std::uint64_t(records) * stride : records, stride, address);
+        }
         for (unsigned lane = 0; lane < lanes_; ++lane) {
             if (!active(lane)) continue;
             const std::uint32_t index = idxen ? v(vaddr, lane) : 0;
@@ -740,18 +761,24 @@ private:
         switch (dfmt) {
         case 1: bytes = 1; return true; case 2: case 3: case 16: case 17: case 18: case 19: bytes = 2; return true;
         case 4: case 5: case 10: bytes = 4; return true; case 11: case 12: bytes = 8; return true;
-        case 14: bytes = 16; return true; default: return false;
+        case 14: bytes = 16; return true; case 35: case 38: bytes = 8; return true; case 36: case 37: case 39: bytes = 16; return true; default: return false;
         }
+    }
+    static std::uint64_t imageSize(const Image& t, unsigned bytes) {
+        return (t.dfmt >= 35 && t.dfmt <= 39) ? std::uint64_t((t.pitch + 3) / 4) * ((t.height + 3) / 4) * bytes :
+                              std::uint64_t(t.pitch) * t.height * bytes;
     }
     bool texel(const Image& t, int x, int y, float out[4]) {
         unsigned bytes = 0;
         imageBytes(t.dfmt, bytes);
         std::uint8_t data[16] = {};
-        const std::uint64_t offset = (std::uint64_t(std::uint32_t(y)) * t.pitch + std::uint32_t(x)) * bytes;
+        const std::uint64_t offset = (t.dfmt >= 35 && t.dfmt <= 39) ?
+            (std::uint64_t(std::uint32_t(y) / 4) * ((t.pitch + 3) / 4) + std::uint32_t(x) / 4) * bytes :
+            (std::uint64_t(std::uint32_t(y)) * t.pitch + std::uint32_t(x)) * bytes;
         const std::vector<std::uint8_t>* surface = nullptr;
         if (images) {
             // Whole level 0 read once per cache lifetime (one draw).
-            const std::size_t size = std::size_t(t.pitch) * t.height * bytes;
+            const std::size_t size = std::size_t(imageSize(t, bytes));
             auto found = images->find(t.base);
             if (found == images->end() || found->second.size() != size) {
                 std::vector<std::uint8_t> copy(size);
@@ -767,6 +794,33 @@ private:
         auto unorm = [](std::uint32_t value, unsigned bits) { return float(value) / float((1u << bits) - 1); };
         float c[4] = {0, 0, 0, 1};
         switch (t.dfmt) {
+        case 35: case 36: case 37: {
+            const bool alpha = t.dfmt != 35;
+            std::uint32_t alphaHigh = 0;
+            std::memcpy(&alphaHigh, data + 4, 4);
+            if (alpha) std::memcpy(&raw, data + 8, 4);
+            std::uint32_t selectors = 0;
+            std::memcpy(&selectors, data + (alpha ? 12 : 4), 4);
+            const unsigned pixel = (unsigned(y) & 3) * 4 + (unsigned(x) & 3);
+            for (unsigned n = 0; n < 4; ++n) c[n] = gcn_detail::gcn_bc1_component(raw, selectors, pixel, n, alpha);
+            if (alpha) {
+                std::uint32_t alphaLow = 0;
+                std::memcpy(&alphaLow, data, 4);
+                c[3] = gcn_detail::gcn_bc23_alpha(alphaLow, alphaHigh, pixel, t.dfmt == 37);
+            }
+            break;
+        }
+        case 38: case 39: {
+            const unsigned pixel = (unsigned(y) & 3) * 4 + (unsigned(x) & 3);
+            for (unsigned n = 0; n < (t.dfmt == 38 ? 1u : 2u); ++n) {
+                std::uint32_t low = 0, high = 0;
+                std::memcpy(&low, data + n * 8, 4);
+                std::memcpy(&high, data + n * 8 + 4, 4);
+                c[n] = t.nfmt == 1 ? gcn_detail::gcn_bc45_snorm(low, high, pixel) :
+                    gcn_detail::gcn_bc23_alpha(low, high, pixel, true);
+            }
+            break;
+        }
         case 1: c[0] = unorm(raw & 0xff, 8); break;
         case 2: c[0] = t.nfmt == 7 ? gcn_detail::f16(raw & 0xffff) : unorm(raw & 0xffff, 16); break;
         case 3: c[0] = unorm(raw & 0xff, 8); c[1] = unorm((raw >> 8) & 0xff, 8); break;
@@ -779,7 +833,7 @@ private:
         case 14: for (unsigned n = 0; n < 4; ++n) std::memcpy(&c[n], data + 4 * n, 4); break;
         default: return fail("image data format " + std::to_string(t.dfmt));
         }
-        if (t.dfmt != 4 && t.dfmt != 14 && t.nfmt != 0 && t.nfmt != 7 && t.nfmt != 9)
+        if (t.dfmt != 4 && t.dfmt != 14 && !(t.dfmt >= 38 && t.dfmt <= 39 && t.nfmt == 1) && t.nfmt != 0 && t.nfmt != 7 && t.nfmt != 9)
             return fail("image number format " + std::to_string(t.nfmt));
         for (unsigned n = 0; n < 4; ++n) {
             const unsigned sel = t.sel[n];
@@ -826,16 +880,53 @@ private:
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
         if (rsrc > s.size() - 8) return fail("image resource register range");
         const std::uint32_t* d = &s[rsrc];
+        if (i.opcode == 14) {
+            // image_get_resinfo: width, height, depth (3D) or slices, and mip
+            // levels at the lane's mip level, as integers; any image type.
+            const unsigned base = (d[3] >> 12) & 15, last = (d[3] >> 16) & 15;
+            for (unsigned lane = 0; lane < lanes_; ++lane) {
+                if (!active(lane)) continue;
+                const unsigned shift = std::min<std::uint32_t>(v(vaddr, lane), 31);
+                const std::uint32_t depth = (d[4] & 0x1fff) + 1;
+                const std::uint32_t r[4] = {std::max<std::uint32_t>(((d[2] & 0x3fff) + 1) >> shift, 1),
+                                            std::max<std::uint32_t>((((d[2] >> 14) & 0x3fff) + 1) >> shift, 1),
+                                            (d[3] >> 28) == 10 ? std::max<std::uint32_t>(depth >> shift, 1) : depth,
+                                            last >= base ? last - base + 1 : 1};
+                for (unsigned n = 0, out = 0; n < 4; ++n) if ((dmask >> n) & 1) v(vdata + out++, lane) = r[n];
+            }
+            return true;
+        }
         Image t{(std::uint64_t(d[0]) | std::uint64_t(d[1] & 0xff) << 32) << 8,
                 (d[2] & 0x3fff) + 1, ((d[2] >> 14) & 0x3fff) + 1, ((d[4] >> 13) & 0x3fff) + 1,
                 (d[1] >> 20) & 0x3f, (d[1] >> 26) & 15, (d[3] >> 20) & 0x1f, d[3] >> 28,
                 {d[3] & 7, (d[3] >> 3) & 7, (d[3] >> 6) & 7, (d[3] >> 9) & 7}};
         if (t.type != 9) return fail("image type " + std::to_string(t.type));
-        if (t.tiling != 8) return fail("tiled image (tile mode " + std::to_string(t.tiling) + ")");
+        // Preserve the destination address even when its tiled layout cannot
+        // be interpreted by this CPU-side resource scan. The renderer uses
+        // this to refuse unsupported writes instead of silently dropping them.
+        if (i.opcode == 8 && stored) stored(t.base, 1);
+        if (t.tiling != 8) {
+            // Still named to imageResource: a tiled T# is often a colour target
+            // the Metal renderer holds as a texture.
+            if (imageResource) {
+                imageSampler = {};
+                if (i.opcode >= 32 && i.opcode < 64 && samp <= s.size() - 4) std::copy_n(&s[samp], 4, imageSampler.begin());
+                std::array<std::uint32_t, 8> descriptor{};
+                std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);
+            }
+            return fail("tiled image (tile mode " + std::to_string(t.tiling) + ")");
+        }
         unsigned bytes;
         if (!imageBytes(t.dfmt, bytes)) return fail("image data format " + std::to_string(t.dfmt));
-        if (resource) resource(t.base, std::uint64_t(t.pitch) * t.height * bytes);
+        if (t.dfmt >= 35 && t.dfmt <= 39 &&
+            ((t.nfmt != 0 && !(t.dfmt >= 38 && t.nfmt == 1)) || t.pitch < t.width))
+            return fail("BC" + std::to_string(t.dfmt - 34) +
+                (t.dfmt >= 38 ? " requires UNORM/SNORM and pitch >= width" : " requires UNORM and pitch >= width"));
+        if (resource) resource(t.base, imageSize(t, bytes));
+        if (i.opcode == 8 && stored) stored(t.base, imageSize(t, bytes));
         if (imageResource) {
+            imageSampler = {};
+            if (i.opcode >= 32 && i.opcode < 64 && samp <= s.size() - 4) std::copy_n(&s[samp], 4, imageSampler.begin());
             std::array<std::uint32_t, 8> descriptor{};
             std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);
         }

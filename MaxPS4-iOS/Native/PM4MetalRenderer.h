@@ -8,6 +8,11 @@
 // across draws. Pipelines are cached by program addresses, the fetch-shader
 // SGPR pair (s[0:1]), PS inputs, format and blend. Limits as the software
 // renderer: colour target 0 only, no depth, instance 0.
+// Compute dispatches run as Metal kernels on copies of the ranges one
+// interpreted lane addresses; colour targets inside those ranges are copied
+// in from their textures, and back after the kernel. A linear 8_8_8_8 image
+// the kernel stores becomes a colour target texture, so draws (and the
+// display) see it. Guest memory itself never receives what kernels store.
 // Prototype, off by default: `nativeTextures` reads one linear 8_8_8_8 or 5_6_5 T# per
 // draw through a Metal texture viewing the draw's memory buffer (no copy).
 // Filtering stays the GCN arithmetic; any other T#, or a view Metal cannot
@@ -16,7 +21,13 @@
 #import <Metal/Metal.h>
 #include "PM4DrawCollector.hpp"
 #include "PM4ResourceScan.hpp"
+#include <atomic>
+#include <chrono>
+#include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <tuple>
 
@@ -25,28 +36,85 @@ class PM4MetalRenderer {
 public:
     // `guest` nil: each draw copies the memory ranges its programs read.
     PM4MetalRenderer(id<MTLDevice> device, const GCNMemory& code, id<MTLBuffer> guest, std::uint64_t guestBase,
-                     bool nativeTextures = false)
-        : device_(device), code_(code), guest_(guest), guestBase_(guestBase), scanner_(code, nativeTextures),
-          native_(nativeTextures) {}
+                     bool nativeTextures = false,
+                     std::function<bool(std::uint64_t, const void*, std::size_t)> writeGuest = {})
+        : device_(device), code_(code), guest_(guest), guestBase_(guestBase),
+          scanMemory_{code.read, [](std::uint64_t, const void*, std::size_t) { return true; }},
+          scanner_(scanMemory_, nativeTextures), native_(nativeTextures), writeGuest_(std::move(writeGuest)) {}
     // Encodes one draw as a render pass into `commands`. False with `error`
     // set (and nothing encoded) when the draw cannot be expressed.
     bool encode(const PM4Draw& draw, id<MTLCommandBuffer> commands);
+    // Encodes one compute dispatch into `commands`, false with `error` set
+    // (and nothing encoded) when it cannot be expressed.
+    bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
+    unsigned kernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
+    unsigned dispatchesEncoded = 0;
+    const std::string& lastDispatchNote() const { return lastDispatchNote_; }
+    bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
+    bool writebackGuestWrites();
+    // The draws of the current batch, described for the session report, and
+    // the disassembly of the first programs drawn (VS and PS, with user SGPRs).
+    std::string batchDraws, programListings;
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
-    void beginBatch() { endBatch(); batching_ = true; }
+    void beginBatch() {
+        endBatch(); batching_ = true; batchDraws.clear();
+        visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
+        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
+        visibilityCount_ = 0;
+    }
+    // The samples each draw of the last batch that drew rasterized (Metal
+    // visibility results, readable once its commands completed).
+    id<MTLBuffer> lastVisibility = nil;
+    unsigned lastVisibilityCount = 0;
     void endBatch();
+    // Start another render segment in the same logical PM4 submission after
+    // a synchronous compute writeback barrier. Existing draw diagnostics stay.
+    void resumeBatch() {
+        batching_ = true;
+        visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
+        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
+        visibilityCount_ = 0;
+    }
     // The texture holding colour target `address`, or nil if never drawn.
     id<MTLTexture> target(std::uint64_t address) const;
+    std::size_t targetCount() const { return targets_.size(); }
+    // f(address, texture) for every colour target.
+    template <class F> void forEachTarget(F&& f) const { for (const auto& [address, t] : targets_) f(address, t.texture); }
     std::string error;
     unsigned pipelinesBuilt = 0;
+    // Read from other threads while encoding: 1 compiling MSL, 2 building a
+    // render pipeline, 3 translating GCN programs, 0 none of these.
+    std::atomic<int> compiling{0};
+    // Build new pipelines on Metal's threads: their draws are skipped (counted
+    // in drawsDeferred) until ready, instead of blocking the submission.
+    bool asyncPipelines = false;
+    unsigned drawsDeferred = 0;
+    unsigned pipelinesPending() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->pending.size()); }
+    unsigned pipelinesRefused() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->refused.size()); }
+    std::string pipelineError() const { std::lock_guard<std::mutex> lock(async_->mutex); return async_->lastError; }
+    std::string pipelineStatus() const;
     unsigned lastRanges = 0; // memory ranges copied for the last draw (copy mode)
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;
+    unsigned rangesShared = 0; // large ranges copied once for a submission's draws (copy mode)
+    unsigned rangesMapped = 0; // of which, textures read in place through hostView instead
+    // The host bytes backing guest [address, address + size), or null. When
+    // set, a large range holding a T# is a no-copy buffer over them: the GPU
+    // reads the texture in place. Vertex and constant ranges stay copied (the
+    // game may rewrite them while the GPU still runs).
+    std::function<const void*(std::uint64_t, std::size_t)> hostView;
     unsigned nativeDraws = 0; // draws given a native texture (nativeTextures)
+    unsigned nativeViews = 0; // native textures given to those draws, up to 3 each
+    unsigned targetReads = 0; // of which, a colour target an earlier draw rendered
     // T#s refused: none captured (per draw), format/tiling, outside the copied
     // ranges, alignment, Metal view refused; and the last refused T#.
     unsigned nativeMisses[5] = {};
     std::string nativeLastMiss;
+    // A Metal sampler with S# `s`'s address modes and filters, for an argument
+    // buffer; nil for modes Metal has no match for (border, mirror once) or
+    // depth compare, which keep GCN's filtering.
+    static MTLSamplerDescriptor* nativeSamplerDescriptor(const std::array<std::uint32_t, 4>& s);
 
 private:
     using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned>;
@@ -55,11 +123,35 @@ private:
     const GCNMemory& code_;
     id<MTLBuffer> guest_;
     std::uint64_t guestBase_;
+    GCNMemory scanMemory_; // code_ reads; scanned lanes' stores are dropped
     PM4ResourceScanner scanner_;
     bool native_;
+    std::function<bool(std::uint64_t, const void*, std::size_t)> writeGuest_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
+    // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
+    struct AsyncPipelines {
+        struct Pending { std::chrono::steady_clock::time_point since; const char* stage; };
+        std::mutex mutex;
+        std::map<PipelineKey, Pending> pending;
+        std::set<PipelineKey> refused;
+        std::map<PipelineKey, id<MTLRenderPipelineState>> ready; // nil: refused
+        std::string lastError;
+    };
+    std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
+    bool deferred_ = false; // the last pipeline() call left its draw to a pending build
+    std::string lastDispatchNote_;
+    struct PendingGuestWrite { std::uint64_t address, size, offset; id<MTLBuffer> buffer; };
+    std::vector<PendingGuestWrite> pendingGuestWrites_;
+    static MTLCompileOptions* compileOptions();
+    std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
+    id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
+    id<MTLLibrary> library(const std::string& source);
     std::map<std::uint64_t, Target> targets_;
+    std::vector<std::uint64_t> listed_;
+    id<MTLBuffer> visibility_ = nil;
+    unsigned visibilityCount_ = 0;
+    void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount);
     bool batching_ = false;
     id<MTLRenderCommandEncoder> encoder_ = nil;
     id<MTLCommandBuffer> commands_ = nil;
@@ -68,10 +160,25 @@ private:
     std::vector<Upload> uploads_;
     std::uint64_t pooledBytes_ = 0;
     id<MTLBuffer> uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands);
+    // Ranges of at least sharedRangeBytes get one of the shader's GCN_SLOTS
+    // buffers (buffer(5) up), copied once per command buffer: the draws of a
+    // submission sampling one atlas share its copy.
+    static constexpr unsigned slotCount = 6;
+    static constexpr std::uint64_t sharedRangeBytes = 1ull << 20;
+    struct Shared { id<MTLBuffer> buffer; std::uint64_t offset; }; // the range's first byte in `buffer`
+    std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
+    id<MTLCommandBuffer> sharedOwner_ = nil;
+    Shared sharedRange(std::uint64_t base, std::uint64_t size, bool texture, id<MTLCommandBuffer> commands);
+    // Guest [address, address + size) into `out`; unreadable pages read as zero.
+    void copyGuest(std::uint64_t address, std::uint8_t* out, std::uint64_t size) const;
     id<MTLRenderPipelineState> pipeline(const PM4Draw& draw, MTLPixelFormat format);
-    // `ranges`: (guest start, length, buffer offset) triples; none for the guest window.
-    id<MTLTexture> nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory,
-                                 const std::uint64_t* ranges, unsigned rangeCount);
+    // `ranges`: (guest start, length, buffer offset) triples; none for the guest
+    // window. An offset's bits 48 and up select slots[n - 1] instead of `memory`.
+    id<MTLTexture> nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
+                                 const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing);
+    // The Metal sampler for S# `s` (cached), nil when Metal's cannot match it.
+    std::map<std::array<std::uint32_t, 4>, id<MTLSamplerState>> samplers_;
+    id<MTLSamplerState> nativeSampler(const std::array<std::uint32_t, 4>& s);
     bool fail(const std::string& message) { error = message; return false; }
 };
 } // namespace maxps4::gpu

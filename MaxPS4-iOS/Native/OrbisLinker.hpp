@@ -1,5 +1,6 @@
 #pragma once
 #include "PS4PKGRuntimePlan.hpp"
+#include "OrbisMetadata.hpp"
 #include <map>
 #include <set>
 #include <tuple>
@@ -90,6 +91,10 @@ public:
         // nothing here: their own startup code runs their initializers from the
         // entry. All DT_INIT/FINI(_ARRAY) entries are still validated.
         std::vector<uint64_t> initializers;
+        // Every defined, non-TLS export of the supplied modules (by module index),
+        // for a runtime's sceKernelDlsym.
+        struct Exported { size_t module; std::string nid; uint64_t address; };
+        std::vector<Exported> exported;
         // A backend must copy/map these bytes at their guest addresses and apply
         // the advertised permissions. No identity mapping is implied.
         std::vector<Mapping> mappings() const {
@@ -349,7 +354,7 @@ private:
         for (auto index : sorted) {
             const auto& input = inputs[index];
             const auto* b = input.file.bytes; const auto n = input.file.size;
-            require(b && n >= 64 && n <= 64 * 1024 * 1024, "chargeur: invalid ELF file size");
+            require(b && n >= 64 && n <= OrbisMetadata::fileLimit, "chargeur: invalid ELF file size");
             const auto phoff = read(b + 32, 8), phnum = read(b + 56, 2);
             require(phoff >= 64 && phnum && phnum <= 128 && range(phoff, phnum * 56, n), "chargeur: invalid program table");
             for (size_t i = 0; i < phnum; ++i) {
@@ -359,7 +364,7 @@ private:
                 require(size <= budget - planned, "batch memory budget exceeded"); planned += static_cast<size_t>(size);
             }
         }
-        size_t allocated = 0, symbolBudget = 65536, relocationBudget = 65536;
+        size_t allocated = 0, symbolBudget = 4 * OrbisMetadata::symbolLimit, relocationBudget = 2 * OrbisMetadata::relocationLimit;
         for (auto i : order) {
             report.phase = "ELF/segments";
             const auto& in = inputs[sorted[i]];
@@ -495,11 +500,14 @@ private:
         for (size_t i = 0; i < dynamic.size(); ++i) for (const auto& s : dynamic[i].symbols) if (s.defined && !s.local)
             require(exports.emplace(s.identity, Export{s.type == 6 ? s.value : add(out.modules[i].bias, s.value), i}).second,
                     "duplicate or ambiguous export: " + s.identity.nid);
+        for (size_t i = 0; i < dynamic.size(); ++i) for (const auto& s : dynamic[i].symbols)
+            if (s.defined && !s.local && s.type != 6) out.exported.push_back({i, s.identity.nid, add(out.modules[i].bias, s.value)});
         // Synthesized trampolines live in one RX module after every supplied
         // module, separated by a 16 KiB guard (iOS page size).
         size_t synthesized = 0;
         uint64_t dataBytes = 0, codeBytes = 0;
         auto isData = [](const HLE& h) { return h.identity.type == 1; };
+        std::set<Identity> exportKeys; // Module version 0, filled on first use.
         for (const auto& h : hle) {
             if (!h.code.empty()) {
                 require(!h.guestAddress && !h.token && !isData(h) && h.code.size() <= codeLimit,
@@ -596,14 +604,22 @@ private:
             // libkernel 1.1, libSceScreenShot 0.9, ... for the same functions.
             auto key = h.identity;
             key.moduleVersion = 0;
-            for (const auto& [identity, unused] : exports) {
-                (void)unused;
-                auto exported = identity;
-                exported.moduleVersion = 0;
-                require(exported.key() != key.key(), "ambiguous HLE/export");
-            }
+            if (exportKeys.empty())
+                for (const auto& [identity, unused] : exports) {
+                    (void)unused;
+                    auto exported = identity;
+                    exported.moduleVersion = 0;
+                    exportKeys.insert(exported);
+                }
+            require(!exportKeys.count(key), "ambiguous HLE/export");
             require(hleExports.emplace(key, Export{address, SIZE_MAX}).second, "ambiguous HLE/export");
         }
+        // The system's libSceLibcInternal exports libc's functions under their
+        // libc NIDs (malloc, free, __cxa_atexit...); a game ships libc.prx, so
+        // its "libc" exports serve the PRX modules that import them there.
+        std::map<std::string, std::map<Identity, Export>::const_iterator> libc;
+        for (auto it = exports.cbegin(); it != exports.cend(); ++it)
+            if (it->first.library == "libc") libc.emplace(it->first.nid, it);
         // Resolve every import (including unreferenced/weak imports) before writes.
         std::vector<std::vector<uint64_t>> resolved(dynamic.size());
         std::vector<std::vector<size_t>> owners(dynamic.size()); // Defining module, for TLS module IDs.
@@ -614,6 +630,17 @@ private:
                 else if (j && !s.local) { // Local (section) symbols are never imported.
                     ++report.imports;
                     auto it = exports.find(s.identity);
+                    // An alias link stands for the system module: libc.prx may
+                    // itself depend on the importer (Fios2), so no declared
+                    // dependency or load order is required for it.
+                    bool aliased = false;
+                    if (it == exports.end() && s.identity.library == "libSceLibcInternal") {
+                        const auto alias = libc.find(s.identity.nid);
+                        if (alias != libc.end() && alias->second->first.type == s.identity.type) {
+                            it = exports.find(alias->second->first);
+                            aliased = true;
+                        }
+                    }
                     if (it == exports.end()) {
                         auto key = s.identity;
                         key.moduleVersion = 0;
@@ -623,7 +650,7 @@ private:
                     require(it != exports.end(), out.modules[i].path + ": unresolved NID " + s.identity.nid +
                             " library=" + s.identity.library + " module=" + s.identity.module);
                     const auto owner = it->second.owner;
-                    if (owner != SIZE_MAX && owner != i) {
+                    if (owner != SIZE_MAX && owner != i && !aliased) {
                         const auto& deps = requests[order[i]].dependencies;
                         require(std::find(deps.begin(), deps.end(), out.modules[owner].path) != deps.end(), "import provider missing explicit dependency");
                         require(owner < i, "import provider not loaded first");

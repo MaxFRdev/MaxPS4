@@ -101,6 +101,10 @@
 "Préparer le JIT" = "Preparar o JIT";
 "Vérification de l’activation…" = "Verificando a ativação…";
 "Activer avec StikDebug" = "Ativar com o StikDebug";
+"Configurer le PairingFile" = "Configurar o PairingFile";
+"Dans StikDebug, importe le même fichier d’appairage que pour SideStore. Active aussi le VPN si StikDebug le demande." = "No StikDebug, importe o mesmo arquivo de pareamento usado no SideStore. Ative a VPN também se o StikDebug solicitar.";
+"Reviens ici, touche « Activer avec StikDebug », puis attends la fin de son script avant de vérifier le JIT." = "Volte aqui, toque em “Ativar com o StikDebug” e aguarde o script terminar antes de verificar o JIT.";
+"Le PairingFile est propre à ton iPhone : garde-le privé et ne le joins pas aux rapports MaxPS4." = "O PairingFile é específico do seu iPhone. Mantenha-o privado e não o anexe aos relatórios do MaxPS4.";
 "Vérifier l’activation" = "Verificar a ativação";
 "Détails de l’activation" = "Detalhes da ativação";
 "Réinitialiser le JIT" = "Redefinir o JIT";
@@ -153,6 +157,9 @@
 "Ajouter un jeu" = "Adicionar um jogo";
 "Commandes" = "Controles";
 "Stick gauche comme croix directionnelle" = "Analógico esquerdo como direcional";
+"Stick droit tactile" = "Analógico direito de toque";
+"Stick droit" = "Analógico direito";
+"Stick gauche" = "Analógico esquerdo";
 "Taille des commandes tactiles" = "Tamanho dos controles de toque";
 "Opacité des commandes tactiles" = "Opacidade dos controles de toque";
 "Dernier jeu lancé" = "Último jogo iniciado";
@@ -173,3 +180,4 @@
 "Mode développeur activé." = "Modo desenvolvedor ativado.";
 "Mode développeur désactivé." = "Modo desenvolvedor desativado.";
 "Contenus additionnels" = "Conteúdo adicional";
+"Afficher les images par seconde" = "Mostrar quadros por segundo";

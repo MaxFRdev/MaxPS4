@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
     put(consumer,0x900,0x20fc); reject(batch(),"relocation target"); consumer=original;
     put(consumer,0x908,(uint64_t{1}<<32)|99); reject(batch(),"unsupported x86-64 relocation"); consumer=original;
     put(consumer,0x908,(uint64_t{99}<<32)|7); reject(batch(),"invalid relocation symbol"); consumer=original;
-    reject(batch(),"memory budget",1023); reject(batch(),"budget exceeds",65*1024*1024);
+    reject(batch(),"memory budget",1023); reject(batch(),"budget exceeds",513*1024*1024);
     put(consumer,64+56+4,4,4); reject(batch(),"relocation target"); consumer=original;
     put(consumer,64+4,7,4); reject(batch(),"writable executable"); consumer=original;
     put(consumer,0x900,0x1000); reject(batch(),"relocation target"); consumer=original;
@@ -163,7 +163,8 @@ int main(int argc, char** argv) {
         auto plainTLS = makeTLS(false); put(plainTLS,56,4,2);
         tlsConsumer = plainTLS; tlsReject("without PT_TLS"); tlsConsumer=tlsOriginal;
     }
-    put(consumer,64+56+40,33*1024*1024); reject(batch(), "chargeur"); consumer=original;
+    // Above every image budget: refused before staging (the batch budget equals the image one).
+    put(consumer,64+56+40,513*1024*1024); reject(batch(), "batch memory budget exceeded"); consumer=original;
     // Overflow in S+A, independently of segment-address overflow.
     put(consumer,0x908,(uint64_t{1}<<32)|1); put(consumer,0x910,INT64_MAX);
     auto addOverflow=batch(); addOverflow[1].bias=UINT64_MAX-0x10000;

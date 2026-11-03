@@ -200,10 +200,11 @@ jobs:
         run: bash scripts/build-fexcore-app.sh build/aether-app
       - name: Record exact pre-resigning signature and entitlements
         run: python3 scripts/audit-ios-signature.py build/Payload/MaxPS4.app > build/diagnostics/ios-signature.json
-      - uses: actions/upload-artifact@v4
+      # Unzipped: the download is the .ipa itself, ready for SideStore.
+      - uses: actions/upload-artifact@v7.0.0
         with:
-          name: MaxPS4-FEXCore-SideStore
           path: build/MaxPS4-FEXCore-SideStore.ipa
+          archive: false
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@v4

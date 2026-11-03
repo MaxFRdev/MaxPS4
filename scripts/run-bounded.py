@@ -26,6 +26,11 @@ def main():
             output.write(f"\nFAIL: deadline exceeded ({seconds:g} seconds); child terminated\n")
             status = 124
     print(path.read_text(errors="replace"), end="", flush=True)
+    # Shells can truncate Windows exception statuses to eight bits, turning
+    # some crashes into exit 0. Preserve failure across that boundary.
+    if status < 0 or status > 255:
+        print(f"FAIL: child exited with status {status}", flush=True)
+        return 1
     return status
 
 

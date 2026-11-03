@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <set>
 #include <string>
 #include <sys/stat.h>
@@ -57,6 +58,22 @@ int main() {
     assert(call(S::lseek, fd, 0, 1) == 6); // Positioned I/O preserves the offset.
     assert(call(S::pread, fd, 0x11100, 6, 0) == 6);
     assert(memory.read(0x11100, bytes, 6) && std::memcmp(bytes, "ababef", 6) == 0);
+    // AIO reads complete at submission: the result holds the size, state 3 (completed).
+    {
+        uint8_t request[40]{};
+        put_le(request, 0, 1, 8); put_le(request, 8, 4, 8); put_le(request, 16, 0x11180, 8);
+        put_le(request, 24, 0x11440, 8); put_le(request, 32, uint64_t(fd), 4);
+        assert(memory.write(0x11400, request, sizeof(request)));
+        assert(call(S::aio_read, 0x11400, 1, 0, 0x11460) == 0);
+        uint8_t result[12]{}; assert(memory.read(0x11440, result, 12) && get_le(result, 8) == 4 && get_le(result + 8, 4) == 3);
+        assert(memory.read(0x11180, bytes, 4) && std::memcmp(bytes, "babe", 4) == 0);
+        uint8_t id[4]{}; assert(memory.read(0x11460, id, 4));
+        assert(call(S::aio_wait, get_le(id, 4), 0x11468) == 0 && memory.read(0x11468, id, 4) && get_le(id, 4) == 3);
+        put_le(request, 32, 99, 4); assert(memory.write(0x11400, request, sizeof(request)));
+        assert(call(S::aio_read, 0x11400, 1, 0, 0x11460) == 0); // A bad descriptor aborts that request only.
+        assert(memory.read(0x11440, result, 12) && int64_t(get_le(result, 8)) == kernel_error(badf) && get_le(result + 8, 4) == 4);
+        assert(call(S::aio_read, 0x11400, 1, 0, 0) == kernel_error(fault));
+    }
     assert(call(S::pread, fd, 0x11100, 1, UINT64_MAX) == kernel_error(inval));
     assert(call(S::pwrite, fd, 0x11000, 1, UINT64_MAX) == kernel_error(inval));
     assert(call(S::pread, fd, 0x11fff, 4, 0) == kernel_error(fault));
@@ -263,6 +280,157 @@ int main() {
     assert(call(S::open, path("/addcont0/extra"), 0) == kernel_error(noent));
     assert(::unlink((std::string(dlc_dir) + "/extra").c_str()) == 0 && ::rmdir(dlc_dir) == 0);
     assert(resolve_libkernel("18B2NS1y9UU", "libSceRtc", "libSceRtc", 1) == S::rtc_current_tick);
+    // Loaded modules: LoadStartModule by file name, Dlsym by NID, unwind info.
+    assert(ps4_nid("sceGnmSetPsShader350") == "5uFKckiJYRM" && ps4_nid("sceKernelDlsym") == "LwG8g3niqwA");
+    kernel.set_modules({{"libfoo.prx", 0x10000, 0x20000, 0, 0, {{ps4_nid("fooFunction"), 0x12345}}, {}}});
+    assert(call(S::module_load_start, path("/app0/sce_module/LIBFOO.prx"), 0, 0, 0) == 1);
+    assert(call(S::module_load_start, path("/app0/sce_module/libbar.prx"), 0, 0, 0) == kernel_error(noent));
+    assert(memory.write(0x11c40, "fooFunction", 12) && memory.write(0x11c60, "barFunction", 12));
+    assert(call(S::module_dlsym, 1, 0x11c40, 0x11c80) == 0);
+    uint8_t address[8]{}; assert(memory.read(0x11c80, address, 8) && get_le(address, 8) == 0x12345);
+    assert(call(S::module_dlsym, 1, 0x11c60, 0x11c80) == kernel_error(srch));
+    assert(call(S::module_dlsym, 2, 0x11c40, 0x11c80) == kernel_error(srch));
+    assert(call(S::module_info_unwind, 0x10800, 0, 0x11e00) == 0);
+    char unwind_name[16]{}; assert(memory.read(0x11e08, unwind_name, 11) && !std::strcmp(unwind_name, "libfoo.prx"));
+    uint8_t segment[8]{}; assert(memory.read(0x11e00 + 288, segment, 8) && get_le(segment, 8) == 0x10000);
+    assert(call(S::module_info_unwind, 0x30000, 0, 0x11e00) == kernel_error(srch));
+    // Module info by address (Ex, 0x1a8 bytes: handle at 264) and by handle (0x160).
+    assert(call(S::module_info_ex, 0x10800, 0, 0x10400) == 0 && value32(0x10400 + 264) == 1);
+    char info_name[16]{}; assert(memory.read(0x10408, info_name, 11) && !std::strcmp(info_name, "libfoo.prx"));
+    assert(call(S::module_info, 1, 0x10600) == 0 && value32(0x10600) == 0x160);
+    assert(call(S::module_info, 2, 0x10600) == kernel_error(srch));
+    // Dialogs finish at once answered OK; networking is never connected.
+    assert(call(S::msg_init) == 0 && call(S::msg_status) == 1);
+    assert(call(S::msg_result, 0x11c80) == signed32(0x80b80008U));
+    assert(call(S::msg_open, 0x11c80) == 0 && call(S::msg_status) == 3);
+    assert(call(S::msg_result, 0x11c80) == 0 && value32(0x11c88) == 1);
+    assert(call(S::msg_term) == 0 && call(S::msg_status) == 0);
+    assert(call(S::error_init) == 0 && call(S::error_open, 0) == 0 && call(S::error_status) == 3 && call(S::error_term) == 0);
+    assert(call(S::netctl_state, 0x11900) == 0 && value32(0x11900) == 0);
+    assert(call(S::netctl_info, 1, 0x11c80) == signed32(0x80412108U));
+    assert(call(S::netctl_callback, 0, 0, 0x11900) == 0 && value32(0x11900) == 1);
+    assert(call(S::audio_port_state, 1, 0x11c80) == 0 && value32(0x11c80) == (1 | 2 << 16));
+    // PlayGo: installed and local; sceRandom fills; no sandbox word without dynamic memory.
+    assert(call(S::playgo_open, 0x11900, 0) == 0 && value32(0x11900) == 1);
+    uint8_t chunks[4] = {0, 0, 1, 0}; assert(memory.write(0x11c80, chunks, 4));
+    assert(call(S::playgo_locus, 1, 0x11c80, 2, 0x11ca0) == 0);
+    uint8_t loci[2]{}; assert(memory.read(0x11ca0, loci, 2) && loci[0] == 3 && loci[1] == 3);
+    assert(call(S::playgo_todo, 1, 0x11cc0, 4, 0x11900) == 0 && value32(0x11900) == 0);
+    assert(call(S::random_number, 0x11cc0, 65) == signed32(0x817c0016U));
+    uint8_t zero[32]{}; assert(memory.write(0x11cc0, zero, 32) && call(S::random_number, 0x11cc0, 32) == 0);
+    uint8_t random[32]{}; assert(memory.read(0x11cc0, random, 32) && std::memcmp(random, zero, 32) != 0);
+    assert(call(S::sandbox_word) == 0);
+    // Save data 2: Mount (v1), params, DirNameSearch, delete, save data memory.
+    char saves2[] = "/tmp/maxps4-saves2-XXXXXX";
+    assert(::mkdtemp(saves2) && kernel.set_savedata_root(saves2) == 0);
+    {
+        uint8_t request[48]{};
+        put_le(request, 16, path("SLOT01", 0x11500), 8); put_le(request, 40, 0x22, 4); // RDWR | CREATE2.
+        assert(memory.write(0x11400, request, sizeof(request)) && call(S::save_mount1, 0x11400, 0x11600) == 0);
+        assert(memory.write(0x11700, "/savedata0", 11));
+        assert(memory.write(0x10400, "Green Hill", 11) && call(S::save_set_param, 0x11700, 1, 0x10400, 128) == 0);
+        uint8_t title[16]{};
+        assert(kernel.invoke(S::save_get_param, {0x11700, 1, 0x10500, 128, 0x11900}) == 0 && value32(0x11900) == 128);
+        assert(memory.read(0x10500, title, 11) && !std::strcmp(reinterpret_cast<char*>(title), "Green Hill"));
+        assert(call(S::save_mount_info, 0x11700, 0x11a00) == 0);
+        assert(call(S::save_umount2, 0, 0x11700) == 0);
+        put_le(request, 16, path("SLOT02", 0x11500), 8);
+        assert(memory.write(0x11400, request, sizeof(request)) && call(S::save_mount1, 0x11400, 0x11600) == 0);
+        assert(call(S::save_umount, 0x11700) == 0);
+        // Search "SLOT%": both, by name, the first's title in its param.
+        uint8_t cond[32]{}, result[40]{};
+        put_le(cond, 16, path("SLOT%", 0x11500), 8);
+        put_le(result, 8, 0x10a00, 8); put_le(result, 16, 4, 4); put_le(result, 24, 0x10b00, 8);
+        assert(memory.write(0x11400, cond, sizeof(cond)) && memory.write(0x11440, result, sizeof(result)));
+        assert(call(S::save_search, 0x11400, 0x11440) == 0 && value32(0x11440) == 2 && value32(0x11440 + 20) == 2);
+        char found[8]{};
+        assert(memory.read(0x10a00, found, 7) && !std::strcmp(found, "SLOT01") && memory.read(0x10a20, found, 7) && !std::strcmp(found, "SLOT02"));
+        assert(memory.read(0x10b00, title, 11) && !std::strcmp(reinterpret_cast<char*>(title), "Green Hill"));
+        // Delete SLOT02, then only SLOT01 is found.
+        uint8_t del[24]{};
+        put_le(del, 16, path("SLOT02", 0x11500), 8);
+        assert(memory.write(0x11480, del, sizeof(del)) && call(S::save_delete, 0x11480) == 0);
+        assert(call(S::save_search, 0x11400, 0x11440) == 0 && value32(0x11440) == 1);
+        // Save data memory: setup, write, read back.
+        assert(call(S::save_memory_setup, 1, 64, 0x11900) == 0);
+        uint8_t existed[8]{}; assert(memory.read(0x11900, existed, 8) && get_le(existed, 8) == 0);
+        assert(memory.write(0x10400, "memory!", 8) && call(S::save_memory_set, 1, 0x10400, 8, 16) == 0);
+        assert(call(S::save_memory_get, 1, 0x10500, 8, 16) == 0);
+        char back_text[8]{}; assert(memory.read(0x10500, back_text, 8) && !std::strcmp(back_text, "memory!"));
+    }
+    kernel.reset();
+    std::filesystem::remove_all(saves2);
+    // POSIX pthread_* reuse the scePthread services and return errno numbers.
+    assert(resolve_libkernel("7H0iTOciTLo", "libkernel", "libkernel", 1) == S::mutex_lock);
+    assert(resolve_libkernel("OxhIB8LB-PQ", "libkernel", "libkernel", 1) == S::thread_create);
+    assert(pthread_result(0) == 0 && pthread_result(kernel_error(busy)) == 16 && pthread_result(kernel_error(timedout)) == 60);
+    assert(pthread_result(42) == 42);
+    // libScePosix shares libkernel's POSIX functions; sockets fail (no network).
+    assert(resolve_libkernel("bY-PO6JhzhQ", "libScePosix", "libScePosix", 1) == S::close);
+    assert(resolve_libkernel("bY-PO6JhzhQ", "libkernel", "libkernel", 1) == S::close);
+    assert(resolve_libkernel("TU-d9PfIHPM", "libScePosix", "libScePosix", 1) == S::net_unavailable);
+    assert(resolve_libkernel("lbQKqsERhtE", "libSceDiscMap", "libSceDiscMap", 1) == S::discmap_no_bitmap);
+    assert(kernel.invoke(S::net_unavailable, {2, 1, 0}, 1, true) == -1);
+    assert(call(S::sched_priority_max, 1) == 767 && call(S::sched_priority_min, 3) == 256);
+    assert(call(S::sched_priority_max, 0) == kernel_error(inval));
+    assert(call(S::sched_param_get, 0, 0x11900, 0x11904) == 0 && value32(0x11900) == 1 && value32(0x11904) == 700);
+    assert(call(S::discmap_no_bitmap, 0x10000, 0, 16, 0x11900) == int32_t(0x81100004U));
+    const uint8_t ones[12] = {0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff};
+    assert(memory.write(0x11900, ones, sizeof(ones)));
+    assert(kernel.invoke(S::discmap_flags, {0x10000, 0, 16, 0x11900, 0x11904, 0x11908}) == 0);
+    assert(value32(0x11900) == 0 && value32(0x11904) == 0 && value32(0x11908) == 0);
+    assert(call(S::video_capability, 1, 0x11900) == 0 && value32(0x11900) == 0);
+    // GNM workloads: one stream; begin/end as shadPS4.
+    assert(call(S::gnm_workload_stream, 1, 0x11900) == 0 && value32(0x11900) == 1);
+    assert(call(S::gnm_workload_stream, 0, 0x11900) == 3);
+    assert(call(S::gnm_workload_begin, 1, 0x11900) == 0 && value32(0x11900) == 1 && call(S::gnm_workload_begin, 16, 0x11900) == 1);
+    assert(call(S::gnm_workload_end, 1) == 0 && call(S::gnm_workload_end, 0) == 2 && call(S::gnm_workload_end, 16ULL << 56) == 2);
+    // Without a graphics backend, a workload submission fails like a plain one.
+    assert(call(S::gnm_submit_workload, 1, 1, 0x11900, 0x11910) == call(S::gnm_submit, 1, 0x11900, 0x11910));
+    // A compute ring at 0x11c00 (64 dwords) whose WRITE_DATA stores a label:
+    // DingDong retires it and moves the read pointer.
+    {
+        constexpr uint64_t ring = 0x11c00, read_pointer = 0x11d00, label = 0x11d10;
+        assert(call(S::gnm_map_compute, 7, 0, ring, 64) == int32_t(0x80d17000U));
+        assert(call(S::gnm_map_compute, 1, 0, ring + 4, 64) == int32_t(0x80d17003U));
+        assert(call(S::gnm_map_compute, 1, 0, ring, 48) == int32_t(0x80d17002U));
+        const int64_t vqid = kernel.invoke(S::gnm_map_compute, {1, 2, ring, 64, read_pointer});
+        assert(vqid == 11 && value32(read_pointer) == 0);
+        uint8_t packet[20]{};
+        put_le(packet, 0, 0xc0033700U, 4); put_le(packet, 4, 5U << 8, 4);
+        put_le(packet, 8, label, 4); put_le(packet, 12, 0, 4); put_le(packet, 16, 0xfeedU, 4);
+        assert(memory.write(ring, packet, sizeof(packet)) && memory.write(label, "\0\0\0\0", 4));
+        assert(call(S::gnm_ding_dong, uint64_t(vqid), 5) == 0 && value32(label) == 0xfeed && value32(read_pointer) == 5);
+        assert(call(S::gnm_ding_dong, 99, 5) == 0 && call(S::gnm_unmap_compute, uint64_t(vqid)) == 0);
+        assert(call(S::gnm_ding_dong, uint64_t(vqid), 9) == 0 && value32(read_pointer) == 5); // Unmapped: ignored.
+    }
+    assert(call(S::gnm_tessellation_offchip) == 0x800000);
+    assert(memory.write(0x11900, "named", 6) && call(S::thread_getname, 1, 0x11900) == 0 && value32(0x11900) == 0);
+    assert(call(S::thread_getname, 1, 0) == kernel_error(fault));
+    // The game's stdout/stderr text is kept for the session report.
+    assert(memory.write(0x11900, "Fatal error!", 12) && call(S::write, 1, 0x11900, 12) == 12 && call(S::write, 2, 0x11900, 5) == 5);
+    assert(kernel.console() == "Fatal error!Fatal");
+    // Trophy queries: zero trophies past each structure's size field.
+    {
+        uint8_t details[0x40]; std::memset(details, 0xff, sizeof(details)); put_le(details, 0, 0x20, 8);
+        assert(memory.write(0x11a00, details, sizeof(details)) && memory.write(0x11a80, details, sizeof(details)));
+        assert(call(S::trophy_game_info, 1, 1, 0x11a00, 0x11a80) == 0);
+        assert(value32(0x11a00) == 0x20 && value32(0x11a08) == 0 && value32(0x11a1c) == 0 && value32(0x11a20) == 0xffffffffU);
+        assert(value32(0x11a88) == 0 && value32(0x11aa0) == 0xffffffffU);
+        assert(memory.write(0x11a00, details, sizeof(details)) && call(S::trophy_unlock_state, 1, 1, 0x11a00, 0x11a10) == 0);
+        assert(value32(0x11a00) == 0 && value32(0x11a0c) == 0 && value32(0x11a10) == 0);
+    }
+    // MutexReltimedlockNp locks, or times out while another owner holds it.
+    assert(call(S::mutex_init, 0x11b00) == 0 && call(S::mutex_reltimedlock, 0x11b00, 1000) == 0);
+    assert(call(S::mutex_reltimedlock, 0x11b00, 2000) == kernel_error(timedout) || call(S::mutex_reltimedlock, 0x11b00, 2000) == kernel_error(deadlk));
+    assert(call(S::mutex_unlock, 0x11b00) == 0 && call(S::mutex_destroy, 0x11b00) == 0);
+    assert(call(S::attr_getschedparam, 0x11b40, 0x11b48) == 0 && value32(0x11b48) == 700);
+    // sceRtcGetTime_t: 2000-01-01 00:00:01 UTC.
+    {
+        uint8_t date[16]{}; put_le(date, 0, 2000, 2); put_le(date, 2, 1, 2); put_le(date, 4, 1, 2); put_le(date, 10, 1, 2);
+        assert(memory.write(0x11a00, date, sizeof(date)) && call(S::rtc_time_t, 0x11a00, 0x11a40) == 0 && value32(0x11a40) == 946684801U);
+    }
+    assert(resolve_libkernel("How7B8Oet6k", "libkernel", "libkernel", 1) == S::thread_getname);
     kernel.reset();
     assert(call(S::system_param_int, 1, 0x11900) == 0 && value32(0x11900) == 1);
     std::puts("PS4 writable files, positioned I/O and directory checks passed");

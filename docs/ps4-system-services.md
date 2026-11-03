@@ -76,11 +76,38 @@ mappings are rejected. Guest RX is host data, never an iOS JIT allocation.
 whole or partial page intervals. Both currently require the entire interval
 to lie in one live anonymous allocation; holes and ELF segments return ENOMEM.
 Partially unmapped pages become inaccessible immediately, but the backing
-budget is released only when the allocation's last page is unmapped. File,
-shared and fixed mappings, hints, direct memory and GPU memory are unsupported.
+budget is released only when the allocation's last page is unmapped. File
+and shared mappings are unsupported. The bounded image path rejects fixed
+mappings; general images support them inside the image's owned host window.
+The extended direct-memory layer is described below.
 Allocations avoid staged ELF segments and other anonymous allocations.
 The optional `PS4DynamicMemory` provider preserves existing ELF-only clients.
 The owner must reset dynamic memory on restaging and serialize all accesses.
+
+The extended kernel layer also exposes direct-memory allocation and mapping.
+`sceKernelReserveVirtualRange` reserves inaccessible pages;
+its alignment must be zero or a power of two from 16 KiB to 2 GiB.
+`sceKernelMtypeprotect` changes their CPU permissions, translating GPU access
+bits for the emulated GPU. Memory types are not retained.
+`sceKernelDirectMemoryQuery` returns the allocation containing an offset, or
+the next allocation when flag 1 is set, in a 24-byte guest structure.
+`sceKernelMapNamedDirectMemory` maps direct memory without retaining its name;
+`sceKernelSetVirtualRangeName` accepts labels without storing them.
+`sceKernelBatchMap` and `sceKernelBatchMap2` process 32-byte entries in order
+and report the number completed before the first error. BatchMap uses fixed
+addresses; BatchMap2 takes mapping flags from its fourth argument. Fixed
+mapping requires a general image's owned host window.
+Fixed mappings with a null address are rejected. Direct mapping validates
+the entire physical interval without allowing address arithmetic to wrap.
+The new service IDs are appended to preserve existing trampoline tokens.
+
+Argument layouts and reservation alignment checks follow the
+[shadPS4 kernel memory implementation](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/kernel/memory.cpp).
+
+GNM debugger resource registration returns the unsupported status
+`0x8eee00ff`. Garlic flush and the added status queries return zero.
+`sceGnmSetGsRingSizes` validates each size as a 1 MiB multiple from 4 to 8 MiB;
+it does not allocate GPU rings.
 
 `sceKernelClockGettime` and `sceKernelClockGetres` support PS4 REALTIME=0 and
 MONOTONIC=4, using the corresponding host clocks. `sceKernelGettimeofday`

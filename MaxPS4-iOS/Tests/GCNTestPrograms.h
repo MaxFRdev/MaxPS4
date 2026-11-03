@@ -71,7 +71,8 @@ inline void loadQuadPS(Arena& arena) {
 }
 
 // A VS calling a fetch shader (s_swappc/s_setpc), a scalar loop and VOP3.
-constexpr std::uint64_t fetchVS = 0x10800, fetchShader = 0x10a00, vertexTable = 0x10c00;
+// fetchShaderBelow is the same fetch shader at an address under the VS.
+constexpr std::uint64_t fetchVS = 0x10800, fetchShader = 0x10a00, fetchShaderBelow = 0x107c0, vertexTable = 0x10c00;
 inline const float fetchVertices[3][4] = {{1, 2, 0, 1}, {3, 4, 0, 1}, {5, 6, 0, 1}};
 inline void loadFetchVS(Arena& arena) {
     arena.code(fetchVS, {
@@ -85,13 +86,49 @@ inline void loadFetchVS(Arena& arena) {
         0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
         0xf800020f, 0x09090909, // exp param0, v9, v9, v9, v9
         0xbf810000});
-    arena.code(fetchShader, {
-        0xc0840300,             // s_load_dwordx4 s[8:11], s[2:3], 0x0
-        0xbf8c007f,             // s_waitcnt lgkmcnt(0)
-        0xe00c2000, 0x80020400, // buffer_load_format_xyzw v[4:7], v0, s[8:11], 0 idxen
-        0xbf8c1f70,             // s_waitcnt vmcnt(0)
-        0xbe802000});           // s_setpc_b64 s[0:1]
+    for (const auto address : {fetchShader, fetchShaderBelow})
+        arena.code(address, {
+            0xc0840300,             // s_load_dwordx4 s[8:11], s[2:3], 0x0
+            0xbf8c007f,             // s_waitcnt lgkmcnt(0)
+            0xe00c2000, 0x80020400, // buffer_load_format_xyzw v[4:7], v0, s[8:11], 0 idxen
+            0xbf8c1f70,             // s_waitcnt vmcnt(0)
+            0xbe802000});           // s_setpc_b64 s[0:1]
     arena.code(vertexTable, {0x10e00, 16u << 16, 3, 0x77fac}); // V#: stride 16, 3 records, float xyzw
     for (unsigned n = 0; n < 3; ++n) for (unsigned c = 0; c < 4; ++c) arena.put(0x10e00 + 16 * n + 4 * c, bits(fetchVertices[n][c]));
+}
+
+// A compute program, 32 threads per group (thread group id x in s16): thread
+// n of group g reads record 32g + n (float xyzw), halves x and stores the
+// record as 8_8_8_8 UNORM, then as pixel (n, g) of a linear 8x8 image.
+constexpr std::uint64_t computeCS = 0x11000, computeSource = 0x14000, computeBuffer = 0x15000, computeImage = 0x16000;
+inline const std::uint32_t computeSgprs[16] = {
+    0x14000, 16u << 16, 40, 0x77fac,                        // V# source: stride 16, 40 records, float xyzw
+    0x15000, 4u << 16, 100, 0x50fac,                        // V# destination: stride 4, 8_8_8_8 UNORM
+    0x160, 10u << 20, 7 | 7u << 14, 0x90800fac, 7u << 13, 0, 0, 0}; // T#: 8x8, pitch 8, 8_8_8_8 UNORM, linear 2D
+inline void loadComputeCS(Arena& arena) {
+    arena.code(computeCS, {
+        0x8f118510,             // s_lshl_b32 s17, s16, 5
+        0x4a080011,             // v_add_i32 v4, vcc, s17, v0
+        0x7e0c0300,             // v_mov_b32 v6, v0
+        0x7e0e0210,             // v_mov_b32 v7, s16
+        0xe00c2000, 0x80000004, // buffer_load_format_xyzw v[0:3], v4, s[0:3], 0 idxen
+        0xbf8c1f70,             // s_waitcnt vmcnt(0)
+        0x100000f0,             // v_mul_f32 v0, 0.5, v0
+        0xe01c2000, 0x80010004, // buffer_store_format_xyzw v[0:3], v4, s[4:7], 0 idxen
+        0xf0200f00, 0x00020006, // image_store v[0:3], v[6:7], s[8:15] dmask:0xf
+        0xbf810000});           // s_endpgm
+    for (unsigned n = 0; n < 40; ++n)
+        for (unsigned c = 0; c < 4; ++c) arena.put(computeSource + 16 * n + 4 * c, bits(float((n * 7 + c * 3) % 13) / 8.0f - 0.25f));
+}
+// A VS exporting image_get_resinfo of the T# in s[0:7] at mip level v0 (the
+// vertex index) as its position bits: a 1024x512 2D image with 4 levels.
+constexpr std::uint64_t resinfoVS = 0x11e00;
+inline const std::uint32_t resinfoSgprs[8] = {0x20000, 10u << 20, 1023 | (511u << 14), (9u << 28) | (3u << 16) | 0xfac, 1023u << 13, 0, 0, 0};
+inline void loadResinfoVS(Arena& arena) {
+    arena.code(resinfoVS, {
+        0xf0380f00, 0x00000400, // image_get_resinfo v[4:7], v0, s[0:7] dmask:0xf
+        0xbf8c1f70,             // s_waitcnt vmcnt(0)
+        0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
+        0xbf810000});
 }
 } // namespace gcn_test

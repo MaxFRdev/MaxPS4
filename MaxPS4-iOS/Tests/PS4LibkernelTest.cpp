@@ -79,6 +79,16 @@ int main() {
     const auto nested = call(S::open, 0x10000);
     assert(nested == 3 && call(S::read, nested, 0x11000, 4) == 4);
     assert(call(S::close, nested) == 0);
+    // Names in another case reach the same files (the PS4 ignores case);
+    // a link reached that way is still refused.
+    for (const char* folded : {"/app0/SUB/Nested", "/app0/Data.BIN"}) {
+        path(folded);
+        const auto other = call(S::open, 0x10000);
+        assert(other == 3 && call(S::read, other, 0x11000, 4) == 4);
+        assert(memory.read(0x11000, bytes, 4) && std::memcmp(bytes, "Kero", 4) == 0);
+        assert(call(S::close, other) == 0);
+    }
+    path("/app0/LINK"); assert(call(S::open, 0x10000) == kernel_error(loop));
     for (const char* invalid : {"/app0/../data.bin", "/app0//data.bin", "/app0/./data.bin", "relative"}) {
         path(invalid); assert(call(S::open, 0x10000) == kernel_error(inval));
     }
@@ -117,7 +127,20 @@ int main() {
     assert(resolve_libkernel("sceKernelRead", "libkernel", "libkernel", 1) == S::read);
     assert(maxps4_ps4_resolve_libkernel("sceKernelRead", "libkernel", "libkernel", 1) == uint32_t(S::read));
     assert(maxps4_ps4_resolve_libkernel(nullptr, "libkernel", "libkernel", 1) == 0);
-    assert(resolve_libkernel("bY-PO6JhzhQ", "libkernel", "libkernel", 1) == S::unresolved);
+    assert(resolve_libkernel("bY-PO6JhzhQ", "libkernel", "libkernel", 1) == S::close); // POSIX close, errno results.
+    // libSceLibcInternal's internal_* functions are guest routines.
+    {
+        size_t count = 0;
+        const auto* exports = libkernel_exports(count);
+        size_t routines = 0;
+        for (size_t i = 0; i < count; ++i)
+            if (!std::strcmp(exports[i].library, "libSceLibcInternal") && exports[i].code) {
+                assert(exports[i].code_size && exports[i].code_size <= 4096 && exports[i].code[exports[i].code_size - 1] == 0xc3);
+                ++routines;
+            }
+        assert(routines == 21);
+        assert(resolve_libkernel("Q3VBxCXhUHs", "libSceLibcInternal", "libSceLibcInternal", 1) != S::unresolved);
+    }
     assert(resolve_libkernel("QOQtbeDqsT4", "libSceAudioOut", "libSceAudioOut", 1) == S::audio_output);
     assert(resolve_libkernel("ekNvsT22rsY", "libSceAudioOut", "libSceAudioOut", 1) == S::audio_open);
     assert(resolve_libkernel("JfEPXVxhFqA", "libSceAudioOut", "libSceAudioOut", 1) == S::audio_init);
@@ -126,6 +149,27 @@ int main() {
     assert(resolve_libkernel("sceKernelOpen", "libkernel", "libkernel", 2) == S::unresolved);
     assert(resolve_libkernel("1G3lF1Gg1k8#A#B", "libkernel", "libkernel", 1) == S::unresolved);
     assert(call(S::unresolved) == kernel_error(nosys));
+    // POSIX semaphores over kernel ones; a UUID; IPv4 text and back.
+    assert(call(S::sem_init, 0x11100, 0, 1) == 0);
+    assert(call(S::sem_wait, 0x11100) == 0 && call(S::sem_post, 0x11100) == 0 && call(S::sem_wait, 0x11100) == 0);
+    assert(call(S::sem_init, 0x11108, 1, 0) == kernel_error(notsup));
+    assert(call(S::sem_destroy, 0x11100) == 0 && call(S::sem_post, 0x11100) == kernel_error(srch));
+    assert(call(S::uuid_create, 0x11200) == 0);
+    {
+        uint8_t uuid[16];
+        assert(memory.read(0x11200, uuid, sizeof(uuid)) && (uuid[6] >> 4) == 4 && (uuid[8] >> 6) == 2);
+    }
+    path("192.168.0.42");
+    assert(call(S::net_pton, 2, 0x10000, 0x11300) == 1);
+    assert(kernel.invoke(S::net_ntop, {2, 0x11300, 0x11400, 16}) == 0x11400);
+    {
+        char text[13];
+        assert(memory.read(0x11400, text, sizeof(text)) && std::strcmp(text, "192.168.0.42") == 0);
+    }
+    assert(kernel.invoke(S::net_ntop, {2, 0x11300, 0x11400, 12}) == 0);
+    path("1.2.3.256");
+    assert(call(S::net_pton, 2, 0x10000, 0x11300) == 0 && call(S::net_pton, 28, 0x10000, 0x11300) == 0);
+    assert(resolve_libkernel("Q4qBuN-c0ZM", "libSceNet", "libSceNet", 1) == S::net_unavailable);
     kernel.reset();
     assert(call(S::close, 3) == kernel_error(badf));
     for (const char* name : {"data.bin", "link", "escape", "fifo"})

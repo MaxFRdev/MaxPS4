@@ -121,6 +121,20 @@ public:
             jobs_.push_back(std::move(job)); ++next_; return 0;
         } catch(const std::bad_alloc&) { return error(0x1001); }
     }
+    // A compute ring span (sceGnmDingDong): its label and memory writes
+    // happen, its dispatches are not run yet, and nothing in it can fail the
+    // graphics queue. The interrupts it raises, or -1.
+    int64_t compute(uint64_t address, uint64_t bytes) {
+        if (!address || (address&3) || !bytes || (bytes&3) || bytes/4>word_limit) return -1;
+        try {
+            std::vector<uint8_t> wire(size_t(bytes),0);
+            if (!memory_.read(address,wire.data(),wire.size())) return -1;
+            std::vector<uint32_t> words(wire.size()/4);
+            for(size_t n=0;n<words.size();++n) words[n]=uint32_t(ps4::get_le(wire.data()+4*n,4));
+            std::lock_guard<std::mutex> lock(lock_);
+            return retire(words);
+        } catch(const std::bad_alloc&) { return -1; }
+    }
     int64_t done() {
         std::lock_guard<std::mutex> lock(lock_);
         if (!kind_ || failed_) return error(0x10ff);

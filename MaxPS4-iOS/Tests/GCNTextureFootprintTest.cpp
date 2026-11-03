@@ -7,10 +7,11 @@ int main() {
     unsigned cases = 0;
     constexpr rt::ulong base = 0x100000;
     const float coordinates[] = {-1.25f, -0.01f, 0.0f, 0.37f, 0.5f, 0.75f, 0.99f, 1.25f};
-    for (const unsigned format : {1u,2u,3u,4u,10u,14u,16u,17u,18u,19u}) {
-        const unsigned bytes = format == 1 ? 1 : (format == 2 || format == 3 || format >= 16) ? 2 : format == 14 ? 16 : 4;
+    for (const unsigned format : {1u,2u,3u,4u,10u,14u,16u,17u,18u,19u,35u,36u,37u,38u,39u}) {
+        const unsigned bytes = (format == 35 || format == 38) ? 8 : format >= 36 ? 16 : format == 1 ? 1 : (format == 2 || format == 3 || format >= 16) ? 2 : format == 14 ? 16 : 4;
         constexpr unsigned width = 3, height = 2, pitch = 5;
-        const unsigned span = ((height - 1) * pitch + width) * bytes;
+        const unsigned span = format >= 35 ? (((height+3)/4-1)*((pitch+3)/4)+(width+3)/4)*bytes :
+                                             ((height - 1) * pitch + width) * bytes;
         for (unsigned layout = 0; layout < 5; ++layout) {
             // The last layout omits the last byte physically as well as logically,
             // so ASan catches an unchecked access on the fallback path.
@@ -26,7 +27,7 @@ int main() {
             }
             if (layout == 3) { ranges[4] = span - 1; memory = {data.data(), 0, 0, ranges, 2}; }
             if (layout == 4) memory = {data.data(), base + span, 0};
-            for (unsigned number : {0u, 7u}) for (unsigned swizzle : {0xfacu, 0x977u, 0x249u, 0x688u}) {
+            for (unsigned number : {0u, 1u, 7u}) for (unsigned swizzle : {0xfacu, 0x977u, 0x249u, 0x688u}) {
                 rt::GCNRes8 texture{{unsigned(base >> 8), (format << 20) | (number << 26),
                     (width - 1) | ((height - 1) << 14), (8u << 20) | swizzle, (pitch - 1) << 13, 0, 0, 0}};
                 for (unsigned mode = 0; mode < 8; ++mode) for (unsigned linear : {0u, 1u}) for (bool unorm : {false, true}) {

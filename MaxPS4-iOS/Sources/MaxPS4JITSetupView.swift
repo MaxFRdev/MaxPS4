@@ -46,6 +46,17 @@ struct MaxPS4JITSetupView: View {
                         Text(ready ? "JIT prêt" : "Préparer le JIT")
                             .font(.system(size: 32, weight: .black, design: .rounded))
                         Text(message).foregroundStyle(.white.opacity(0.70))
+                        DisclosureGroup("Configurer le PairingFile") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Dans StikDebug, importe le même fichier d’appairage que pour SideStore. Active aussi le VPN si StikDebug le demande.")
+                                Text("Reviens ici, touche « Activer avec StikDebug », puis attends la fin de son script avant de vérifier le JIT.")
+                                Text("Le PairingFile est propre à ton iPhone : garde-le privé et ne le joins pas aux rapports MaxPS4.")
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(.white.opacity(0.70))
+                            .padding(.top, 8)
+                        }
+                        .tint(.cyan)
                         if checking { ProgressView("Vérification de l’activation…").tint(.cyan) }
                         Button {
                             requested = true

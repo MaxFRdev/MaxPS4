@@ -63,10 +63,10 @@ class GameDirectoryPreflight {
             st.st_ino != expected.st_ino || st.st_size != expected.st_size) {
             module.metadata.error = "Fichier inaccessible ou modifié pendant l'analyse";
         } else if (st.st_size < 64 || uint64_t(st.st_size) > OrbisMetadata::fileLimit) {
-            module.metadata.error = "Taille ELF invalide (64 octets à 64 Mio)";
+            module.metadata.error = "Taille ELF invalide (64 octets à 512 Mio)";
         } else {
             if (uint64_t(st.st_size) > OrbisMetadata::fileLimit - bytesRead)
-                throw Failure(-E2BIG,"Budget cumulé de lecture ELF/PRX supérieur à 64 Mio ; inventaire incomplet");
+                throw Failure(-E2BIG,"Budget cumulé de lecture ELF/PRX supérieur à 512 Mio ; inventaire incomplet");
             std::vector<uint8_t> bytes(size_t(st.st_size));
             bytesRead += bytes.size();
             size_t done = 0;
@@ -131,7 +131,7 @@ class GameDirectoryPreflight {
         std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){ return a.path < b.path; });
         std::sort(modules.begin(),modules.end(),[](const auto& a,const auto& b){ return a.path < b.path; });
         append("MaxPS4 pré-démarrage dossier v1\nLecture seule ; aucun fichier copié ou modifié ; aucune exécution\n"
-               "Limites : 4096 entrées, profondeur 16, 128 ELF/PRX, 65536 symboles/relocations, lecture cumulée 64 Mio, rapport 2 Mio\n");
+               "Limites : 4096 entrées, profondeur 16, 128 ELF/PRX, 65536 symboles/relocations, lecture cumulée 512 Mio, rapport 2 Mio\n");
         bool eboot = false, sfo = false, manifest = false;
         for (const auto& file : files) {
             append("Fichier "+display(file.path)+" ; octets="+std::to_string(file.size)+(file.regular ? "\n" : " ; REFUSÉ\n"));

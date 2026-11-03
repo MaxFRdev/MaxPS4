@@ -42,6 +42,12 @@ jobs:
           /tmp/gcn-interpreter-test
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/PM4SoftwareRendererTest.cpp -o /tmp/pm4-software-test
           /tmp/pm4-software-test
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/PM4DrawCollectorTest.cpp -o /tmp/pm4-collector-test
+          /tmp/pm4-collector-test
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/PM4BlendTest.cpp -o /tmp/pm4-blend-test
+          /tmp/pm4-blend-test
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/PM4PrimitiveTest.cpp -o /tmp/pm4-primitive-test
+          /tmp/pm4-primitive-test
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/PM4ResourceScanTest.cpp -o /tmp/pm4-resource-scan-test
           /tmp/pm4-resource-scan-test
           c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic MaxPS4-iOS/Tests/PM4ResourceScanTest.cpp -o /tmp/pm4-resource-scan-benchmark
@@ -53,6 +59,12 @@ jobs:
           /tmp/gcn-translator-harness
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic -pthread -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/GCNTextureFootprintTest.cpp -o /tmp/gcn-texture-footprint-test
           /tmp/gcn-texture-footprint-test
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/GCNBC1Test.cpp -o /tmp/gcn-bc1-test
+          /tmp/gcn-bc1-test
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/GCNBC23Test.cpp -o /tmp/gcn-bc23-test
+          /tmp/gcn-bc23-test
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/GCNBC45Test.cpp -o /tmp/gcn-bc45-test
+          /tmp/gcn-bc45-test
   metal-bridge:
     runs-on: macos-latest
     steps:
@@ -78,6 +90,9 @@ jobs:
           xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNMetalTest.mm \
             -framework Foundation -framework Metal -o build/pm4/gcn-metal-test
           build/pm4/gcn-metal-test
+          xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNComputeMetalTest.mm \
+            -framework Foundation -framework Metal -o build/pm4/gcn-compute-metal-test
+          build/pm4/gcn-compute-metal-test
           xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNTextureFootprintMetalTest.mm \
             -framework Foundation -framework Metal -o build/pm4/gcn-texture-footprint-metal-test
           build/pm4/gcn-texture-footprint-metal-test
@@ -91,6 +106,13 @@ jobs:
           xcrun clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Native/PM4MetalRenderer.mm \
             MaxPS4-iOS/Tests/PM4NativeTextureMetalTest.mm -framework Foundation -framework Metal -o build/pm4/pm4-native-texture-test
           build/pm4/pm4-native-texture-test
+          xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Native/PM4MetalRenderer.mm             MaxPS4-iOS/Tests/PM4ScreenQuadMetalTest.mm -framework Foundation -framework Metal -o build/pm4/pm4-screen-quad-test
+          build/pm4/pm4-screen-quad-test
+          xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Native/PM4MetalRenderer.mm \
+            MaxPS4-iOS/Tests/PM4MatrixQuadMetalTest.mm -framework Foundation -framework Metal -o build/pm4/pm4-matrix-quad-test
+          xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNVertexStageMetalTest.mm -framework Foundation -framework Metal -o build/pm4/gcn-vertex-stage-test
+          build/pm4/gcn-vertex-stage-test
+          build/pm4/pm4-matrix-quad-test
           xcrun clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNShaderCostMetalTest.mm \
             -framework Foundation -framework Metal -o build/pm4/gcn-shader-cost-test
           build/pm4/gcn-shader-cost-test

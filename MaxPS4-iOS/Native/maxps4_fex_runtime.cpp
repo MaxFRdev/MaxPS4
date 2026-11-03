@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <sys/mman.h>
+#include <limits>
 #include <unistd.h>
 #include <cerrno>
 #include <mutex>
@@ -115,6 +116,42 @@ public:
         std::atomic<bool> inside {false};
     };
     std::array<Activity, 32> activity;
+    // The last HLE calls, for the stop report (why a game quit): locks, time
+    // and thread-specific data are left out, as they would push out the rest.
+    struct RecentCall {
+        uint32_t service = 0; uint64_t thread = 0, a0 = 0, a1 = 0, a2 = 0, a3 = 0; int64_t result = 0;
+        char path[64] = {};
+    };
+    std::mutex recent_lock;
+    std::array<RecentCall, 128> recent {};
+    uint64_t recent_next = 0;
+    // The last calls that returned a PS4 error, kept apart (same lock): the
+    // recent calls are often all audio output by the time a game stops.
+    std::array<RecentCall, 64> failed {};
+    uint64_t failed_next = 0;
+    // The last files the game did open (same lock): where its data really is.
+    std::array<RecentCall, 32> opened {};
+    uint64_t opened_next = 0;
+    static bool error_result(int64_t result) {
+        const uint64_t bits = uint64_t(result);
+        return (result < 0 && result >= std::numeric_limits<int32_t>::min()) || (bits >> 32 == 0 && (bits & 0xff000000u) == 0x80000000u);
+    }
+    static bool frequent(maxps4::PS4KernelService s) {
+        using S = maxps4::PS4KernelService;
+        switch (s) {
+        case S::mutex_lock: case S::mutex_unlock: case S::mutex_trylock: case S::cond_wait: case S::cond_timedwait:
+        case S::cond_signal: case S::cond_broadcast: case S::rwlock_rdlock: case S::rwlock_wrlock: case S::rwlock_unlock:
+        case S::rwlock_tryrdlock: case S::rwlock_trywrlock: case S::clock_gettime: case S::gettimeofday:
+        case S::process_counter: case S::process_time: case S::get_specific: case S::set_specific: case S::thread_self:
+        case S::yield: case S::errno_location: case S::tls_get_addr:
+        // Lock set-up: games create hundreds of locks at start-up.
+        case S::mutex_init: case S::mutex_destroy: case S::cond_init: case S::cond_destroy:
+        case S::mutexattr_init: case S::mutexattr_destroy: case S::mutexattr_settype: case S::mutexattr_gettype:
+        case S::mutexattr_accept: case S::rwlock_init: case S::rwlock_destroy:
+            return true;
+        default: return false;
+        }
+    }
     static uint64_t now_ns() {
         return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -146,7 +183,9 @@ public:
             // seventh (stack) argument is readable for general images only.
             // The posix_token bit selects the POSIX convention (errno, -1).
             const bool posix = (r[x86::REG_RAX] & maxps4::posix_token) != 0;
-            const auto orbis = static_cast<maxps4::PS4KernelService>(r[x86::REG_RAX] & ~uint64_t{maxps4::posix_token});
+            const bool pthread = (r[x86::REG_RAX] & maxps4::pthread_token) != 0;
+            const auto orbis = static_cast<maxps4::PS4KernelService>(
+                r[x86::REG_RAX] & ~uint64_t{maxps4::posix_token | maxps4::pthread_token});
             // Admitted code builds pointers with RIP-relative LEA, i.e. rebased host
             // addresses. libkernel works on logical PS4 addresses and re-checks
             // permissions, so translate any argument that lies in the image arena.
@@ -154,13 +193,32 @@ public:
                 uint64_t guest = 0;
                 return image->guest_address(value, guest) ? guest : value;
             };
-            const maxps4::PS4KernelCall call{logical(r[x86::REG_RDI]),logical(r[x86::REG_RSI]),
+            maxps4::PS4KernelCall call{logical(r[x86::REG_RDI]),logical(r[x86::REG_RSI]),
                 logical(r[x86::REG_RDX]),logical(r[x86::REG_R10]),logical(r[x86::REG_R8]),
                 logical(r[x86::REG_R9]),
                 // A general image's stack is guest memory: stack arguments (the
                 // seventh, at RSP+8 past the trampoline's return address) are
                 // readable. Bounded images keep 0, which makes them fault.
                 image->general() ? r[x86::REG_RSP] : 0};
+            // POSIX pthread_* (see pthread_token): no name arguments, and an
+            // absolute CLOCK_REALTIME deadline turned into the microseconds left.
+            if (pthread) {
+                using S = maxps4::PS4KernelService;
+                if (orbis == S::mutex_init || orbis == S::cond_init || orbis == S::rwlock_init) call.rdx = 0;
+                if (orbis == S::thread_create) call.r8 = 0;
+                if (orbis == S::cond_timedwait) {
+                    uint8_t wire[16] {};
+                    timespec now {};
+                    ::clock_gettime(CLOCK_REALTIME, &now);
+                    if (!call.rdx || !memory->read(call.rdx, wire, sizeof(wire))) call.rdx = 0;
+                    else {
+                        int64_t seconds = 0, nanoseconds = 0;
+                        std::memcpy(&seconds, wire, 8); std::memcpy(&nanoseconds, wire + 8, 8);
+                        const int64_t left = (seconds - int64_t(now.tv_sec)) * 1000000 + (nanoseconds - int64_t(now.tv_nsec)) / 1000;
+                        call.rdx = uint64_t(std::max<int64_t>(left, 0));
+                    }
+                }
+            }
             Activity* slot = activity_slot();
             if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns(); slot->inside = true; }
             const uint32_t stub = static_cast<uint32_t>(orbis) - maxps4::missing_import_token;
@@ -208,7 +266,17 @@ public:
             } else {
                 result = kernel->invoke(orbis,call,guest_thread,posix);
             }
+            if (pthread) result = maxps4::pthread_result(result);
             if (slot) { slot->since = now_ns(); slot->inside = false; ++slot->returned; }
+            if (!frequent(orbis)) {
+                RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}};
+                if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)
+                    (void)memory->read_cstring(call.rdi, entry.path, sizeof(entry.path));
+                std::lock_guard<std::mutex> guard(recent_lock);
+                recent[recent_next++ % recent.size()] = entry;
+                if (error_result(result)) failed[failed_next++ % failed.size()] = entry;
+                else if (orbis == maxps4::PS4KernelService::open) opened[opened_next++ % opened.size()] = entry;
+            }
             ++calls;
             char path[256] = {};
             if (trace && (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat) &&
@@ -382,8 +450,9 @@ public:
     std::atomic<uint32_t> sample_sequence {0};
     Sample sample {};
     const pthread_t host = ::pthread_self();
-    // For a sample taken from outside the thread. The signal handler uses the
-    // same FEX lookups, so they take no lock the sampled thread could hold.
+    // For a sample taken from outside the thread. in_jit and guest_rip take
+    // the JIT pool lock: never call them while the thread is suspended, and in
+    // its signal handler only when it is not inside that lock (maxps4_jit_held).
     uint64_t stored_rip() const { return thread->CurrentFrame->State.rip; }
     bool in_dispatcher(uint64_t pc) const { return pc >= config.DispatcherBegin && pc < config.DispatcherEnd; }
     bool in_jit(uint64_t pc) const { return context->IsAddressInCodeBuffer(thread, pc); }
@@ -425,7 +494,9 @@ private:
 #endif
         auto* guard = active;
         if (number == SIGURG && guard && guard->sample_request.exchange(false)) {
-            const bool jit = guard->context->IsAddressInCodeBuffer(guard->thread, pc);
+            // Inside the JIT pool lock the thread runs host code; asking FEX
+            // would wait for that lock on this very thread.
+            const bool jit = !maxps4_jit_held() && guard->context->IsAddressInCodeBuffer(guard->thread, pc);
             const bool dispatcher = pc >= guard->config.DispatcherBegin && pc < guard->config.DispatcherEnd;
 #if defined(__APPLE__)
             guard->sample.lr = machine->uc_mcontext->__ss.__lr;
@@ -441,7 +512,7 @@ private:
             return;
         }
         if (guard && !guard->signal.load()) {
-            const bool in_jit = guard->context->IsAddressInCodeBuffer(guard->thread, pc);
+            const bool in_jit = !maxps4_jit_held() && guard->context->IsAddressInCodeBuffer(guard->thread, pc);
             // x86 permits unaligned accesses. ARM64 TSO loads/stores and locked
             // operations can raise BUS_ADRALN for otherwise valid guest memory.
             // This frontend must route those faults to FEX before containing
@@ -604,13 +675,22 @@ public:
         bool detached = false;
         uint64_t stack = 0;
         if (const auto error = identities.thread_attributes(call.rsi, detached, stack)) return kernel_error(error);
-        if (stack > maxps4::GuestELF::generalStack) return kernel_error(again);
+        // Every slot has a generalStack stack: a larger request gets it rather
+        // than failing (refusing a thread usually ends the game).
+        (void)stack;
         std::unique_lock guard(lock);
         if (stopping) return kernel_error(again);
         reap(guard);
         if (stopping) return kernel_error(again);
         const auto slot = std::find_if(threads.begin(), threads.end(), [](const Thread& t) { return !t.used; });
         if (slot == threads.end()) return kernel_error(again);
+        // FEX does not check the reservation of the new thread's lookup cache
+        // and crashes on it: refuse the thread while that space is missing.
+        if (void* spare = ::mmap(nullptr, size_t(maxps4::GuestELF::fexLookupCacheBytes), PROT_NONE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); spare != MAP_FAILED)
+            ::munmap(spare, size_t(maxps4::GuestELF::fexLookupCacheBytes));
+        else
+            return kernel_error(again);
         uint64_t top = 0, tp = 0;
         if (!image.prepare_thread(static_cast<size_t>(slot - threads.begin()), top, tp)) return kernel_error(nomem);
         const uint64_t id = identities.attach();
@@ -834,8 +914,9 @@ int64_t guest_thread_service(GuestThreads& threads, maxps4::PS4KernelService ser
 // CPU profile of the main guest thread (maxps4_fex_engine_set_profiling):
 // a host thread suspends it through Mach every 5 ms and records where it
 // is: a guest RIP (JIT code, 64-byte buckets), the FEX dispatcher, or a host
-// function (HLE services, FEX helpers). The FEX lookups run while the thread
-// is suspended, as in the signal handler; nothing allocates until it resumes.
+// function (HLE services, FEX helpers). Only the registers are read while it
+// is suspended: it may hold the JIT pool lock the FEX lookups take (it did,
+// compiling Mortal Kombat: Legacy Kollection, and the game and app froze).
 struct CPUProfile {
     std::mutex lock;
     uint64_t jit = 0, dispatcher = 0, host = 0;
@@ -853,17 +934,15 @@ struct CPUProfile {
             if (::thread_suspend(port) != KERN_SUCCESS) break;
             const bool read = ::thread_get_state(port, ARM_THREAD_STATE64,
                 reinterpret_cast<thread_state_t>(&state), &count) == KERN_SUCCESS;
-            uint64_t pc = 0, rip = 0; uint32_t where = 0;
-            if (read) {
-                pc = arm_thread_state64_get_pc(state);
-#if __has_feature(ptrauth_calls)
-                pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
-#endif
-                if (guard.in_jit(pc)) { where = 1; rip = guard.guest_rip(pc); }
-                else where = guard.in_dispatcher(pc) ? 2 : 3;
-            }
             ::thread_resume(port);
             if (!read) continue;
+            uint64_t pc = arm_thread_state64_get_pc(state), rip = 0;
+#if __has_feature(ptrauth_calls)
+            pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
+#endif
+            uint32_t where = 0;
+            if (guard.in_jit(pc)) { where = 1; rip = guard.guest_rip(pc); }
+            else where = guard.in_dispatcher(pc) ? 2 : 3;
             uint64_t symbol = 0;
             if (where == 3) {
                 Dl_info info {};
@@ -1139,6 +1218,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     engine->probe.calls = 0;
     engine->probe.callback_error = 0;
     for (auto& a : engine->probe.activity) { a.thread = 0; a.inside = false; a.returned = 0; }
+    { std::lock_guard<std::mutex> guard(engine->probe.recent_lock); engine->probe.recent_next = 0; }
     struct ClearRange {
         ProbeAddressSpace& space;
         ~ClearRange() {
@@ -1381,7 +1461,7 @@ int orbisInputs(const maxps4_orbis_module* modules, size_t count, bool general,
         const auto& m = modules[i];
         if (!m.path || !m.bytes || m.dependency_count > 128 ||
             (m.dependency_count && !m.dependencies)) return -EINVAL;
-        if (::strnlen(m.path,256)>255 || m.size>32*1024*1024) return -E2BIG;
+        if (::strnlen(m.path,256)>255 || m.size>maxps4::OrbisMetadata::fileLimit) return -E2BIG;
         const uint8_t* bytes = m.bytes;
         size_t size = m.size;
         std::vector<uint8_t> elf;
@@ -1407,9 +1487,23 @@ int orbisInputs(const maxps4_orbis_module* modules, size_t count, bool general,
         if (!general && (maxps4::general_only(e.service) || e.data || e.code)) continue;
         maxps4::OrbisLinker::Identity id{e.nid,e.library,e.module ? e.module : e.library,1,1,uint8_t(e.data ? 1 : 2)};
         if (e.data) { hle.push_back({id,0,e.data}); continue; }
-        if (e.code) { hle.push_back({id,0,0,false,std::vector<uint8_t>(e.code,e.code+e.code_size)}); continue; }
-        const uint32_t token = static_cast<uint32_t>(e.service) | (e.posix ? maxps4::posix_token : 0);
+        // libScePosix, a library of the libkernel module, exports libkernel's
+        // functions under the same NIDs (Unreal Engine games import
+        // pthread_mutex_init and others there).
+        auto posix_alias = [&](maxps4::OrbisLinker::HLE h) {
+            if (std::strcmp(e.library, "libkernel")) return;
+            h.identity.library = "libScePosix";
+            hle.push_back(std::move(h));
+        };
+        if (e.code) {
+            hle.push_back({id,0,0,false,std::vector<uint8_t>(e.code,e.code+e.code_size)});
+            posix_alias(hle.back());
+            continue;
+        }
+        const uint32_t token = static_cast<uint32_t>(e.service) | (e.posix ? maxps4::posix_token : 0) |
+            (!e.posix && !std::strncmp(e.name, "pthread_", 8) ? maxps4::pthread_token : 0);
         hle.push_back({id,0,token,e.noreturn || e.service == maxps4::PS4KernelService::thread_exit});
+        posix_alias(hle.back());
     }
     if (!missing) return 0;
     // Boot probe: stub what neither the given modules' libraries nor the HLE
@@ -1423,13 +1517,20 @@ int orbisInputs(const maxps4_orbis_module* modules, size_t count, bool general,
         }
         for (const auto& l : metadata[i].libraries) if (l.exported) exported_libraries.insert(l.name);
     }
-    std::set<std::pair<std::string,std::string>> provided;
-    for (const auto& h : hle) provided.insert({h.identity.nid,h.identity.library});
+    // libSceLibcInternal imports that libc.prx exports are linked to it (OrbisLinker).
+    std::set<std::string> libc_nids;
+    for (const auto& m : metadata)
+        for (const auto& s : m.symbols) if (s.defined && s.library == "libc") libc_nids.insert(s.nid);
+    // The linker matches library and module: an import the HLE lists under
+    // another module still needs its stub.
+    std::set<std::tuple<std::string,std::string,std::string>> provided;
+    for (const auto& h : hle) provided.insert({h.identity.nid,h.identity.library,h.identity.module});
     std::set<maxps4::OrbisLinker::Identity> stubs;
     for (const auto& m : metadata)
         for (const auto& s : m.symbols)
             if (!s.defined && !s.nid.empty() && (s.kind == 1 || s.kind == 2) &&
-                !exported_libraries.count(s.library) && !provided.count({s.nid,s.library}))
+                !exported_libraries.count(s.library) && !provided.count({s.nid,s.library,s.module}) &&
+                !(s.library == "libSceLibcInternal" && libc_nids.count(s.nid)))
                 stubs.insert({s.nid,s.library,s.module,s.libraryVersion,s.moduleVersion,s.kind});
     for (const auto& id : stubs) {
         if (id.type == 1) { hle.push_back({id,0,64}); continue; }
@@ -1481,6 +1582,15 @@ extern "C" int32_t maxps4_fex_engine_prepare_orbis_general(maxps4_fex_engine* en
                         status = -EFAULT;
                     }
             engine->libkernel.set_process_param(engine->staged_ps4.process_param());
+            std::vector<maxps4::PS4Libkernel::LoadedModule> loaded;
+            for (const auto& record : engine->staged_ps4.module_records()) {
+                maxps4::PS4Libkernel::LoadedModule module{record.name, record.base, record.end,
+                    record.eh_frame_hdr, record.eh_frame_hdr_size, {}, {}};
+                for (const auto& [nid, address] : record.exports) module.exports.emplace(nid, address);
+                for (const auto& s : record.segments) module.segments.push_back({s.address, s.size, s.protection});
+                loaded.push_back(std::move(module));
+            }
+            engine->libkernel.set_modules(std::move(loaded));
             // A game's libc writes into the objects behind its mutexes and
             // conditions (PS4Threads::set_object_arena): give them memory.
             constexpr uint64_t arena = 4 * 1024 * 1024;
@@ -1749,6 +1859,28 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
             for (const auto& needed : m.metadata.needed)
                 for (const auto& other : modules)
                     if (&other != &m && other.name == needed) m.dependencies.push_back(needed);
+            // libSceLibcInternal imports link to libc.prx (OrbisLinker), which
+            // must be loaded and initialized first, as the system module is.
+            const bool internal = std::any_of(m.metadata.libraries.begin(), m.metadata.libraries.end(),
+                [](const auto& l) { return !l.exported && l.name == "libSceLibcInternal"; });
+            if (internal && m.name != "libc.prx" &&
+                std::find(m.dependencies.begin(), m.dependencies.end(), "libc.prx") == m.dependencies.end())
+                for (const auto& other : modules)
+                    if (other.name == "libc.prx") {
+                        // Unless libc.prx needs this module, directly or not (Fios2).
+                        std::set<std::string> seen;
+                        std::vector<std::string> pending(other.metadata.needed.begin(), other.metadata.needed.end());
+                        bool cycle = false;
+                        while (!pending.empty() && !cycle) {
+                            const std::string name = pending.back(); pending.pop_back();
+                            if (!seen.insert(name).second) continue;
+                            cycle = name == m.name;
+                            for (const auto& next : modules)
+                                if (next.name == name) pending.insert(pending.end(), next.metadata.needed.begin(), next.metadata.needed.end());
+                        }
+                        if (!cycle) m.dependencies.push_back(other.name);
+                        break;
+                    }
             for (const auto& d : m.dependencies) m.pointers.push_back(d.c_str());
             table.push_back({m.name.c_str(), m.bytes.data(), m.bytes.size(), bias, m.pointers.data(), m.pointers.size()});
             uint64_t end = 0;
@@ -1774,6 +1906,85 @@ extern "C" int64_t maxps4_fex_engine_mount(maxps4_fex_engine* engine, const char
     std::lock_guard lock(runtime_lock);
     if (engine->staged_ps4.segments().empty()) return maxps4::ps4::kernel_error(maxps4::ps4::inval);
     return engine->libkernel.mount(guest, directory);
+}
+extern "C" int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine* engine, uint64_t* app_area,
+    uint64_t* app_area_size, uint64_t* window, uint64_t* window_size, int32_t* app_area_status) {
+    if (!engine || !app_area || !app_area_size || !window || !window_size || !app_area_status) return -EINVAL;
+    int status = 0;
+    maxps4::PS4VirtualMemory::app_area(*app_area, *app_area_size, status);
+    *app_area_status = status;
+    if (!engine->staged_ps4.heap(*window, *window_size)) *window = *window_size = 0;
+    return 0;
+}
+extern "C" uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine* engine) {
+    return engine ? engine->staged_ps4.spare_address_space() : 0;
+}
+extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::string out = engine->libkernel.console();
+    if (out.size() >= capacity) out.erase(0, out.size() - (capacity - 1));
+    std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
+    return int32_t(out.size());
+}
+extern "C" int32_t maxps4_fex_engine_moved_mappings(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::array<maxps4::PS4VirtualMemory::Moved, maxps4::PS4VirtualMemory::moved_limit> moved {};
+    size_t count = 0;
+    const size_t total = engine->dynamic_ps4.moved(moved, count);
+    std::string out;
+    char line[128];
+    for (size_t i = 0; i < count; ++i) {
+        std::snprintf(line, sizeof(line), "0x%llx + 0x%llx -> 0x%llx (code %d)\n",
+            (unsigned long long)moved[i].hint, (unsigned long long)moved[i].size,
+            (unsigned long long)moved[i].result, moved[i].status);
+        if (out.size() + std::strlen(line) >= capacity) break;
+        out += line;
+    }
+    std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
+    return int32_t(std::min<size_t>(total, INT32_MAX));
+}
+// One call per line, oldest first, from a ring of RecentCall (under recent_lock).
+template <size_t N>
+static int32_t format_calls(maxps4_fex_engine* engine, const std::array<ProbeAddressSpace::RecentCall, N>& ring,
+                            uint64_t next, char* text, size_t capacity) {
+    const uint64_t count = std::min<uint64_t>(next, N);
+    std::string out;
+    char line[256];
+    for (uint64_t i = next - count; i < next; ++i) {
+        const auto& c = ring[i % N];
+        const auto service = static_cast<maxps4::PS4KernelService>(c.service);
+        std::string name;
+        if (c.service >= maxps4::missing_import_token) {
+            const uint32_t stub = c.service - maxps4::missing_import_token;
+            name = stub < engine->missing_imports.size() ? "(absente) " + engine->missing_imports[stub] : "(absente)";
+        } else {
+            const char* known = service_name(service);
+            name = known ? known : "service " + std::to_string(c.service);
+        }
+        std::snprintf(line, sizeof(line), "t%llu %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx%s%s%s\n",
+            (unsigned long long)c.thread, name.c_str(), (unsigned long long)c.a0, (unsigned long long)c.a1,
+            (unsigned long long)c.a2, (unsigned long long)c.a3, (unsigned long long)c.result,
+            c.path[0] ? " \"" : "", c.path, c.path[0] ? "\"" : "");
+        if (out.size() + std::strlen(line) >= capacity) break;
+        out += line;
+    }
+    std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
+    return int32_t(count);
+}
+extern "C" int32_t maxps4_fex_engine_recent_calls(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
+    return format_calls(engine, engine->probe.recent, engine->probe.recent_next, text, capacity);
+}
+extern "C" int32_t maxps4_fex_engine_failed_calls(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
+    return format_calls(engine, engine->probe.failed, engine->probe.failed_next, text, capacity);
+}
+extern "C" int32_t maxps4_fex_engine_opened_files(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
+    return format_calls(engine, engine->probe.opened, engine->probe.opened_next, text, capacity);
 }
 extern "C" int32_t maxps4_fex_engine_missing_imports(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || (!text && capacity)) return -EINVAL;
@@ -1850,6 +2061,18 @@ extern "C" int32_t maxps4_fex_engine_read_memory(maxps4_fex_engine* engine,
     uint64_t address, void* destination, size_t bytes) {
     if (!engine || !destination || !bytes || bytes > (256ull << 20)) return -EINVAL;
     return engine->system_memory.read(address,destination,bytes) ? 0 : -EFAULT;
+}
+extern "C" int32_t maxps4_fex_engine_write_memory(maxps4_fex_engine* engine,
+    uint64_t address, const void* source, size_t bytes) {
+    if (!engine || !source || !bytes || bytes > (256ull << 20)) return -EINVAL;
+    return engine->system_memory.write_host_result(address,source,bytes) ? 0 : -EFAULT;
+}
+extern "C" int32_t maxps4_fex_engine_gpu_view(maxps4_fex_engine* engine,
+    uint64_t address, size_t bytes, const void** pointer) {
+    if (pointer) *pointer=nullptr;
+    if (!engine || !pointer || !bytes) return -EINVAL;
+    *pointer=engine->system_memory.gpu_view(address,bytes);
+    return *pointer ? 0 : -EFAULT;
 }
 extern "C" int32_t maxps4_fex_engine_videoout_target(maxps4_fex_engine* engine,
     maxps4_videoout_frame* frame, uint64_t* address) {

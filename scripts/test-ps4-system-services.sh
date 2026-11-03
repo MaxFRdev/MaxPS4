@@ -5,7 +5,7 @@ build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
 for test in PS4LibkernelTest PS4WritableFilesTest PS4SystemMemoryTimeTest PS4ThreadsTest PS4SyncTest PS4EventQueueTest PS4GraphicsEventTest PS4VideoOutTest PS4UserServiceTest PS4PadTest PS4AudioOutTest PS4GnmTest PS4GnmQueueTest PS4DynamicLinkerTest \
   PS4GuestFrameTest PS4OrbisCPUPreparationTest GuestMemoryRangeTest GuestELFInterpreterTest GuestELFMemoryTest PS4GuestMemoryTest \
-  PS4GuestStagingTest PS4StagedCPUAdmissionTest PS4ExecutableImageTest GuestRIPStoreAdmissionTest; do
+  PS4GuestStagingTest PS4StagedCPUAdmissionTest PS4ExecutableImageTest GuestRIPStoreAdmissionTest PS4VirtualMemoryRandomTest; do
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -pedantic -pthread \
   -I MaxPS4-iOS/Native \
   -fsanitize=address,undefined -fno-omit-frame-pointer \

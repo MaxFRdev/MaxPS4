@@ -11,10 +11,14 @@
 #include "../Native/GCNTranslator.hpp"
 #include "GCNTestPrograms.h"
 #include <cassert>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <sys/mman.h>
+#include <unistd.h>
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
@@ -28,7 +32,13 @@ id<MTLArgumentEncoder> nativeEncoder(id<MTLDevice> device) {
         return a;
     };
     return [device newArgumentEncoderWithArguments:@[argument(MTLDataTypeTexture, 0), argument(MTLDataTypeUInt, 1),
-                                                     argument(MTLDataTypeUInt4, 2), argument(MTLDataTypeUInt4, 3)]];
+                                                     argument(MTLDataTypeUInt4, 2), argument(MTLDataTypeUInt4, 3),
+                                                     argument(MTLDataTypeTexture, 4), argument(MTLDataTypeUInt4, 5),
+                                                     argument(MTLDataTypeUInt4, 6), argument(MTLDataTypeTexture, 7),
+                                                     argument(MTLDataTypeUInt4, 8), argument(MTLDataTypeUInt4, 9),
+                                                     argument(MTLDataTypeSampler, 10), argument(MTLDataTypeSampler, 11),
+                                                     argument(MTLDataTypeSampler, 12), argument(MTLDataTypeUInt4, 13),
+                                                     argument(MTLDataTypeUInt4, 14), argument(MTLDataTypeUInt4, 15)]];
 }
 uint32_t noise(uint32_t n) { n *= 2654435761u; n ^= n >> 13; n *= 0x5bd1e995u; return n ^ (n >> 15); }
 }
@@ -92,11 +102,19 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                                     wrap | (wrap << 3), 0, linear ? 0x500000u : 0u, 0};
             std::memcpy(state.ps, t, sizeof t);
             id<MTLBuffer> table = [device newBufferWithLength:arguments.encodedLength options:MTLResourceStorageModeShared];
+            // Each of the three native slots in turn (a video's Y, U and V planes).
+            const unsigned slot = (wrap + linear + size) % 3, field[3] = {0, 4, 7}, low[3] = {2, 5, 8};
             [arguments setArgumentBuffer:table offset:0];
-            [arguments setTexture:image atIndex:0];
-            *static_cast<uint32_t*>([arguments constantDataAtIndex:1]) = 1;
-            std::memcpy([arguments constantDataAtIndex:2], t, 16);
-            std::memcpy([arguments constantDataAtIndex:3], t + 4, 16);
+            [arguments setTexture:image atIndex:field[slot]];
+            // The renderer's Metal sampler for this S#, as the game's draws get it.
+            const std::array<uint32_t, 4> sampler = {t[8], t[9], t[10], t[11]};
+            MTLSamplerDescriptor* samplerDescriptor = PM4MetalRenderer::nativeSamplerDescriptor(sampler);
+            assert(samplerDescriptor);
+            [arguments setSamplerState:[device newSamplerStateWithDescriptor:samplerDescriptor] atIndex:10 + slot];
+            std::memcpy([arguments constantDataAtIndex:13 + slot], sampler.data(), 16);
+            *static_cast<uint32_t*>([arguments constantDataAtIndex:1]) = (1u << slot) | (16u << slot);
+            std::memcpy([arguments constantDataAtIndex:low[slot]], t, 16);
+            std::memcpy([arguments constantDataAtIndex:low[slot] + 1], t + 4, 16);
             id<MTLBuffer> output = [device newBufferWithLength:samples * 2 * 16 options:MTLResourceStorageModeShared];
             id<MTLBuffer> used = [device newBufferWithLength:4 options:MTLResourceStorageModeShared];
             id<MTLCommandBuffer> command = [queue commandBuffer];
@@ -111,15 +129,23 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
             assert(*static_cast<const uint32_t*>(used.contents) == 1);
             const auto* values = static_cast<const float*>(output.contents);
+            // Metal's sampler filters the whole sample (8-bit weights): within
+            // a level of GCN's filtering, bilinear; a point sample may pick the
+            // neighbour texel right at a texel edge, so a few may differ.
             unsigned unequal = 0;
-            for (unsigned k = 0; k < samples; ++k)
-                if (std::memcmp(values + 8 * k, values + 8 * k + 4, 16) != 0 && unequal++ < 4)
+            float largest = 0;
+            for (unsigned k = 0; k < samples; ++k) {
+                float difference = 0;
+                for (unsigned c = 0; c < 4; ++c) difference = std::max(difference, std::fabs(values[8 * k + c] - values[8 * k + 4 + c]));
+                largest = std::max(largest, difference);
+                if (difference > 0 && unequal++ < 4)
                     std::printf("  sample %u: buffer (%.9g %.9g %.9g %.9g) native (%.9g %.9g %.9g %.9g)\n", k,
                                 values[8 * k], values[8 * k + 1], values[8 * k + 2], values[8 * k + 3],
                                 values[8 * k + 4], values[8 * k + 5], values[8 * k + 6], values[8 * k + 7]);
-            std::printf("NATIVE CONFORMANCE %s %ux%u wrap %u linear %u: %u of %u samples differ\n",
-                        f ? "5_6_5" : "8_8_8_8", width, height, wrap, linear, unequal, samples);
-            assert(unequal == 0);
+            }
+            std::printf("NATIVE CONFORMANCE %s %ux%u wrap %u linear %u: %u of %u samples differ, at most %.5f\n",
+                        f ? "5_6_5" : "8_8_8_8", width, height, wrap, linear, unequal, samples, largest);
+            assert(linear ? largest <= 1.2f / 255 : unequal <= samples / 100);
             formatNative[f] = true;
           }
         }
@@ -127,7 +153,8 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                     formatNative[0] ? "tested" : "unavailable", formatNative[1] ? "tested" : "unavailable");
 
         // 2. Measurement through PM4MetalRenderer (per-draw copies, as the game bridge).
-        constexpr unsigned screenW = 1920, screenH = 1080, imageW = 512, imageH = 256;
+        // 1 MiB of texels: the texture's range takes a shared buffer (buffer(5)).
+        constexpr unsigned screenW = 1920, screenH = 1080, imageW = 1024, imageH = 256;
         constexpr uint64_t texturedPS = 0x11400, image = 0x40000, target = 0x200000;
         Arena arena;
         arena.bytes.resize(image + imageW * imageH * 4 - Arena::start);
@@ -168,6 +195,12 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             const auto* p = static_cast<const uint8_t*>(readback.contents);
             return std::vector<uint8_t>(p, p + screenW * screenH * 4);
         };
+        // The arena's bytes on whole host pages (Arena::start is page-aligned).
+        struct { std::uint8_t* bytes; std::size_t size; } host;
+        host.size = (arena.bytes.size() + getpagesize() - 1) / getpagesize() * getpagesize();
+        host.bytes = static_cast<std::uint8_t*>(mmap(nullptr, host.size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+        assert(host.bytes != MAP_FAILED && Arena::start % getpagesize() == 0);
+        std::memcpy(host.bytes, arena.bytes.data(), arena.bytes.size());
         for (unsigned f = 0; f < 2; ++f) for (unsigned wrap : {0u, 2u}) {
             const unsigned dfmt = f ? 16 : 10;
             const uint32_t t[12] = {std::uint32_t(image >> 8), dfmt << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
@@ -191,19 +224,101 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                     gpu[mode] += (command.GPUEndTime - command.GPUStartTime) * 1000; cpu[mode] += encodeMs; ++timed[mode];
                 }
             }
-            // The V# table, then the vertices merged with the texture.
-            assert(native.lastRanges == 2);
+            // The V# table, then the vertices merged with the texture: 1 MiB of
+            // 8_8_8_8 texels, copied into a shared buffer once per command buffer
+            // (5_6_5's 512 KiB stay in the draw's buffer).
+            const unsigned shared = f ? 0u : 1u;
+            assert(native.lastRanges == 2 && native.rangesShared == shared * runs && buffered.rangesShared == shared * runs);
+            {
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                assert(buffered.encode(d, command) && buffered.encode(d, command));
+                [command commit]; [command waitUntilCompleted];
+                assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
+                assert(buffered.rangesShared == shared * (runs + 1));
+            }
             if (native.nativeDraws != (formatNative[f] ? runs : 0u))
                 std::printf("native refusals %u/%u/%u/%u/%u, last: %s\n", native.nativeMisses[0], native.nativeMisses[1],
                             native.nativeMisses[2], native.nativeMisses[3], native.nativeMisses[4], native.nativeLastMiss.c_str());
             assert(native.nativeDraws == (formatNative[f] ? runs : 0u));
-            const bool same = pixels(buffered.target(target)) == pixels(native.target(target));
+            const auto drawn = pixels(buffered.target(target));
+            const auto natively = pixels(native.target(target));
+            // Metal's sampler filters natively: bytes within 2 levels of GCN's
+            // filtering, a few more where the program's own tests flip.
+            std::size_t far = 0;
+            for (std::size_t k = 0; k < drawn.size(); ++k) far += std::abs(int(drawn[k]) - int(natively[k])) > 2;
+            const bool same = far * 1000 < drawn.size();
+            // Not the zeros an unread slot would give.
+            assert(std::any_of(drawn.begin(), drawn.end(), [](uint8_t b) { return b != 0 && b != 255; }));
             for (unsigned k = 0; k < 2; ++k) if (timed[k]) { gpu[k] /= timed[k]; cpu[k] /= timed[k]; }
             std::printf("NATIVE SONIC-SHAPED %s %ux%u -> %ux%u bilinear wrap %u: buffer GPU %.3f ms (encode %.3f ms), native GPU %.3f ms (encode %.3f ms), %u native draws, pixels %s\n",
                         f ? "5_6_5" : "8_8_8_8", imageW, imageH, screenW, screenH, wrap, gpu[0], cpu[0], gpu[1], cpu[1],
-                        native.nativeDraws, same ? "identical" : "DIFFERENT");
+                        native.nativeDraws, same ? "within 2 levels" : "DIFFERENT");
             assert(same);
+            // The same draw with the texture read in place (a no-copy buffer
+            // over page-aligned host memory, as the game's guest memory).
+            PM4MetalRenderer mapped(device, arena.memory, nil, 0, true);
+            mapped.hostView = [&](uint64_t a, size_t n) -> const void* {
+                return a >= Arena::start && a - Arena::start + n <= host.size ? host.bytes + (a - Arena::start) : nullptr;
+            };
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            assert(mapped.encode(d, command));
+            [command commit]; [command waitUntilCompleted];
+            assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
+            assert(mapped.rangesShared == shared && mapped.rangesMapped == shared);
+            assert(pixels(mapped.target(target)) == natively);
         }
-        std::puts("PASS native textures through PM4MetalRenderer: identical 1920x1080 pixels; timings are CI GPU, not iPhone game FPS");
+        std::puts("PASS native textures through PM4MetalRenderer: 1920x1080 pixels within 2 levels, also read in place; timings are CI GPU, not iPhone game FPS");
+
+        // 3. A colour target sampled through a tiled T# (tile mode 13), as
+        //    Mortal Kombat composites its menu layer: the target's Metal
+        //    texture is read; a tiled T# no target holds still reads zeros.
+        {
+            PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
+            const uint32_t linear[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
+                                         (imageW - 1) << 13, 0, 0, 0, 0, 0, 0x500000, 0};
+            std::memcpy(d.psUser, linear, sizeof linear);
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            assert(renderer.encode(d, command));
+            [command commit]; [command waitUntilCompleted];
+            const uint64_t layer = target, composed = 0x400000, elsewhere = 0x800000;
+            auto compose = [&](uint64_t source, uint64_t destination) {
+                const uint32_t tiled[12] = {std::uint32_t(source >> 8), 10u << 20, (screenW - 1) | ((screenH - 1) << 14), 0x90d00facu,
+                                            (screenW - 1) << 13, 0, 0, 0, 2 | (2 << 3), 0, 0x500000, 0};
+                PM4Draw c = d;
+                std::memcpy(c.psUser, tiled, sizeof tiled);
+                c.target = destination;
+                id<MTLCommandBuffer> commands = [queue commandBuffer];
+                const bool encoded = renderer.encode(c, commands);
+                if (!encoded) std::printf("tiled compose: %s\n", renderer.error.c_str());
+                assert(encoded);
+                [commands commit]; [commands waitUntilCompleted];
+                assert(commands.status == MTLCommandBufferStatusCompleted && !commands.error);
+                return pixels(renderer.target(destination));
+            };
+            const unsigned before = renderer.targetReads;
+            const auto read = compose(layer, composed);
+            assert(renderer.targetReads == before + 1);
+            const auto zeros = compose(elsewhere, composed + 0x800000);
+            assert(renderer.targetReads == before + 1 && read != zeros);
+            std::puts("PASS tiled T# of a colour target reads the target's Metal texture");
+        }
+        // 4. Asynchronous pipelines (the game bridge): the first draw is
+        //    deferred while Metal builds its pipeline, a later one draws.
+        {
+            PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
+            renderer.asyncPipelines = true;
+            id<MTLCommandBuffer> first = [queue commandBuffer];
+            assert(renderer.encode(d, first) && renderer.drawsDeferred == 1 && renderer.pipelinesBuilt == 0);
+            [first commit]; [first waitUntilCompleted];
+            for (unsigned waited = 0; renderer.pipelinesPending() && waited < 600; ++waited) usleep(50000);
+            assert(!renderer.pipelinesPending() && !renderer.pipelinesRefused());
+            id<MTLCommandBuffer> second = [queue commandBuffer];
+            assert(renderer.encode(d, second) && renderer.drawsDeferred == 1 && renderer.pipelinesBuilt == 1);
+            [second commit]; [second waitUntilCompleted];
+            assert(second.status == MTLCommandBufferStatusCompleted && !second.error);
+            const auto drawn = pixels(renderer.target(target));
+            assert(std::any_of(drawn.begin(), drawn.end(), [](uint8_t b) { return b != 0 && b != 255; }));
+            std::puts("PASS asynchronous pipelines: deferred draw, then drawn once built");
+        }
     }
 }

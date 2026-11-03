@@ -16,8 +16,11 @@
 namespace maxps4 {
 class OrbisMetadata {
 public:
-    static constexpr size_t fileLimit = 64 * 1024 * 1024;
-    static constexpr size_t recordLimit = 4096;
+    // Files and memory plans up to 512 MiB; tables of sections and dynamic
+    // entries up to recordLimit, symbols up to symbolLimit, relocations up to
+    // relocationLimit (Unreal Engine executables have close to a million).
+    static constexpr size_t fileLimit = 512 * 1024 * 1024;
+    static constexpr size_t recordLimit = 4096, symbolLimit = 65536, relocationLimit = 4 * 1024 * 1024;
     struct Segment { uint32_t type, flags; uint64_t offset, address, filesz, memsz, align; };
     struct Identity { uint16_t id, version; std::string name; bool exported; };
     struct Symbol {
@@ -152,7 +155,7 @@ private:
         return uint16_t(n);
     }
     void decode(const uint8_t* f, size_t size, const Resolver& resolver) {
-        require(f && size >= 64 && size <= fileLimit, "Taille ELF invalide (limite 64 Mio)");
+        require(f && size >= 64 && size <= fileLimit, "Taille ELF invalide (limite 512 Mio)");
         // A SELF with plaintext blocks (homebrew fSELF, dump decrypted on the
         // console) is read as its plain ELF; an encrypted one is refused.
         std::vector<uint8_t> plain;
@@ -163,7 +166,7 @@ private:
             container = true;
             f = plain.data();
             size = plain.size();
-            require(size >= 64 && size <= fileLimit, "Taille ELF invalide (limite 64 Mio)");
+            require(size >= 64 && size <= fileLimit, "Taille ELF invalide (limite 512 Mio)");
         }
         require(!std::memcmp(f,"\177ELF\2\1\1",7), "ELF64 little-endian requis");
         require((f[7] == 0 || f[7] == 9) && f[8] == 0, "OSABI/version ABI non pris en charge");
@@ -197,7 +200,7 @@ private:
                 require(s.align <= 1 || s.address%s.align == s.offset%s.align, "Adresse/offset non congruents");
             }
             if (s.type == 1 || s.type == 0x61000010) {
-                require(s.memsz <= fileLimit-planned, "Plan mémoire supérieur à 64 Mio");
+                require(s.memsz <= fileLimit-planned, "Plan mémoire supérieur à 512 Mio");
                 planned += s.memsz;
                 for (const auto& old : segments) if (old.type == 1 || old.type == 0x61000010)
                     require(!s.memsz || !old.memsz || s.address >= old.address+old.memsz ||
@@ -343,10 +346,10 @@ private:
                 uint64_t hash = locate(get(4),8,false);
                 uint64_t buckets = read(f+hash,4);
                 symbolCount = read(f+hash+4,4);
-                require(buckets && buckets <= recordLimit && symbolCount <= recordLimit, "DT_HASH trop grand");
+                require(buckets && buckets <= symbolLimit && symbolCount <= symbolLimit, "DT_HASH trop grand");
                 (void)locate(get(4),8+4*(buckets+symbolCount),false);
             }
-            require(symbolCount && symbolCount <= recordLimit, "Nombre de symboles invalide");
+            require(symbolCount && symbolCount <= symbolLimit, "Nombre de symboles invalide");
             uint64_t symOffset = locate(get(symTag),symbolCount*24,symTag != 6);
             for (uint64_t i = 0; i < symbolCount; ++i) {
                 const auto* p = f+symOffset+i*24;
@@ -387,11 +390,12 @@ private:
                 symbols.push_back(std::move(s));
             }
         }
+        std::set<uint64_t> targets;
         auto rela = [&](uint64_t pointerTag, uint64_t sizeTag, bool sony, bool plt) {
             if (!tags.count(pointerTag) && !tags.count(sizeTag)) return;
             require(tags.count(pointerTag) && tags.count(sizeTag), "Paire RELA incomplète");
             uint64_t bytes = get(sizeTag);
-            require(bytes%24 == 0 && bytes/24 <= recordLimit-relocations.size(), "Taille RELA invalide");
+            require(bytes%24 == 0 && bytes/24 <= relocationLimit-relocations.size(), "Taille RELA invalide");
             if (plt) require(get(sony ? 0x6100002b : 20) == 7, "PLT REL non pris en charge");
             else require(get(sony ? 0x61000033 : 9) == 24, "RELAENT différent de 24");
             uint64_t offset = locate(get(pointerTag),bytes,sony);
@@ -412,8 +416,14 @@ private:
                         << " type=" << std::dec << kind;
                     throw std::runtime_error(why.str());
                 }
-                for (const auto& old : relocations) if (kind && old.type)
-                    require(r.target >= old.target+8 || old.target >= r.target+8, "Cibles RELA se chevauchant");
+                // Sorted targets: no 8-byte write may overlap another (a pairwise
+                // scan is quadratic, hours for Unreal Engine's ~800k relocations).
+                if (kind) {
+                    const auto next = targets.lower_bound(r.target);
+                    require((next == targets.end() || *next - r.target >= 8) &&
+                            (next == targets.begin() || r.target - *std::prev(next) >= 8), "Cibles RELA se chevauchant");
+                    targets.insert(r.target);
+                }
                 if (!supported) block("Relocations non prises en charge");
                 relocations.push_back(r);
             }

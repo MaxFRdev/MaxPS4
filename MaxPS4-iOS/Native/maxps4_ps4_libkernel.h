@@ -74,17 +74,30 @@ enum class PS4KernelService : uint32_t {
     video_add_flip, video_add_vblank, video_delete_flip, video_delete_vblank,
     video_event_id, video_event_data, video_event_count, video_resolution, video_flip_rate,
     save_init, save_term, save_mount2, save_umount,
+    save_mount1, save_umount2, save_search, save_set_param, save_get_param, save_save_icon, save_load_icon,
+    save_delete, save_mount_info, save_event, save_progress, save_memory_setup, save_memory_get, save_memory_set,
     sema_create, sema_delete, sema_wait, sema_poll, sema_signal, sema_cancel,
     flag_create, flag_delete, flag_set, flag_clear, flag_wait, flag_poll, flag_cancel,
     process_counter, counter_frequency, kernel_sleep,
     np_state, np_signed_out, np_create_request, app_init, app_addcont_list, app_param_int,
     app_addcont_info, app_addcont_mount, app_addcont_unmount,
+    module_load_start, module_dlsym, module_list, module_info_unwind, module_info, module_info_ex,
+    direct_available, direct_allocate_main, flexible_map_unnamed, flexible_release,
+    virtual_query, query_protection, sdk_version, system_version,
+    msg_init, msg_open, msg_status, msg_result, msg_close, msg_term,
+    error_init, error_open, error_status, error_close, error_term,
+    netctl_state, netctl_info, netctl_callback, net_pool, audio_outputs, audio_port_state,
+    playgo_open, playgo_locus, playgo_progress, playgo_todo, playgo_eta, playgo_speed, playgo_language,
+    playgo_chunks, random_number, sandbox_word,
     app_temp_mount, rtc_current_tick, rtc_current_clock, rtc_current_local, rtc_get_tick, rtc_set_tick,
     rtc_resolution, rtc_utc_to_local, safe_area, trophy_create_context, trophy_create_handle, trophy_unlock,
     save_dialog_init, save_dialog_open, save_dialog_update, save_dialog_result, save_dialog_term,
     user_initialize, user_terminate, user_initial, user_login_list, user_event, user_name,
     pad_init, pad_open, pad_close, pad_read, pad_read_state, pad_information, pad_handle,
     gnm_draw_auto, gnm_draw_index, gnm_vgt, gnm_vs, gnm_ps350,
+    gnm_ps, gnm_cs_plain, gnm_draw_index_offset, gnm_draw_indirect, gnm_draw_index_indirect,
+    gnm_dispatch_indirect, gnm_dispatch_init, gnm_context_init, gnm_context_init400,
+    gnm_reset_vgt, gnm_set_marker, gnm_clock,
     gnm_submit, gnm_allowed, gnm_done,
     // sceGnmSubmitAndFlipCommandBuffers: null GPU backend only (the flip is
     // requested once the work is retired, at submission).
@@ -96,12 +109,34 @@ enum class PS4KernelService : uint32_t {
     // English console, a foreground application status, no system events.
     system_param_int, system_status, system_event,
     // libSceAudioOut (PS4AudioOut). Output blocks for one buffer's duration.
-    audio_init, audio_open, audio_close, audio_output
+    audio_init, audio_open, audio_close, audio_output,
+    // Append new services to preserve existing trampoline service IDs.
+    reserve_range, mtype_protect, direct_query, batch_map, batch_map2, gnm_unsupported, gnm_gs_rings,
+    getdents, flexible_available, prt_aperture, aio_read, aio_write, aio_wait,
+    pool_reserve, pool_commit, pool_decommit, pool_expand, thread_id, process_id,
+    sched_priority_max, sched_priority_min, sched_param_get, net_unavailable,
+    discmap_no_bitmap, discmap_flags, video_capability,
+    gnm_workload_stream, gnm_workload_begin, gnm_workload_end, gnm_submit_workload, gnm_submit_flip_workload,
+    gnm_map_compute, gnm_unmap_compute, gnm_ding_dong, gnm_tessellation_offchip,
+    gnm_ls, gnm_hs, gnm_hs_update, gnm_es, gnm_gs, gnm_push_color_marker, gnm_set_color_marker,
+    gnm_ding_dong_marker, gnm_embedded_ps, gnm_compute_wait_address, gnm_compute_wait_semaphore,
+    gnm_dispatch_indirect_mec, thread_getname,
+    trophy_game_info, trophy_group_info, trophy_unlock_state, rtc_time_t,
+    attr_getschedparam, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_post, uuid_create,
+    net_pton, net_ntop
 };
 // Token bit of a trampoline whose function follows the POSIX convention: -1
 // with the error in the calling thread's errno (__Error) instead of an Orbis
 // kernel error code.
 constexpr uint32_t posix_token = 0x40000000;
+// Token bit of a POSIX pthread_* trampoline over a scePthread* service: the
+// result is returned as an errno number (pthread_result), the services' name
+// arguments are absent (passed as 0) and pthread_cond_timedwait's deadline is
+// absolute (CLOCK_REALTIME) instead of a relative microsecond count.
+constexpr uint32_t pthread_token = 0x10000000;
+constexpr int64_t pthread_result(int64_t result) {
+    return result <= -int64_t(0x7ffe0000) + 0xffff && result > -int64_t(0x7ffe0000) ? result + 0x7ffe0000 : result;
+}
 // Tokens from missing_import_token on are the boot probe's stubs (see
 // maxps4_fex_engine_set_import_probe): token - missing_import_token indexes
 // the engine's list of stubbed imports. Never a PS4KernelService.
@@ -129,6 +164,8 @@ struct PS4KernelExport {
     const char* module = nullptr; // When it is not the library's own name.
 };
 const PS4KernelExport* libkernel_exports(size_t& count);
+// The NID of a PS4 symbol name (what sceKernelDlsym looks up).
+std::string ps4_nid(const std::string& name);
 // Library/module/version are decoded by an ELF/PRX loader before resolution.
 // This resolver deliberately does not guess the meaning of encoded # IDs.
 PS4KernelService resolve_libkernel(std::string_view symbol,
@@ -160,6 +197,17 @@ public:
     // An installed add-on content: its 16-character entitlement label and the
     // host directory sceAppContentAddcontMount mounts at /addcont0. Cleared by reset().
     int64_t add_addcont(const char* label, const char* host_directory);
+    // The game's modules as loaded, for sceKernelLoadStartModule (by file
+    // name; handles are 1-based positions), sceKernelDlsym (exports by NID),
+    // sceKernelGetModuleList and sceKernelGetModuleInfoForUnwind (by address).
+    struct LoadedModule {
+        std::string name;
+        uint64_t base = 0, end = 0, eh_frame_hdr = 0, eh_frame_hdr_size = 0;
+        std::map<std::string, uint64_t> exports;
+        struct Segment { uint64_t address, size; uint32_t protection; };
+        std::vector<Segment> segments;
+    };
+    void set_modules(std::vector<LoadedModule> modules) { std::lock_guard<std::mutex> guard(lock_); modules_ = std::move(modules); }
     void reset();
     // `posix`: the trampoline's token had posix_token; an Orbis error result
     // becomes -1 with that error in the thread's errno cell.
@@ -174,6 +222,9 @@ public:
     PS4Pad& pad() { return pad_; }
     PS4AudioOut& audio() { return audio_; }
     PS4GnmQueue& graphics() { return graphics_; }
+    // The last console_limit bytes the game wrote to its stdout and stderr.
+    std::string console() { std::lock_guard<std::mutex> guard(lock_); return std::string(console_.begin(), console_.end()); }
+    static constexpr size_t console_limit = 4096;
     static constexpr int32_t abort_status = 134; // As a process killed by SIGABRT.
 private:
     PS4GuestMemory& memory_;
@@ -187,14 +238,28 @@ private:
     PS4GnmQueue graphics_;
     uint64_t errno_table_ = 0, errno_table_size_ = 0, process_param_ = 0;
     uint64_t heap_trace_ = 0; // sceLibcHeapGetTraceInfo's zeroed tables, mapped on first use.
+    std::vector<char> console_;
+    // sceGnmMapComputeQueue rings (vqid = index + 1): base, size and read
+    // pointer the game gave, and how far DingDong has consumed it (dwords).
+    struct ComputeQueue { uint64_t ring = 0, read_pointer = 0; uint32_t size = 0, offset = 0; };
+    std::array<ComputeQueue, 64> compute_{};
     std::map<uint64_t, uint64_t> direct_; // Allocated physical ranges: start -> length.
     std::string save_root_;
     int32_t system_language_ = 1;
     uint32_t next_np_request_ = 0x10000001;
     uint32_t save_dialog_status_ = 0; // OrbisCommonDialogStatus: none, initialized, running, finished.
-    int64_t save_mount(uint64_t request, uint64_t result);
+    uint32_t msg_dialog_status_ = 0, error_dialog_status_ = 0; // The same, for sceMsgDialog / sceErrorDialog.
+    uint64_t sandbox_word_ = 0; // Guest address of the sandbox word (mapped on first use).
+    // `v1`: sceSaveDataMount's layout (dirName pointer at 16, mode at 40)
+    // instead of sceSaveDataMount2's (8 and 24).
+    int64_t save_mount(uint64_t request, uint64_t result, bool v1 = false);
+    int64_t save_service(PS4KernelService service, const PS4KernelCall& call);
+    std::string save_dir_; // Host directory mounted at /savedata0, empty when none.
     int64_t save_umount(uint64_t mount_point);
     int64_t temp_mount(uint64_t mount_point);
+    std::vector<LoadedModule> modules_;
+    int64_t module_service(PS4KernelService service, const PS4KernelCall& call);
+    void eh_frame_of(const LoadedModule& module, uint64_t& eh_frame, uint64_t& eh_size) const;
     struct Addcont { std::string label, path; };
     std::vector<Addcont> addcont_;
     // The add-on content named by a guest OrbisNpUnifiedEntitlementLabel, or null.

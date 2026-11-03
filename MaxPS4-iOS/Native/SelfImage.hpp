@@ -17,6 +17,9 @@
 namespace maxps4 {
 struct SelfImage {
     static constexpr uint32_t magic = 0x1d3d154f;
+    // The largest plain image (OrbisMetadata::fileLimit): Unreal Engine
+    // executables are over 128 MiB.
+    static constexpr uint64_t limit = uint64_t(512) << 20;
     static uint64_t read(const uint8_t* p, size_t width) {
         uint64_t value = 0;
         for (size_t i = 0; i < width; ++i) value |= uint64_t(p[i]) << (8 * i);
@@ -77,7 +80,7 @@ struct SelfImage {
             const uint8_t* p = header + phoff + i * 56;
             const uint64_t offset = read(p + 8, 8), filesz = read(p + 32, 8);
             if (!filesz) continue;
-            if (offset > (uint64_t(64) << 20) || filesz > (uint64_t(64) << 20))
+            if (offset > limit || filesz > limit)
                 return fail(-E2BIG, "segment ELF trop grand");
             if (blocks[i].present && blocks[i].size < filesz) return fail(-ENOEXEC, "bloc SELF trop court");
             if (offset + filesz > length) length = offset + filesz;

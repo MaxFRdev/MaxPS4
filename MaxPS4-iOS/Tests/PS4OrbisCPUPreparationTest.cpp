@@ -243,7 +243,10 @@ int main() {
         CHECK(image.translate(low,bytes,6) && !image.translate(low,1,1));
         // sceKernelMmap window: host pages at their own address, after the stack.
         uint64_t window=0, windowBytes=0;
-        CHECK(image.heap(window,windowBytes) && windowBytes==maxps4::GuestELF::generalHeap);
+        CHECK(image.heap(window,windowBytes) && windowBytes>=maxps4::GuestELF::generalHeap);
+        bool listed=false;
+        for (const auto size : maxps4::GuestELF::generalHeapSizes) listed=listed || windowBytes==size;
+        CHECK(listed);
         CHECK(window>=low+bytes+4096 && window%0x4000==0 && !image.translate(window,1,4));
         {
             maxps4::PS4VirtualMemory vm(image);
@@ -259,7 +262,7 @@ int main() {
             CHECK(vm.map(0,0x4000,3,0x1002,-1,0,first)==maxps4::ps4::ok && first==window);
             CHECK(!vm.translate(first,1,4)[0]); // Unmapped pages come back zeroed.
             uint64_t tooLarge=0;
-            CHECK(vm.map(0,maxps4::GuestELF::generalHeap,3,0x1002,-1,0,tooLarge)==maxps4::ps4::nomem);
+            CHECK(vm.map(0,windowBytes,3,0x1002,-1,0,tooLarge)==maxps4::ps4::nomem);
             // Host pages: a hint is a search start, MAP_FIXED replaces what the
             // span held, alignment holds, and a span unmapped inside a region
             // can be mapped again.
@@ -273,10 +276,70 @@ int main() {
             CHECK(vm.place(0,0xc000,0,3,false,big)==ok && vm.unmap(big+0x4000,0x4000)==ok);
             CHECK(vm.translate(big,1,4) && !vm.translate(big+0x4000,1,4) && vm.translate(big+0x8000,1,4));
             CHECK(vm.place(big+0x4000,0x4000,0,3,true,fixed)==ok && fixed==big+0x4000 && vm.translate(fixed,1,2));
-            CHECK(vm.place(0x1000000,0x4000,0,3,true,unused)==maxps4::ps4::inval);
+            // A fixed address outside the window: exactly there when the host
+            // grants that span (returned to the host when unmapped), else
+            // inside the window; never over a host mapping (the stack).
+            CHECK(vm.place(0x1000000,0x8000,0,3,true,unused)==ok);
+            CHECK(unused==0x1000000 || (unused>=window && unused<window+windowBytes));
+            if (unused==0x1000000) {
+                auto* outside=const_cast<uint8_t*>(vm.translate(unused,16,2));
+                CHECK(outside && reinterpret_cast<uintptr_t>(outside)==unused);
+                outside[0]=0x7e; CHECK(vm.unmap(unused+0x4000,0x4000)==ok && vm.translate(unused,1,4) && !vm.translate(unused+0x4000,1,4));
+            }
+            CHECK(vm.unmap(unused,0x4000)==ok && !vm.translate(unused,1,4));
+            // The application area, when the host granted it at load: fixed
+            // mappings inside it land exactly, and go back to PROT_NONE.
+            uint64_t areaBase=0, areaSize=0; int areaStatus=0;
+            maxps4::PS4VirtualMemory::app_area(areaBase,areaSize,areaStatus);
+            CHECK(areaSize ? areaStatus==0 : areaStatus!=0);
+            CHECK(!areaSize || (areaBase==maxps4::PS4VirtualMemory::app_area_base && areaSize==maxps4::PS4VirtualMemory::app_area_size));
+            if (areaSize) {
+                uint64_t inArea=0;
+                CHECK(vm.place(areaBase+0x10000,0x8000,0,3,true,inArea)==ok && inArea==areaBase+0x10000 && vm.translate(inArea,0x8000,2));
+                CHECK(vm.unmap(inArea,0x8000)==ok && !vm.translate(inArea,1,4));
+                CHECK(vm.place(areaBase+0x10000,0x4000,0,3,true,inArea)==ok && inArea==areaBase+0x10000 && vm.unmap(inArea,0x4000)==ok);
+            }
+            uint64_t relocated=0;
+            const uint64_t stackPage=(low+0x3fff)&~uint64_t{0x3fff};
+            CHECK(vm.place(stackPage,0x4000,0,3,true,relocated)==ok && relocated>=window && relocated<window+windowBytes);
+            CHECK(image.translate(stackPage,1,6) && vm.unmap(relocated,0x4000)==ok);
             CHECK(vm.place(0,0x4000,0x3000,3,false,unused)==maxps4::ps4::inval);
             vm.reset();
             CHECK(!vm.translate(first,1,4) && !vm.allocated());
+        }
+        {
+            // Kernel reservations must support replacing one page with a
+            // fixed direct mapping while both neighbouring pages stay reserved.
+            using S = maxps4::PS4KernelService;
+            maxps4::PS4VirtualMemory vm(image);
+            maxps4::PS4GuestMemory memory(image,&vm);
+            maxps4::PS4Libkernel kernel(memory,&vm);
+            constexpr uint64_t page=0x4000;
+            const uint64_t addressOut=low+0x100, physicalOut=low+0x108;
+            const uint64_t batch=low+0x120, doneOut=low+0x140;
+            uint8_t word[8]{};
+            CHECK(memory.write(addressOut,word,sizeof(word)));
+            CHECK(kernel.invoke(S::reserve_range,{addressOut,3*page,0,0})==0);
+            CHECK(memory.read(addressOut,word,sizeof(word)));
+            const uint64_t reserved=maxps4::ps4::get_le(word,8);
+            CHECK(reserved>=window && !memory.permitted(reserved,3*page,4));
+            CHECK(kernel.invoke(S::direct_allocate_main,{page,0,0,physicalOut})==0);
+            CHECK(memory.read(physicalOut,word,sizeof(word)));
+            uint8_t entry[32]{};
+            maxps4::ps4::put_le(entry,0,reserved+page,8);
+            maxps4::ps4::put_le(entry,8,maxps4::ps4::get_le(word,8),8);
+            maxps4::ps4::put_le(entry,16,page,8);
+            entry[24]=0x33; // CPU and GPU read/write; operation 0 maps direct.
+            CHECK(memory.write(batch,entry,sizeof(entry)));
+            CHECK(kernel.invoke(S::batch_map,{batch,1,doneOut})==0);
+            CHECK(memory.read(doneOut,word,4) && maxps4::ps4::get_le(word,4)==1);
+            CHECK(!memory.permitted(reserved,1,4) && memory.permitted(reserved+page,page,6));
+            CHECK(!memory.permitted(reserved+2*page,1,4) && vm.allocated()==3*page);
+            CHECK(memory.read(reserved+page,word,sizeof(word)) && maxps4::ps4::get_le(word,8)==0);
+            CHECK(kernel.invoke(S::mtype_protect,{reserved,page,0,1})==0);
+            CHECK(memory.permitted(reserved,page,4) && !memory.permitted(reserved,1,2));
+            kernel.reset();
+            CHECK(vm.allocated()==0 && !memory.permitted(reserved+page,1,4));
         }
         {
             // Child thread slots after the mmap window: guarded RW stacks (no

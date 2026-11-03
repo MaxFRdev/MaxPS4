@@ -301,9 +301,20 @@ enum MaxPS4Saves {
 // The report of every run, kept in Documents/Rapports ("Sur mon iPhone ›
 // MaxPS4 › Rapports") so a blocked game's can be sent later.
 enum MaxPS4Reports {
-    static func save(_ text: String, for game: URL) -> URL? {
-        let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    private static var folder: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Rapports", isDirectory: true)
+    }
+    // The running session's report, rewritten every second: what is left
+    // when the app itself crashes.
+    static func live(for game: URL) -> URL {
+        folder.appendingPathComponent("\(MaxPS4Saves.gameID(for: game))-en-cours.txt")
+    }
+    static func write(_ text: String, to file: URL) {
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? text.write(to: file, atomically: true, encoding: .utf8)
+    }
+    static func save(_ text: String, for game: URL) -> URL? {
         let stamp = DateFormatter(); stamp.dateFormat = "yyyyMMdd-HHmmss"; stamp.locale = Locale(identifier: "en_US_POSIX")
         let file = folder.appendingPathComponent("\(MaxPS4Saves.gameID(for: game))-\(stamp.string(from: Date())).txt")
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"

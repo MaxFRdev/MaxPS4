@@ -127,8 +127,10 @@ public:
     void set_object_arena(uint64_t base, uint64_t size);
     static constexpr uint64_t object_size = 64;
     void reset();
-    static constexpr size_t thread_limit = 64, mutex_limit = 256, cond_limit = 256, attr_limit = 256,
-                            key_limit = 256, rwlock_limit = 256;
+    // Unreal Engine games create dozens of threads and thousands of locks.
+    // thread_limit: the main thread and GuestELF::generalThreads children.
+    static constexpr size_t thread_limit = 128, mutex_limit = 2048, cond_limit = 2048, attr_limit = 256,
+                            key_limit = 256, rwlock_limit = 512;
 private:
     struct Mutex { uint64_t token = 0, owner = 0, slot = 0; uint32_t type = error_check, count = 0; };
     // A signal or broadcast starts a new generation with `wakeups` waiters of

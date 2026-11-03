@@ -95,6 +95,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var inputEngine: OpaquePointer?
     private var displayed = 0
     private var started: TimeInterval?
+    // Rewritten each heartbeat so a run that crashes the app leaves its state.
+    private var liveReport: URL?
+    private var folderListing = "" // What /app0 holds, read once per run, under lock.
     private var vblanksSent = 0 // With vblankPort, under inputLock.
     private var vblankPort: UInt64 = 1
     private var lastTicket: UInt64 = 0
@@ -154,7 +157,87 @@ final class MaxPS4GameSource: @unchecked Sendable {
             + missing.called.prefix(5).joined(separator: " · ") + "\n"
         let text = compatibility + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
+        if let liveReport {
+            MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
+                + "\nFichiers ouverts par le jeu :\n" + openedFiles(engine)
+                + "\nDerniers appels PS4 :\n" + recentCalls(engine)
+                + "\n" + memoryLayout(engine) + "\n\n" + (bridge?.report ?? "Metal : pas encore de rendu")
+                + "\n\n" + folderListing, to: liveReport)
+        }
         return text
+    }
+    // Fixed PS4 addresses iOS refused: the game got another address and may
+    // still write at the one it asked for, into MaxPS4's own memory.
+    private func movedMappings(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 4096)
+        let total = maxps4_fex_engine_moved_mappings(engine, &text, text.count)
+        guard total > 0 else { return "Mémoire refusée ou déplacée : rien" }
+        return "Mémoire refusée (-> 0x0, code d'erreur PS4) ou déplacée (\(total)) :\n" + String(cString: text)
+    }
+    // Whether the PS4 application area and the mmap window were granted, and where.
+    private func memoryLayout(_ engine: OpaquePointer) -> String {
+        var area: UInt64 = 0, areaSize: UInt64 = 0, window: UInt64 = 0, windowSize: UInt64 = 0
+        var status: Int32 = 0
+        _ = maxps4_fex_engine_memory_layout(engine, &area, &areaSize, &window, &windowSize, &status)
+        let gib = { (bytes: UInt64) in bytes >> 30 }
+        let zone = areaSize == 0 ? "zone PS4 0x1000000000 refusée par iOS (code \(status))"
+            : "zone PS4 0x\(String(area, radix: 16)) (\(gib(areaSize)) Gio)"
+        let spare = maxps4_fex_engine_spare_address_space(engine) >> 20
+        return "Mémoire : \(zone) · fenêtre 0x\(String(window, radix: 16)) (\(gib(windowSize)) Gio) · encore libre après elle : \(spare) Mio"
+    }
+    // What the game printed last (its own error messages), invalid UTF-8 replaced.
+    private func console(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 4097)
+        guard maxps4_fex_engine_console(engine, &text, text.count) > 0 else { return "rien" }
+        let bytes = text.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+    // The run's last PS4 calls, oldest first: what a game did before it quit.
+    private func recentCalls(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 32768)
+        return maxps4_fex_engine_recent_calls(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
+    }
+    // The last calls that returned an error: what MaxPS4 refused the game.
+    private func failedCalls(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 16384)
+        return maxps4_fex_engine_failed_calls(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
+    }
+    // The last files the game opened: where its data really is.
+    private func openedFiles(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 8192)
+        return maxps4_fex_engine_opened_files(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
+    }
+    // The game folder's (and update's) top level: each folder with its file
+    // count and size, so a file the game cannot find can be looked for.
+    static func listing(of folders: [URL]) -> String {
+        let manager = FileManager.default
+        let mib = { (bytes: UInt64) in String(format: "%.1f Mio", Double(bytes) / 1_048_576) }
+        var lines: [String] = []
+        for folder in folders {
+            lines.append("Dossier \(folder.lastPathComponent) :")
+            guard let entries = try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey]) else {
+                lines.append("  illisible"); continue
+            }
+            for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }).prefix(60) {
+                let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                guard values?.isDirectory == true else {
+                    lines.append("  \(entry.lastPathComponent) · \(mib(UInt64(values?.fileSize ?? 0)))"); continue
+                }
+                var files = 0, bytes: UInt64 = 0
+                var names: [String] = []
+                let walker = manager.enumerator(at: entry, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey])
+                while let file = walker?.nextObject() as? URL, files < 20000 {
+                    let info = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                    guard info?.isRegularFile == true else { continue }
+                    files += 1; bytes += UInt64(info?.fileSize ?? 0)
+                    if names.count < 4 { names.append(file.lastPathComponent) }
+                }
+                lines.append("  \(entry.lastPathComponent)/ · \(files) fichiers · \(mib(bytes))"
+                    + (names.isEmpty ? "" : " · ex. " + names.joined(separator: ", ")))
+            }
+            if entries.count > 60 { lines.append("  … \(entries.count - 60) autres") }
+        }
+        return lines.joined(separator: "\n")
     }
     // The game's imports MaxPS4 stubs: those it called ("<library> <NID> (n appels)"), and how many exist.
     private func missingImports(_ engine: OpaquePointer) -> (called: [String], total: Int) {
@@ -177,10 +260,13 @@ final class MaxPS4GameSource: @unchecked Sendable {
         defer { lastRates = (now, requested, displayed, submitMs) }
         guard let last = lastRates, now > last.time else { return "" }
         let span = now - last.time
-        let game = Double(requested - last.requested) / span
-        let shown = Double(displayed - last.displayed) / span
+        let requestedDelta = requested >= last.requested ? requested - last.requested : 0
+        let displayedDelta = max(0, displayed - last.displayed)
+        let game = Double(requestedDelta) / span
+        let shown = Double(displayedDelta) / span
         let metal = (submitMs - last.submitMs) / (span * 10)
-        return String(format: "Cadence : jeu %.1f images/s · affichées %.1f/s · rendu Metal %.0f %% du temps du jeu\n", game, shown, metal)
+        return String(format: "Cadence : jeu %.1f images/s · affichées %.1f/s · rendu Metal %.0f %% · fenêtre %.1f s (+%llu demandées, +%d affichées)\n",
+                      game, shown, metal, span, requestedDelta, displayedDelta)
     }
     private func audioStatus(_ engine: OpaquePointer) -> String {
         if let audioFailure { return "Audio : sortie iOS indisponible (\(audioFailure))" }
@@ -370,7 +456,14 @@ final class MaxPS4GameSource: @unchecked Sendable {
             progress(String(localized: "Jeu chargé. Préparation du rendu Metal…", bundle: .maxps4))
             guard let metal = MaxPS4GameMetalBridge(device: device, reader: { address, destination, count in
                 maxps4_fex_engine_read_memory(opened, address, destination, count) == 0
+            }, writer: { address, source, count in
+                maxps4_fex_engine_write_memory(opened, address, source, count) == 0
+            }, view: { address, count in
+                var pointer: UnsafeRawPointer?
+                return maxps4_fex_engine_gpu_view(opened, address, count, &pointer) == 0 ? pointer : nil
             }, nativeTextures: nativeTextures) else { throw failure("Création du renderer Metal", -ENOMEM) }
+            // A new screen's pipelines build on Metal's threads: the game goes on meanwhile.
+            metal.asynchronousPipelines = true
             let attached = maxps4_fex_engine_gnm_host_consumer(opened,
                 Unmanaged.passUnretained(metal).toOpaque(), { context, words, count in
                     guard let context, let words else { return -EINVAL }
@@ -382,9 +475,12 @@ final class MaxPS4GameSource: @unchecked Sendable {
             progress(String(localized: "Initialisation du JIT…", bundle: .maxps4))
             let initialized = maxps4_fex_engine_initialize(opened)
             guard initialized == 0 else { throw failure(String(localized: "Activer le JIT avec StikDebug puis réessayer", bundle: .maxps4), initialized) }
+            let listing = Self.listing(of: [url] + (update.map { [$0] } ?? []))
             lock.lock()
             bridge = metal; ready = !stopped
             started = ProcessInfo.processInfo.systemUptime
+            liveReport = MaxPS4Reports.live(for: url)
+            folderListing = listing
             self.relocation = relocation
             let cancelled = stopped
             if ready {
@@ -419,8 +515,15 @@ final class MaxPS4GameSource: @unchecked Sendable {
             defer {
                 let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP),
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
-                            missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "", live].joined(separator: "\n")
+                            missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
+                            "Derniers appels PS4 en échec :", failedCalls(opened), "",
+                            "Fichiers ouverts par le jeu :", openedFiles(opened), "",
+                            "Derniers appels PS4 :", recentCalls(opened), "",
+                            "Sortie du jeu :", console(opened), "", memoryLayout(opened), movedMappings(opened), "", live, "", folderListing].joined(separator: "\n")
                 outcome = Outcome(missing: missing.called, crashed: crashed, report: MaxPS4Reports.save(text, for: url))
+                // The run ended normally: its final report replaces the live one.
+                lock.lock(); let liveFile = liveReport; liveReport = nil; lock.unlock()
+                if let liveFile { try? FileManager.default.removeItem(at: liveFile) }
             }
             return result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP)
         } catch {

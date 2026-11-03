@@ -22,6 +22,8 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
     var scaling = "fit" { didSet { if scaling != oldValue { needsRedraw = true } } }
     var report: (String) -> Void
     var failed: (String) -> Void
+    // New game images shown per second, once per second (the on-screen counter).
+    var fps: (Double) -> Void = { _ in }
     init(device: MTLDevice, report: @escaping (String) -> Void, failed: @escaping (String) -> Void) throws {
         guard let queue = device.makeCommandQueue() else { throw NSError(domain: "MaxPS4.Game", code: -12) }
         self.queue = queue; self.pipeline = try MaxPS4VideoOutMetal.make(device: device)
@@ -85,6 +87,7 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
                         let power = (info.isLowPowerModeEnabled ? " (économie d’énergie)" : "")
                             + (info.thermalState == .serious ? " (chauffe)" : info.thermalState == .critical ? " (chauffe critique)" : "")
                         self.report(String(format: "%.1f images/s · écran %.0f Hz%@ · préparation image %.2f ms · ", fps, hertz, power, ms) + frame.report)
+                        self.fps(fps)
                         self.reportTime = now; self.reportFrames = 0; self.preparationSeconds = 0; self.refreshes = 0
                     }
                     // Shown on the next refresh, which also starts the next copy.
@@ -125,6 +128,7 @@ private struct GameMetalSurface: UIViewRepresentable {
     let scaling: String
     let report: (String) -> Void
     let failed: (String) -> Void
+    let fps: (Double) -> Void
     final class Coordinator { var renderer: GameMetalDisplay? }
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> MTKView {
@@ -143,6 +147,7 @@ private struct GameMetalSurface: UIViewRepresentable {
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.report = report
         context.coordinator.renderer?.failed = failed
+        context.coordinator.renderer?.fps = fps
         context.coordinator.renderer?.scaling = scaling
         context.coordinator.renderer?.use(source)
         view.isPaused = !active || context.coordinator.renderer == nil
@@ -167,16 +172,23 @@ struct MaxPS4GameView: View {
     @StateObject private var session = MaxPS4GameSession()
     @State private var device = MTLCreateSystemDefaultDevice()
     @State private var touch: UInt32 = 0
+    // The touch sticks, -1...1 on each axis, y growing downwards like the PS4's.
+    @State private var leftStick = CGPoint.zero
+    @State private var rightStick = CGPoint.zero
     @AppStorage("maxps4.touch.scale") private var touchScale = 1.0
     @AppStorage("maxps4.touch.opacity") private var touchOpacity = 0.85
     @AppStorage("maxps4.pad.stickDpad") private var stickAsDpad = true
+    @AppStorage("maxps4.touch.rightStick") private var rightStickShown = true
     @State private var hasLaunched = false
     @State private var gamepad = MaxPS4GameView.gamepadConnected()
-    @AppStorage("maxps4.metal.nativeTextures") private var nativeTextures = false
+    @AppStorage("maxps4.metal.nativeTextures") private var nativeTextures = true
     @AppStorage("maxps4.fex.tso") private var tso = true
     @AppStorage("maxps4.display.scaling") private var scaling = "fit"
     @AppStorage("maxps4.video.height") private var outputHeight = 1080
     @AppStorage("maxps4.fex.profile") private var profiling = false
+    // The images-per-second counter in the top right corner (all games).
+    @AppStorage("maxps4.display.fpsCounter") private var fpsCounter = false
+    @State private var fps = 0.0
     // Réglages › Mode développeur: test options and the technical session report.
     @AppStorage("maxps4.developer") private var developer = false
     private let poll = Timer.publish(every: 1.0 / 60, on: .main, in: .common).autoconnect()
@@ -192,7 +204,8 @@ struct MaxPS4GameView: View {
         _touchScale = AppStorage(wrappedValue: value("maxps4.touch.scale", 1.0), own("maxps4.touch.scale"))
         _touchOpacity = AppStorage(wrappedValue: value("maxps4.touch.opacity", 0.85), own("maxps4.touch.opacity"))
         _stickAsDpad = AppStorage(wrappedValue: value("maxps4.pad.stickDpad", true), own("maxps4.pad.stickDpad"))
-        _nativeTextures = AppStorage(wrappedValue: value("maxps4.metal.nativeTextures", false), own("maxps4.metal.nativeTextures"))
+        _rightStickShown = AppStorage(wrappedValue: value("maxps4.touch.rightStick", true), own("maxps4.touch.rightStick"))
+        _nativeTextures = AppStorage(wrappedValue: value("maxps4.metal.nativeTextures", true), own("maxps4.metal.nativeTextures"))
         _tso = AppStorage(wrappedValue: value("maxps4.fex.tso", true), own("maxps4.fex.tso"))
         _scaling = AppStorage(wrappedValue: value("maxps4.display.scaling", "fit"), own("maxps4.display.scaling"))
         _outputHeight = AppStorage(wrappedValue: value("maxps4.video.height", 1080), own("maxps4.video.height"))
@@ -205,9 +218,25 @@ struct MaxPS4GameView: View {
             if let device {
                 GameMetalSurface(device: device, source: session.source,
                     active: session.running && scenePhase == .active, scaling: scaling,
-                    report: session.presented, failed: session.failed)
+                    report: session.presented, failed: session.failed,
+                    fps: { value in if fpsCounter { fps = value } })
                     .ignoresSafeArea()
                     .accessibilityIdentifier("maxps4.game.surface")
+                if fpsCounter && session.running && session.hasPresented {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Text(verbatim: String(format: "%.0f fps", fps))
+                                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                .foregroundStyle(fps >= 50 ? Color.green : fps >= 25 ? Color.yellow : Color.red)
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(.black.opacity(0.55), in: Capsule())
+                        }
+                        Spacer()
+                    }
+                    .padding(12).allowsHitTesting(false)
+                    .accessibilityIdentifier("maxps4.game.fps")
+                }
                 // A connected controller replaces the touch controls.
                 if session.running && !showingMenu && !gamepad { screenControls }
                 if session.running && !session.hasPresented {
@@ -220,62 +249,8 @@ struct MaxPS4GameView: View {
                     .padding(30).allowsHitTesting(false)
                 }
                 if !session.running {
-                    VStack(spacing: 18) {
-                        Text(directory.lastPathComponent).font(.title2.bold())
-                        if hasLaunched {
-                            Text("Session terminée. Consulte le menu pour les détails.")
-                                .font(.footnote).foregroundStyle(.secondary)
-                            // Why a game stopped, for the player, with the report to send.
-                            let outcome = session.outcome
-                            if !outcome.missing.isEmpty {
-                                Text("Ce jeu a appelé \(outcome.missing.count) fonctions PS4 que MaxPS4 ne gère pas encore : c’est sans doute ce qui le bloque.")
-                                    .font(.footnote).multilineTextAlignment(.center).frame(maxWidth: 320)
-                            }
-                            if outcome.crashed {
-                                Text("Le jeu s’est arrêté sur une erreur.").font(.footnote).foregroundStyle(.orange)
-                            }
-                            if let report = outcome.report {
-                                ShareLink(item: report) { Label("Partager le rapport de compatibilité", systemImage: "square.and.arrow.up") }
-                                    .font(.footnote).tint(.cyan)
-                                Text("Rapport enregistré dans Fichiers › MaxPS4 › Rapports.")
-                                    .font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
-                        Button(hasLaunched ? "Rejouer" : "Jouer") {
-                            touch = 0; hasLaunched = true
-                            MaxPS4GameFolders.shared.remember(directory)
-                            let update = MaxPS4GameFolders.useUpdate(for: directory) ? MaxPS4GameFolders.shared.update(for: directory)?.url : nil
-                            let addons = MaxPS4GameFolders.shared.addons(for: directory)
-                            session.start(url: directory, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso,
-                                          outputHeight: outputHeight, profiling: developer && profiling)
-                        }.buttonStyle(.borderedProminent).tint(.cyan)
-                        Picker("Affichage", selection: $scaling) {
-                            Text("Ajuster").tag("fit")
-                            Text("Remplir").tag("fill")
-                            Text("Étirer").tag("stretch")
-                        }.pickerStyle(.segmented).frame(maxWidth: 320)
-                        Picker("Résolution du jeu", selection: $outputHeight) {
-                            Text("1080p").tag(1080)
-                            Text("720p").tag(720)
-                        }.pickerStyle(.segmented).frame(maxWidth: 320)
-                        Text("Résolution annoncée au jeu : 720p peut alléger le rendu si le jeu s’y adapte.")
-                            .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 320)
-                        if developer {
-                            Toggle("Textures Metal natives (expérimental)", isOn: $nativeTextures)
-                                .font(.footnote).frame(maxWidth: 320)
-                            Toggle("Ordre mémoire x86 (TSO)", isOn: $tso)
-                                .font(.footnote).frame(maxWidth: 320)
-                            Toggle("Profileur processeur (diagnostic)", isOn: $profiling)
-                                .font(.footnote).frame(maxWidth: 320)
-                        }
-                        Text("Ces réglages sont mémorisés pour ce jeu.")
-                            .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: 320)
-                        Text("Tourne l’iPhone pour jouer en paysage.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    .padding(28)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
-                    .padding(24)
+                    // In landscape the panel can be taller than the screen: it scrolls then.
+                    ViewThatFits(in: .vertical) { sessionPanel; ScrollView { sessionPanel } }
                 }
             } else { Text("Metal indisponible sur cet appareil.") }
 #else
@@ -285,7 +260,7 @@ struct MaxPS4GameView: View {
                 HStack {
                     Button {
 #if MAXPS4_FEX_APP
-                        touch = 0; session.input(MaxPS4PadState())
+                        touch = 0; leftStick = .zero; rightStick = .zero; session.input(MaxPS4PadState())
 #endif
                         showingMenu = true
                     } label: {
@@ -303,6 +278,10 @@ struct MaxPS4GameView: View {
         }
         .preferredColorScheme(.dark)
         .statusBarHidden(true)
+        // Games are played in landscape: turn the iPhone there while this
+        // screen is shown, and back to portrait for the library after.
+        .onAppear { MaxPS4Orientation.landscape() }
+        .onDisappear { MaxPS4Orientation.release() }
         .persistentSystemOverlays(.hidden)
         .sheet(isPresented: $showingMenu) {
             NavigationStack {
@@ -319,9 +298,12 @@ struct MaxPS4GameView: View {
                                 Text("Remplir").tag("fill")
                                 Text("Étirer").tag("stretch")
                             }.pickerStyle(.segmented)
+                            Toggle("Afficher les images par seconde", isOn: $fpsCounter)
+                                .font(.subheadline).tint(.cyan)
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Commandes").font(.headline)
                                 Toggle("Stick gauche comme croix directionnelle", isOn: $stickAsDpad)
+                                Toggle("Stick droit tactile", isOn: $rightStickShown)
                                 Text("Taille des commandes tactiles")
                                 Slider(value: $touchScale, in: 0.7...1.5)
                                 Text("Opacité des commandes tactiles")
@@ -329,7 +311,7 @@ struct MaxPS4GameView: View {
                             }.font(.subheadline).tint(.cyan)
                             if session.running {
                                 Button("Arrêter la session", role: .destructive) {
-                                    touch = 0; session.stop(); showingMenu = false
+                                    touch = 0; leftStick = .zero; rightStick = .zero; session.stop(); showingMenu = false
                                 }
                             }
                             // A snapshot of the report, refreshed on demand: the live
@@ -366,30 +348,96 @@ struct MaxPS4GameView: View {
 #if MAXPS4_FEX_APP
         .onReceive(poll) { _ in
             guard session.running, scenePhase == .active, !showingMenu else { return }
-            session.input(Self.padState(touch: touch, stickAsDpad: stickAsDpad))
+            session.input(Self.padState(touchPad, touchLeft: leftStick, touchRight: rightStick, stickAsDpad: stickAsDpad))
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidConnect)) { _ in
-            gamepad = Self.gamepadConnected(); if gamepad { touch = 0 }
+            gamepad = Self.gamepadConnected(); if gamepad { touch = 0; leftStick = .zero; rightStick = .zero }
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in
             gamepad = Self.gamepadConnected()
         }
         // The game waits while its menu is open.
         .onChange(of: showingMenu) { _, open in session.setPaused(open) }
-        .onDisappear { touch = 0; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { touch = 0; session.stop() } }
+        .onDisappear { touch = 0; leftStick = .zero; rightStick = .zero; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { touch = 0; leftStick = .zero; rightStick = .zero; session.stop() } }
         // A running game keeps the screen awake: auto-lock would stop it.
         .onChange(of: session.running, initial: true) { _, running in UIApplication.shared.isIdleTimerDisabled = running }
 #endif
     }
 #if MAXPS4_FEX_APP
+    // Start, end-of-session outcome and per-game settings, shown while no game runs.
+    private var sessionPanel: some View {
+        VStack(spacing: 18) {
+            Text(directory.lastPathComponent).font(.title2.bold())
+            if hasLaunched {
+                Text("Session terminée. Consulte le menu pour les détails.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                // Why a game stopped, for the player, with the report to send.
+                let outcome = session.outcome
+                if !outcome.missing.isEmpty {
+                    Text("Ce jeu a appelé \(outcome.missing.count) fonctions PS4 que MaxPS4 ne gère pas encore : c’est sans doute ce qui le bloque.")
+                        .font(.footnote).multilineTextAlignment(.center).frame(maxWidth: 320)
+                }
+                if outcome.crashed {
+                    Text("Le jeu s’est arrêté sur une erreur.").font(.footnote).foregroundStyle(.orange)
+                }
+                if let report = outcome.report {
+                    ShareLink(item: report) { Label("Partager le rapport de compatibilité", systemImage: "square.and.arrow.up") }
+                        .font(.footnote).tint(.cyan)
+                    Text("Rapport enregistré dans Fichiers › MaxPS4 › Rapports.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Button(hasLaunched ? "Rejouer" : "Jouer") {
+                // Shown only with a Metal device (see body).
+                guard let device else { return }
+                touch = 0; leftStick = .zero; rightStick = .zero; hasLaunched = true
+                MaxPS4GameFolders.shared.remember(directory)
+                let update = MaxPS4GameFolders.useUpdate(for: directory) ? MaxPS4GameFolders.shared.update(for: directory)?.url : nil
+                let addons = MaxPS4GameFolders.shared.addons(for: directory)
+                // Without developer mode the options take their default
+                // values whatever was stored: TSO and native textures on
+                // (Sonic Mania stutters without TSO), the profiler off.
+                session.start(url: directory, update: update, addons: addons, device: device,
+                              nativeTextures: !developer || nativeTextures, tso: !developer || tso,
+                              outputHeight: outputHeight, profiling: developer && profiling)
+            }.buttonStyle(.borderedProminent).tint(.cyan)
+            Picker("Affichage", selection: $scaling) {
+                Text("Ajuster").tag("fit")
+                Text("Remplir").tag("fill")
+                Text("Étirer").tag("stretch")
+            }.pickerStyle(.segmented).frame(maxWidth: 320)
+            Picker("Résolution du jeu", selection: $outputHeight) {
+                Text("1080p").tag(1080)
+                Text("720p").tag(720)
+            }.pickerStyle(.segmented).frame(maxWidth: 320)
+            Text("Résolution annoncée au jeu : 720p peut alléger le rendu si le jeu s’y adapte.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 320)
+            if developer {
+                Toggle("Textures Metal natives (expérimental)", isOn: $nativeTextures)
+                    .font(.footnote).frame(maxWidth: 320)
+                Toggle("Ordre mémoire x86 (TSO)", isOn: $tso)
+                    .font(.footnote).frame(maxWidth: 320)
+                Toggle("Profileur processeur (diagnostic)", isOn: $profiling)
+                    .font(.footnote).frame(maxWidth: 320)
+            }
+            Text("Ces réglages sont mémorisés pour ce jeu.")
+                .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: 320)
+        }
+        .padding(28)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+        .padding(24)
+    }
     // The touch controls plus every connected controller, as one DualShock 4.
     // `stickAsDpad` also presses the D-pad with the left stick (2D games that
     // read only the D-pad); the stick's analog position is always sent.
-    private static func padState(touch: UInt32, stickAsDpad: Bool) -> MaxPS4PadState {
+    private static func padState(_ touchPad: MaxPS4PadState, touchLeft: CGPoint, touchRight: CGPoint,
+                                 stickAsDpad: Bool) -> MaxPS4PadState {
         typealias P = MaxPS4PadState
-        var state = P.touch(touch)
-        var left: Float = 0.1, right: Float = 0.1 // Deflection to beat (dead zone first).
+        var state = touchPad
+        // Deflection to beat (dead zone first); the touch sticks compete too.
+        var left = max(0.1, Float(abs(touchLeft.x) + abs(touchLeft.y)))
+        var right = max(0.1, Float(abs(touchRight.x) + abs(touchRight.y)))
         func axis(_ value: Float) -> UInt8 { UInt8(max(0, min(255, ((value + 1) * 127.5).rounded()))) }
         func analog(_ value: Float) -> UInt8 { UInt8(max(0, min(255, (value * 255).rounded()))) }
         for controller in GCController.controllers() {
@@ -436,6 +484,22 @@ struct MaxPS4GameView: View {
         }
         return state
     }
+    // The touch buttons and sticks; with `stickAsDpad` the left stick also
+    // presses the D-pad (the touch arrows stay beside it).
+    private var touchPad: MaxPS4PadState {
+        typealias P = MaxPS4PadState
+        func axis(_ value: CGFloat) -> UInt8 { UInt8(max(0, min(255, ((value + 1) * 127.5).rounded()))) }
+        var state = P.touch(touch)
+        if leftStick != .zero { state.lx = axis(leftStick.x); state.ly = axis(leftStick.y) }
+        if rightStick != .zero { state.rx = axis(rightStick.x); state.ry = axis(rightStick.y) }
+        if stickAsDpad {
+            if leftStick.x < -0.3 { state.buttons |= P.left }
+            if leftStick.x > 0.3 { state.buttons |= P.right }
+            if leftStick.y < -0.3 { state.buttons |= P.up }
+            if leftStick.y > 0.3 { state.buttons |= P.down }
+        }
+        return state
+    }
     private static func gamepadConnected() -> Bool {
         GCController.controllers().contains { $0.extendedGamepad != nil || $0.microGamepad != nil }
     }
@@ -463,16 +527,24 @@ struct MaxPS4GameView: View {
                 Spacer(minLength: 0)
             }.padding(.top, 56)
             HStack(alignment: .bottom, spacing: 0) {
-                VStack(spacing: 0) {
-                    control("↑", label: "Haut", bit: 0x10, size: size)
-                    HStack(spacing: 0) {
-                        control("←", label: "Gauche", bit: 0x80, size: size)
-                        Color.clear.frame(width: size, height: size).allowsHitTesting(false)
-                        control("→", label: "Droite", bit: 0x20, size: size)
+                // The D-pad, then the left stick beside it.
+                HStack(alignment: .bottom, spacing: size * 0.25) {
+                    VStack(spacing: 0) {
+                        control("↑", label: "Haut", bit: 0x10, size: size)
+                        HStack(spacing: 0) {
+                            control("←", label: "Gauche", bit: 0x80, size: size)
+                            Color.clear.frame(width: size, height: size).allowsHitTesting(false)
+                            control("→", label: "Droite", bit: 0x20, size: size)
+                        }
+                        control("↓", label: "Bas", bit: 0x40, size: size)
                     }
-                    control("↓", label: "Bas", bit: 0x40, size: size)
+                    stickControl($leftStick, name: "L", label: "Stick gauche", size: size * 2)
                 }
                 Spacer(minLength: 0)
+                // Where a DualShock 4 has it: below and left of the face buttons.
+                if rightStickShown {
+                    stickControl($rightStick, name: "R", label: "Stick droit", size: size * 1.9).padding(.trailing, size * 0.25)
+                }
                 VStack(spacing: 0) {
                     control("△", label: "Triangle", bit: 0x1000, size: size)
                     HStack(spacing: 0) {
@@ -489,6 +561,35 @@ struct MaxPS4GameView: View {
         .accessibilityIdentifier("maxps4.game.controls")
     }
 
+    // A touch stick: full deflection at 80% of the radius; the knob stays inside the ring.
+    private func stickControl(_ stick: Binding<CGPoint>, name: String, label: LocalizedStringKey, size: CGFloat) -> some View {
+        let radius = size / 2, position = stick.wrappedValue, active = position != .zero
+        return ZStack {
+            Circle().fill(Color.black.opacity(0.25))
+                .overlay(Circle().stroke(active ? Color.cyan : Color.white.opacity(0.35), lineWidth: 1))
+            Text(verbatim: name).font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(active ? 1 : 0.85))
+                .frame(width: size * 0.42, height: size * 0.42)
+                .background(active ? Color.cyan.opacity(0.50) : Color.white.opacity(0.18), in: Circle())
+                .overlay(Circle().stroke(active ? Color.cyan : Color.white.opacity(0.35), lineWidth: 1))
+                .offset(x: position.x * radius * 0.6, y: position.y * radius * 0.6)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: .purple.opacity(active ? 0.45 : 0.15), radius: 6)
+        .contentShape(Circle())
+        .accessibilityLabel(label)
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                var x = (value.location.x - radius) / (radius * 0.8)
+                var y = (value.location.y - radius) / (radius * 0.8)
+                let length = (x * x + y * y).squareRoot()
+                if length > 1 { x /= length; y /= length }
+                stick.wrappedValue = CGPoint(x: x, y: y)
+                session.input(touchPad)
+            }
+            .onEnded { _ in stick.wrappedValue = .zero; session.input(touchPad) })
+    }
+
     private func control(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
         let pressed = touch & bit != 0
         return Text(name)
@@ -501,12 +602,12 @@ struct MaxPS4GameView: View {
             .contentShape(Circle())
             .accessibilityLabel(label).accessibilityAddTraits(.isButton)
             .accessibilityAction {
-                touch |= bit; session.input(MaxPS4PadState.touch(touch))
+                touch |= bit; session.input(touchPad)
                 touch &= ~bit
             }
             .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in touch |= bit; session.input(MaxPS4PadState.touch(touch)) }
-                .onEnded { _ in touch &= ~bit; session.input(MaxPS4PadState.touch(touch)) })
+                .onChanged { _ in touch |= bit; session.input(touchPad) }
+                .onEnded { _ in touch &= ~bit; session.input(touchPad) })
     }
 #endif
 }

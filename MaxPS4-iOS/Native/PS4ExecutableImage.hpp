@@ -19,7 +19,7 @@ public:
         uint64_t offset, address, fileSize, memorySize, alignment;
     };
     struct Segment { Header header; std::vector<uint8_t> bytes; };
-    static constexpr size_t memoryBudget = 32 * 1024 * 1024;
+    static constexpr size_t memoryBudget = 512 * 1024 * 1024;
     uint64_t entry = 0;
     uint16_t type = 0;
     bool isSelf = false, requiresLinker = false, requiresTLS = false;
@@ -38,7 +38,7 @@ public:
     }
     int load(const uint8_t* file, size_t size) {
         *this = PS4ExecutableImage{};
-        if (!file || size < 64 || size > 64 * 1024 * 1024) return -EINVAL;
+        if (!file || size < 64 || size > 512 * 1024 * 1024) return -EINVAL;
         try {
             PS4ExecutableImage pending;
             const int error = pending.parse(file, size);

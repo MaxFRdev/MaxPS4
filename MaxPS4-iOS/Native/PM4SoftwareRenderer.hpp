@@ -10,6 +10,7 @@
 // compute dispatches are counted but not run, instance 0 only. A reference,
 // not a fast path.
 #include "PM4DrawCollector.hpp"
+#include "PM4Blend.hpp"
 #include <cmath>
 
 namespace maxps4::gpu {
@@ -58,6 +59,7 @@ private:
     }
 
     bool render(const PM4Draw& d) {
+        if (!decodePM4Blend(d.blend).supported()) { stats.fail("blend mode"); return false; }
         GCNCodeCache vsCache, psCache;
         GCNImageCache images; // textures as they are for this draw
         std::vector<Vertex> vertices;
@@ -198,7 +200,7 @@ private:
                 std::uint8_t* p = pixels + 4 * column;
                 float dst[4];
                 for (unsigned k = 0; k < 4; ++k) dst[k] = float(p[order[d.swap][k]]) / 255.0f;
-                if ((d.blend >> 30) & 1) blendColor(d.blend, c, dst);
+                if ((d.blend >> 30) & 1) blendColor(d.blend, c, dst, d.blendConstant);
                 for (unsigned k = 0; k < 4; ++k) {
                     if (!((d.mask >> k) & 1)) continue;
                     const float v = std::isnan(c[k]) ? 0.0f : std::fmin(std::fmax(c[k], 0.0f), 1.0f);
@@ -210,8 +212,10 @@ private:
         }
         return true;
     }
-    // CB_BLEND0_CONTROL with an ADD combine; other functions keep the source.
-    static void blendColor(std::uint32_t control, float c[4], const float dst[4]) {
+    // UNORM blending; MIN/MAX compare unweighted components.
+    static void blendColor(std::uint32_t control, float c[4], const float dst[4], const float constant[4]) {
+        for (unsigned k = 0; k < 4; ++k)
+            c[k] = std::isnan(c[k]) ? 0.0f : std::fmin(std::fmax(c[k], 0.0f), 1.0f);
         auto factor = [&](unsigned code, unsigned k) -> float {
             switch (code) {
             case 0: return 0; case 1: return 1;
@@ -219,17 +223,24 @@ private:
             case 4: return c[3]; case 5: return 1 - c[3];
             case 6: return dst[3]; case 7: return 1 - dst[3];
             case 8: return dst[k]; case 9: return 1 - dst[k];
+            case 10: return k == 3 ? 1.0f : std::fmin(c[3], 1 - dst[3]);
+            case 13: return pm4BlendConstant(constant[k]);
+            case 14: return 1 - pm4BlendConstant(constant[k]);
+            case 19: return pm4BlendConstant(constant[3]);
+            case 20: return 1 - pm4BlendConstant(constant[3]);
             default: return 1;
             }
         };
-        const bool separate = (control >> 29) & 1;
+        const auto state = decodePM4Blend(control);
         float out[4];
         for (unsigned k = 0; k < 4; ++k) {
-            const bool alpha = k == 3 && separate;
-            const unsigned src = alpha ? (control >> 16) & 31 : control & 31;
-            const unsigned fn = alpha ? (control >> 21) & 7 : (control >> 5) & 7;
-            const unsigned dstFactor = alpha ? (control >> 24) & 31 : (control >> 8) & 31;
-            out[k] = fn == 0 ? c[k] * factor(src, k) + dst[k] * factor(dstFactor, k) : c[k];
+            const auto channel = k == 3 ? state.alpha : state.rgb;
+            if (channel.operation == 2) { out[k] = std::fmin(c[k], dst[k]); continue; }
+            if (channel.operation == 3) { out[k] = std::fmax(c[k], dst[k]); continue; }
+            const float source = c[k] * factor(channel.source, k);
+            const float destination = dst[k] * factor(channel.destination, k);
+            out[k] = channel.operation == 1 ? source - destination :
+                     channel.operation == 4 ? destination - source : source + destination;
         }
         for (unsigned k = 0; k < 4; ++k) c[k] = out[k];
     }

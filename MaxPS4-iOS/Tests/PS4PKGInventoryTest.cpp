@@ -359,8 +359,8 @@ int main() {
     assert(Plan::translateModule(staged, "eboot.bin", 0x2fff, 1, 1));
     assert(!Plan::translateModule(staged, "eboot.bin", 0x3000, 1, 1));
 
-    // A 32 MiB image is individually allowed, but three exceed the batch cap.
-    auto largeElf = syntheticElf(0xfe18, 0x3000, 32 * 1024 * 1024);
+    // A 192 MiB image is individually allowed, but three exceed the batch cap.
+    auto largeElf = syntheticElf(0xfe18, 0x3000, 192 * 1024 * 1024);
     batch = {
         {{"lib/a.prx", {}}, largeElf.data(), largeElf.size()},
         {{"lib/b.prx", {}}, largeElf.data(), largeElf.size()},
@@ -368,7 +368,7 @@ int main() {
     };
     assert(!Plan::prepareModules(batch, staged, graphDiagnostic));
     assert(staged.empty());
-    assert(graphDiagnostic.find("64 Mio") != std::string::npos);
+    assert(graphDiagnostic.find("512 Mio") != std::string::npos);
     std::puts("PASS PKG inventory: public layout, bounds, budgets, protection flags, ambiguity, exact I/O, C/Swift report ABI");
     std::puts("Synthetic fixtures only; no DRM, PFS extraction, PS4 executable admission or iPhone execution tested");
 }

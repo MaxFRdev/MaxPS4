@@ -139,9 +139,10 @@ on the actual device. Do not work around a permission denial.
    and preserve that entitlement. No dynamic-codesigning/allow-jit entitlement
    is fabricated. If debugserver refuses attach, inspect the ACTUAL re-signed
    entitlements/profile; an ad-hoc build's requested entitlement proves nothing.
-3. Follow StikDebug's official setup: Developer Mode where required, its pairing
-   file, appropriate developer disk image, VPN and supported connection. Pairing
-   information stays in StikDebug and is not imported/logged by MaxPS4.
+3. Follow StikDebug's official setup: Developer Mode where required, import the
+   same PairingFile used by SideStore (for example `ALTPairingFile.mobiledevicepairing`),
+   and configure the appropriate developer disk image, VPN and supported connection.
+   Keep this device-specific file in StikDebug; do not add it to the MaxPS4 IPA or logs.
 4. Open MaxPS4 → Diagnostic → Tester FEXCore first WITHOUT activation. Expected:
    real CPUID, initialization denied, interpreter result 42, no “JIT réussi”.
 5. Press **Activer avec StikDebug** in MaxPS4. Approve StikDebug's own request for

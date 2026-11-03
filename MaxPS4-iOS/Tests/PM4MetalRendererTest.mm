@@ -9,6 +9,8 @@
 #include "../Native/PM4GameMetalBridge.h"
 #include "../Native/PM4SoftwareRenderer.hpp"
 #include "GCNTestPrograms.h"
+#include "PM4BlendTestScene.h"
+#include "PM4PrimitiveTestScene.h"
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -144,6 +146,212 @@ int main() {
             ok = compare(name, pixels, arena.bytes.data() + (address - Arena::start)) && ok;
         }
         assert(ok);
+        // Offset-index packets must draw the same textured scene as DRAW_INDEX_2.
+        // A junk leading index makes treating the offset as bytes (or ignoring it)
+        // observable. Exercise both index widths through the real Metal renderer.
+        for (const unsigned indexBytes : {2u, 4u}) {
+            const std::uint64_t offsetBuffer = indexBuffer + indexBytes * 0x100;
+            for (unsigned k = 0; k < 4; ++k) {
+                const unsigned value = k ? k - 1 : 0xffff;
+                if (indexBytes == 2) arena.put16(offsetBuffer + k * indexBytes, std::uint16_t(value));
+                else arena.put(offsetBuffer + k * indexBytes, value);
+            }
+            auto words = s.words;
+            words.resize(words.size() - 6); // Replace the final DRAW_INDEX_2.
+            words.back() = indexBytes == 4 ? 1 : 0; // Its preceding INDEX_TYPE.
+            words.insert(words.end(), {0xc0012600, std::uint32_t(offsetBuffer), 0,
+                                       0xc0033500, 3, 1, 3, 0});
+            PM4DrawStats offsetStats;
+            PM4DrawCollector offsetCollector(arena.memory, offsetStats);
+            PM4MetalRenderer offsetRenderer(device, arena.memory, nil, 0);
+            id<MTLCommandBuffer> offsetCommands = [queue commandBuffer];
+            offsetCollector.execute(words.data(), words.size(), [&](const PM4Draw& draw) {
+                if (offsetRenderer.encode(draw, offsetCommands)) ++offsetStats.rendered;
+                else offsetStats.fail(offsetRenderer.error);
+            });
+            [offsetCommands commit]; [offsetCommands waitUntilCompleted];
+            assert(offsetCommands.status == MTLCommandBufferStatusCompleted && !offsetCommands.error);
+            assert(offsetStats.rendered == 3 && offsetStats.failed == 0);
+            std::uint8_t pixels[width * height * 4] = {};
+            readPixels(device, queue, offsetRenderer.target(targetB), pixels);
+            assert(compare(indexBytes == 2 ? "offset indices 16-bit" : "offset indices 32-bit",
+                           pixels, arena.bytes.data() + (targetB - Arena::start)));
+        }
+        // Fan conversion reaches the real GPU through the shared collector.
+        // Additive colour exposes double coverage on the shared diagonal.
+        for (const unsigned indexBytes : {0u, 2u, 4u}) {
+            Arena fanArena;
+            const auto words = pm4_primitive_test::scene(fanArena, 5, indexBytes);
+            PM4SoftwareRenderer reference(fanArena.memory);
+            reference.execute(words.data(), words.size());
+            assert(reference.stats.rendered == 1 && reference.stats.failed == 0);
+            PM4DrawStats fanStats;
+            PM4DrawCollector fanCollector(fanArena.memory, fanStats);
+            PM4MetalRenderer fanRenderer(device, fanArena.memory, nil, 0);
+            id<MTLCommandBuffer> fanCommands = [queue commandBuffer];
+            fanCollector.execute(words.data(), words.size(), [&](const PM4Draw& draw) {
+                if (fanRenderer.encode(draw, fanCommands)) ++fanStats.rendered;
+                else fanStats.fail(fanRenderer.error);
+            });
+            [fanCommands commit]; [fanCommands waitUntilCompleted];
+            assert(fanCommands.status == MTLCommandBufferStatusCompleted && !fanCommands.error);
+            assert(fanStats.rendered == 1 && fanStats.failed == 0);
+            std::uint8_t pixels[width * height * 4] = {}, expected[sizeof pixels] = {};
+            const unsigned bgra[] = {16, 32, 64, 64};
+            for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width / 2; ++x)
+                for (unsigned channel = 0; channel < 4; ++channel)
+                    expected[(y * width + x) * 4 + channel] = std::uint8_t(bgra[channel]);
+            readPixels(device, queue, fanRenderer.target(pm4_primitive_test::target), pixels);
+            assert(compare("triangle fan expected pixels", pixels, expected));
+            assert(compare("triangle fan CPU/GPU", pixels,
+                           fanArena.bytes.data() + (pm4_primitive_test::target - Arena::start)));
+        }
+        // Restart markers split fans/strips before they reach the shader.
+        // The marker names a valid central vertex; no bridge may reach the gap.
+        for (const unsigned primitive : {5u, 6u}) for (const unsigned indexBytes : {2u, 4u}) {
+            Arena restartArena;
+            const auto words = pm4_primitive_test::restartScene(restartArena, primitive, indexBytes);
+            PM4SoftwareRenderer reference(restartArena.memory);
+            reference.execute(words.data(), words.size());
+            assert(reference.stats.rendered == 1 && reference.stats.failed == 0);
+            PM4DrawStats restartStats;
+            PM4DrawCollector restartCollector(restartArena.memory, restartStats);
+            PM4MetalRenderer restartRenderer(device, restartArena.memory, nil, 0);
+            id<MTLCommandBuffer> restartCommands = [queue commandBuffer];
+            restartCollector.execute(words.data(), words.size(), [&](const PM4Draw& draw) {
+                if (restartRenderer.encode(draw, restartCommands)) ++restartStats.rendered;
+                else restartStats.fail(restartRenderer.error);
+            });
+            [restartCommands commit]; [restartCommands waitUntilCompleted];
+            assert(restartCommands.status == MTLCommandBufferStatusCompleted && !restartCommands.error);
+            assert(restartStats.rendered == 1 && restartStats.failed == 0);
+            std::uint8_t pixels[width * height * 4] = {}, expected[sizeof pixels] = {};
+            const unsigned bgra[] = {16,32,64,64};
+            for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x)
+                if (x < 4 || x >= 12) for (unsigned channel = 0; channel < 4; ++channel)
+                    expected[(y * width + x) * 4 + channel] = std::uint8_t(bgra[channel]);
+            readPixels(device, queue, restartRenderer.target(pm4_primitive_test::target), pixels);
+            assert(compare("primitive restart, expected pixels", pixels, expected));
+            assert(compare("primitive restart, CPU/GPU", pixels,
+                           restartArena.bytes.data() + (pm4_primitive_test::target - Arena::start)));
+        }
+        // Blend the same foreground/background with all supported operations.
+        // Compare GPU pixels to fixed expected bytes and the software renderer.
+        for (const auto& test : pm4_blend_test::cases) {
+            Arena blendArena;
+            pm4_blend_test::load(blendArena, test.source);
+            const auto words = pm4_blend_test::stream(test.control, test.mask, test.constant);
+            PM4SoftwareRenderer reference(blendArena.memory);
+            reference.execute(words.data(), words.size());
+            assert(reference.stats.rendered == 2 && reference.stats.failed == 0);
+            PM4DrawStats blendStats;
+            PM4DrawCollector blendCollector(blendArena.memory, blendStats);
+            PM4MetalRenderer blendRenderer(device, blendArena.memory, nil, 0);
+            id<MTLCommandBuffer> blendCommands = [queue commandBuffer];
+            blendCollector.execute(words.data(), words.size(), [&](const PM4Draw& draw) {
+                if (blendRenderer.encode(draw, blendCommands)) ++blendStats.rendered;
+                else blendStats.fail(blendRenderer.error);
+            });
+            [blendCommands commit]; [blendCommands waitUntilCompleted];
+            assert(blendCommands.status == MTLCommandBufferStatusCompleted && !blendCommands.error);
+            assert(blendStats.rendered == 2 && blendStats.failed == 0);
+            std::uint8_t pixels[width * height * 4] = {}, expected[sizeof pixels] = {};
+            constexpr unsigned bgra[] = {2, 1, 0, 3};
+            for (unsigned pixel = 0; pixel < width * height; ++pixel) for (unsigned channel = 0; channel < 4; ++channel)
+                expected[pixel * 4 + bgra[channel]] = std::uint8_t(test.expected[channel]);
+            readPixels(device, queue, blendRenderer.target(pm4_blend_test::target), pixels);
+            assert(compare(test.name, pixels, expected));
+            assert(compare(test.name, pixels, blendArena.bytes.data() + (pm4_blend_test::target - Arena::start)));
+        }
+        // Constants are dynamic state, not part of the pipeline cache key.
+        // Reuse both the pipeline and render pass while changing them.
+        {
+            Arena constantArena;
+            pm4_blend_test::load(constantArena);
+            PM4DrawStats constantStats;
+            PM4DrawCollector constantCollector(constantArena.memory, constantStats);
+            PM4MetalRenderer constantRenderer(device, constantArena.memory, nil, 0);
+            id<MTLCommandBuffer> constantCommands = [queue commandBuffer];
+            constantRenderer.beginBatch();
+            for (const auto value : {std::array<float,4>{0.25f,0.5f,0.75f,0.25f}, std::array<float,4>{1,0,0,1}}) {
+                const auto words = pm4_blend_test::stream(pm4_blend_test::enabled | 13, 15, value);
+                constantCollector.execute(words.data(), words.size(), [&](const PM4Draw& draw) {
+                    if (constantRenderer.encode(draw, constantCommands)) ++constantStats.rendered;
+                    else constantStats.fail(constantRenderer.error);
+                });
+            }
+            constantRenderer.endBatch();
+            [constantCommands commit]; [constantCommands waitUntilCompleted];
+            assert(constantCommands.status == MTLCommandBufferStatusCompleted && !constantCommands.error);
+            assert(constantStats.rendered == 4 && constantStats.failed == 0);
+            assert(constantRenderer.pipelinesBuilt == 2 && constantRenderer.renderPasses == 1);
+            std::uint8_t pixels[width * height * 4] = {}, expected[sizeof pixels] = {};
+            for (unsigned pixel = 0; pixel < width * height; ++pixel) {
+                expected[pixel * 4 + 2] = 191;
+                expected[pixel * 4 + 3] = 128;
+            }
+            readPixels(device, queue, constantRenderer.target(pm4_blend_test::target), pixels);
+            assert(compare("changed blend constants, cached pipeline and batched encoder", pixels, expected));
+        }
+        // A real translated pixel shader samples BC1 through BC5 through copied resource
+        // ranges. Native-texture mode must fall back to the same buffer decoder.
+        for (unsigned format : {35u,36u,37u,38u,39u}) for (unsigned number : {0u,1u}) {
+            if (number && format < 38) continue;
+            const unsigned blockBytes = (format == 35 || format == 38) ? 8 : 16;
+            Arena compressed;
+            compressed.bytes = arena.bytes;
+            for (unsigned block = 0; block < width * height / 16; ++block) {
+                auto at = image + block * blockBytes;
+                if (format >= 38) {
+                    for (unsigned c = 0; c < (format == 38 ? 1u : 2u); ++c) {
+                        const std::uint64_t channel = ((c ? 0x053977053977ull : 0xfac688fac688ull) << 16) |
+                            (number ? ((block + c) % 2 ? 0x7f80ull : 0x807full) : ((block + c) % 2 ? 0xff00ull : 0x00ffull));
+                        compressed.put(at + c * 8, std::uint32_t(channel));
+                        compressed.put(at + c * 8 + 4, std::uint32_t(channel >> 32));
+                    }
+                    continue;
+                }
+                if (format != 35) {
+                    const std::uint64_t alpha = format == 36 ? 0xfedcba9876543210ull :
+                        (0xfac688fac688ull << 16) | (block % 2 ? 0xff00ull : 0x00ffull);
+                    compressed.put(at, std::uint32_t(alpha));
+                    compressed.put(at + 4, std::uint32_t(alpha >> 32)); at += 8;
+                }
+                compressed.put(at, block % 2 ? 0xf80007e0 : 0x07e0f800);
+                compressed.put(at + 4, 0x934e39e4);
+            }
+            Stream bc1;
+            bc1.words = s.words; bc1.words.resize(bc1.words.size() - 6);
+            bc1.set(0x76, 0x0c, {std::uint32_t(image >> 8),(format << 20) | (number << 26),(width-1)|((height-1)<<14),
+                0x90800fac,(width-1)<<13,0,0,0,0x12,0,0x500000,0});
+            bc1.words.insert(bc1.words.end(), {0xc0042700,3,std::uint32_t(indexBuffer),0,3,0});
+            PM4SoftwareRenderer reference(compressed.memory);
+            reference.execute(bc1.words.data(), bc1.words.size());
+            assert(reference.stats.rendered == 3 && reference.stats.failed == 0);
+            for (const bool native : {false,true}) {
+                PM4DrawStats stats;
+                PM4DrawCollector collector(compressed.memory,stats);
+                PM4MetalRenderer renderer(device,compressed.memory,nil,0,native);
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                collector.execute(bc1.words.data(),bc1.words.size(),[&](const PM4Draw& draw) {
+                    if (renderer.encode(draw,command)) ++stats.rendered;
+                    else stats.fail(renderer.error);
+                });
+                [command commit]; [command waitUntilCompleted];
+                assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
+                if (stats.rendered != 3 || stats.failed != 0 || renderer.lastRanges != 2)
+                    std::printf("BC%u%s: %u rendered, %u failed (%s), %u ranges\n", format - 34, native ? " native" : "",
+                                stats.rendered, stats.failed, stats.error.c_str(), renderer.lastRanges);
+                assert(stats.rendered == 3 && stats.failed == 0 && renderer.lastRanges == 2);
+                assert(renderer.nativeDraws == 0);
+                std::uint8_t pixels[width * height * 4] = {};
+                readPixels(device,queue,renderer.target(targetB),pixels);
+                const std::string label = "BC" + std::to_string(format - 34) + (number ? " SNORM" : " UNORM") +
+                    (native ? " native-texture fallback" : " translated pixel shader");
+                assert(compare(label.c_str(),
+                               pixels,compressed.bytes.data() + (targetB - Arena::start)));
+            }
+        }
         // Prototype native texel reads: same pixels, with scene B's T# read
         // through a texture viewing the draw's buffer whenever Metal accepts
         // its alignment. Per-draw copies, then the whole guest window.
@@ -171,7 +379,8 @@ int main() {
                                arena.bytes.data() + (address - Arena::start)));
                 std::uint8_t buffered[sizeof pixels] = {};
                 readPixels(device, queue, metal.target(address), buffered);
-                assert(std::memcmp(pixels, buffered, sizeof pixels) == 0); // bit-identical to the buffer path
+                // Metal's sampler filters natively: within 2 levels of the buffer path.
+                assert(compare("native textures against the buffer path", pixels, buffered));
             }
         }
         std::printf("PASS native RGBA8 texture prototype matches the software renderer (%s, alignment %lu)\n",

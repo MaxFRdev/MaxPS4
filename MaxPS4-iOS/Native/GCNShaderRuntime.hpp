@@ -43,7 +43,7 @@ struct GCNRes4 { uint d[4]; };
 struct GCNMemory { const unsigned char* p; ulong base; ulong size; const ulong* ranges = nullptr; uint count = 0; };
 struct GCNPlane { float p0, p10, p20; };
 struct GCNLane {
-    uint user[17] = {};    // user SGPRs, then (pixel) the primitive mask
+    uint user[20] = {};    // user SGPRs, then (pixel) the primitive mask or (compute) group ids
     uint vinit[24] = {};   // initial VGPRs (vertex ids; pixel input layout)
     bool exec = true;      // this lane starts active (not a helper lane)
     uint quadLane = 0;     // 0-3: (x & 1) + 2 * (y & 1)
@@ -112,7 +112,12 @@ GCN_FN uint gcn_ld8(GCNMemory M, ulong a) { ulong o; if (!gcn_locate(M, a, 1, o)
 GCN_FN uint gcn_packed32(GCNMemory M, ulong o) { uint v; std::memcpy(&v, M.p + o, 4); return v; }
 GCN_FN uint gcn_packed16(GCNMemory M, ulong o) { std::uint16_t v; std::memcpy(&v, M.p + o, 2); return v; }
 GCN_FN uint gcn_packed8(GCNMemory M, ulong o) { return M.p[o]; }
+// Stores (compute programs): the memory they are given is writable.
+GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o; if (gcn_locate(M, a, 4, o)) std::memcpy(const_cast<unsigned char*>(M.p) + o, &v, 4); }
+GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o; std::uint16_t h = std::uint16_t(v); if (gcn_locate(M, a, 2, o)) std::memcpy(const_cast<unsigned char*>(M.p) + o, &h, 2); }
+GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o; if (gcn_locate(M, a, 1, o)) const_cast<unsigned char*>(M.p)[o] = (unsigned char)v; }
 GCN_FN bool gcn_native_texel(GCNMemory, GCNRes8, int, int, float4&) { return false; }
+GCN_FN bool gcn_native_sample(GCNMemory, GCNRes8, GCNRes4, bool, float, float, float4&) { return false; }
 #define GCN_SHARED_SOURCE(...) __VA_ARGS__
 #include "GCNShaderRuntimeShared.inc"
 #undef GCN_SHARED_SOURCE
