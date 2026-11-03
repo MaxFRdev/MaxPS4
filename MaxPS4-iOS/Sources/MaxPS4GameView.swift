@@ -10,7 +10,12 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
     private var lastTexture: MTLTexture?
     private let snapshots = DispatchQueue(label: "com.enermaxfr.maxps4.display-copy", qos: .userInteractive)
     private var snapshotID: UUID?
-    private var pendingTexture: MTLTexture?
+    private struct PendingFrame {
+        let texture: MTLTexture
+        let event: MTLSharedEvent?
+        let eventValue: UInt64
+    }
+    private var pendingFrame: PendingFrame?
     private var reportTime = ProcessInfo.processInfo.systemUptime
     private var reportFrames = 0
     // MTKView refresh callbacks (not the redraws a finished copy asks for):
@@ -38,7 +43,7 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
         }
     }
     func cancel() {
-        snapshotID = nil; pendingTexture = nil
+        snapshotID = nil; pendingFrame = nil
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsRedraw = true }
     // Each flip is copied into an owned texture and handed back to the game at
@@ -49,11 +54,11 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
         refreshes += 1
         guard !view.isPaused, view.drawableSize.width > 0, view.drawableSize.height > 0, let source else { return }
         // Acquire the drawable and encode only inside MTKView's draw cycle.
-        if let texture = pendingTexture {
-            pendingTexture = nil
-            present(texture, in: view)
+        if let frame = pendingFrame {
+            pendingFrame = nil
+            present(frame, in: view)
         } else if needsRedraw, let lastTexture {
-            present(lastTexture, in: view)
+            present(PendingFrame(texture: lastTexture, event: nil, eventValue: 0), in: view)
         }
         let refreshed = ProcessInfo.processInfo.systemUptime
         // A copy still running: the game gets this refresh's vblank anyway.
@@ -93,21 +98,26 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
                     // Shown on the next refresh, which also starts the next copy.
                     // Drawing at once here could wait for a free drawable and
                     // make the main thread miss every other refresh (31 Hz).
-                    self.pendingTexture = frame.texture
+                    self.pendingFrame = PendingFrame(texture: frame.texture, event: frame.event, eventValue: frame.eventValue)
                 case .failure(let error): self.failed(error.localizedDescription)
                 }
             }
         }
     }
-    private func present(_ texture: MTLTexture, in view: MTKView) {
+    private func present(_ frame: PendingFrame, in view: MTKView) {
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else {
-            pendingTexture = texture // Retry on the next draw cycle.
+            pendingFrame = frame // Retry on the next draw cycle.
             return
         }
-        guard let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+        guard let command = queue.makeCommandBuffer() else {
+            failed("Metal display command buffer allocation failed.")
+            return
+        }
+        if let event = frame.event { command.encodeWaitForEvent(event, value: frame.eventValue) }
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
             failed("Création de la présentation Metal impossible."); return
         }
-        MaxPS4VideoOutMetal.encode(encoder: encoder, pipeline: pipeline, texture: texture,
+        MaxPS4VideoOutMetal.encode(encoder: encoder, pipeline: pipeline, texture: frame.texture,
             output: view.drawableSize, fill: scaling == "fill", stretch: scaling == "stretch")
         encoder.endEncoding()
         command.addCompletedHandler { [weak self] buffer in
@@ -115,7 +125,7 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
             let reason = buffer.error?.localizedDescription ?? "statut \(buffer.status.rawValue)"
             DispatchQueue.main.async { self?.failed("Présentation Metal : échec de la commande GPU (\(reason)).") }
         }
-        lastTexture = texture
+        lastTexture = frame.texture
         needsRedraw = false
         command.present(drawable); command.commit()
     }

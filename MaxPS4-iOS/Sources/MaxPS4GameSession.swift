@@ -64,7 +64,13 @@ final class MaxPS4GameAudio: @unchecked Sendable {
 // The FEX worker owns execution and close. Concurrent display/input/stop calls
 // retain the engine under lock, using only the native concurrent APIs.
 final class MaxPS4GameSource: @unchecked Sendable {
-    struct Frame { let info: maxps4_videoout_frame; let texture: MTLTexture; let report: String }
+    struct Frame {
+        let info: maxps4_videoout_frame
+        let texture: MTLTexture
+        let event: MTLSharedEvent?
+        let eventValue: UInt64
+        let report: String
+    }
     private let lock = NSLock()
     private let inputLock = NSLock()
     private var engine: OpaquePointer?
@@ -355,6 +361,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
         // The retained bridge owns the texture copy. No engine pointer is used
         // here, so GPU completion need not block pad updates, vblank or stop.
         let copied = bridge.copyTarget(address: address, width: info.width, height: info.height)
+        let displayEvent = bridge.displayEvent
+        let displayEventValue = bridge.displayEventValue
         let timing = String(format: "Préparation : verrou session %.1f ms · cible %.1f ms · copie %.1f ms",
                             lockWait * 1000, (located - started - lockWait) * 1000,
                             (ProcessInfo.processInfo.systemUptime - located) * 1000)
@@ -366,7 +374,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
             return nil
         }
         missingSince = nil
-        return Frame(info: info, texture: texture, report: bridge.report + "\n" + timing)
+        return Frame(info: info, texture: texture, event: displayEvent, eventValue: displayEventValue,
+                     report: bridge.report + "\n" + timing)
     }
     @discardableResult func complete(ticket: UInt64, presented: Bool) -> Bool {
         lock.lock(); defer { lock.unlock() }

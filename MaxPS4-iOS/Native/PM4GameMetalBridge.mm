@@ -1,5 +1,7 @@
 #import "PM4GameMetalBridge.h"
 #include "PM4MetalRenderer.h"
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -27,6 +29,8 @@ struct GameMetalState {
     PM4MetalRenderer renderer;
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
+    id<MTLSharedEvent> displayEvent;
+    std::atomic<uint64_t> displayEventValue{0};
     std::string error;
     // The previous submission, still running on the GPU while the game goes on.
     id<MTLCommandBuffer> inflight;
@@ -83,15 +87,32 @@ struct GameMetalState {
           collector(memory, stats), renderer(device, memory, nil, 0, nativeTextures,
               writer ? std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>([writer](uint64_t a, const void* d, size_t n, uint64_t* f) { return int32_t(writer(a,d,n,f)); }) :
                        std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>{}), device(device),
-          queue([device newCommandQueue]), nativeTextures(nativeTextures) {}
+          queue([device newCommandQueue]), displayEvent([device newSharedEvent]), nativeTextures(nativeTextures) {}
 };
+void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::time_point started,
+                       id<MTLTexture> source, const std::vector<std::pair<uint64_t, id<MTLTexture>>>& targets,
+                       id<MTLBuffer> pixel) {
+    s.copyMs = elapsedMs(started); s.copyGpuMs = gpuMs(command);
+    if (!pixel) return;
+    const auto* bytes = static_cast<const uint8_t*>(pixel.contents);
+    std::memcpy(&s.centre, bytes, 4); s.centreBGRA = source.pixelFormat == MTLPixelFormatBGRA8Unorm;
+    s.targetPixels.clear();
+    for (size_t k = 0; k < targets.size(); ++k) {
+        char text[96];
+        const uint8_t* p = bytes + 4 * (k + 1);
+        std::snprintf(text, sizeof text, "\n  - 0x%llx %lux%lu %s : %u %u %u %u", (unsigned long long)targets[k].first,
+                      (unsigned long)targets[k].second.width, (unsigned long)targets[k].second.height,
+                      targets[k].second.pixelFormat == MTLPixelFormatBGRA8Unorm ? "BGRA" : "RGBA", p[0], p[1], p[2], p[3]);
+        s.targetPixels += text;
+    }
+}
 }
 @interface MaxPS4GameMetalBridge ()
 @property(atomic, copy) NSString* lastReport;
 @property(atomic, readwrite) double submitMilliseconds;
 @end
 @implementation MaxPS4GameMetalBridge {
-    std::unique_ptr<GameMetalState> state_;
+    std::shared_ptr<GameMetalState> state_;
 }
 - (instancetype)initWithDevice:(id<MTLDevice>)device reader:(MaxPS4GameMemoryReader)reader {
     return [self initWithDevice:device reader:reader writer:nil view:nil nativeTextures:NO];
@@ -108,7 +129,7 @@ struct GameMetalState {
                            view:(MaxPS4GameMemoryView)view nativeTextures:(BOOL)nativeTextures {
     if ((self = [super init])) {
         self.lastReport = @"Metal : préparation du premier rendu";
-        state_ = std::make_unique<GameMetalState>(device, [reader copy], [writer copy], nativeTextures);
+        state_ = std::make_shared<GameMetalState>(device, [reader copy], [writer copy], nativeTextures);
         if (!state_->queue) return nil;
         if (view) {
             MaxPS4GameMemoryView held = [view copy];
@@ -245,8 +266,7 @@ struct GameMetalState {
     [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
         sourceSize:MTLSizeMake(width,height,1) toTexture:texture destinationSlice:0 destinationLevel:0
         destinationOrigin:MTLOriginMake(0,0,0)];
-    // The centre pixel of the displayed image, then of every colour target,
-    // read back for the session report.
+    // Small readbacks keep the report useful without reading back an image.
     std::vector<std::pair<uint64_t, id<MTLTexture>>> targets;
     s.renderer.forEachTarget([&](uint64_t at, id<MTLTexture> t) { if (t && targets.size() < 8) targets.push_back({at, t}); });
     id<MTLBuffer> pixel = [s.device newBufferWithLength:4 * (1 + targets.size()) options:MTLResourceStorageModeShared];
@@ -260,40 +280,44 @@ struct GameMetalState {
            destinationBytesPerRow:4 destinationBytesPerImage:4];
     }
     [blit endEncoding];
+    if (s.displayEvent) {
+        const uint64_t eventValue = s.displayEventValue.fetch_add(1, std::memory_order_relaxed) + 1;
+        [command encodeSignalEvent:s.displayEvent value:eventValue];
+        auto heldState = state_;
+        [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+            @autoreleasepool {
+                auto& state = *heldState;
+                std::lock_guard<std::mutex> completionLock(state.mutex);
+                if (completed.status != MTLCommandBufferStatusCompleted || completed.error) {
+                    state.error = "Metal display copy failed";
+                    state.displayEvent.signaledValue = eventValue;
+                } else {
+                    recordDisplayCopy(state, completed, started, source, targets, pixel);
+                }
+                self.lastReport = state.report();
+            }
+        }];
+        [command commit];
+        s.copyMs = elapsedMs(started); // CPU encoding only; GPU completion is asynchronous.
+        self.lastReport = s.report();
+        return texture;
+    }
+
+    // Older devices without shared events keep the synchronous fallback.
     [command commit];
-    // The copy follows the game's submission on the GPU: wait without the
-    // lock, so the game can encode its next one meanwhile.
     lock.unlock();
     [command waitUntilCompleted];
     lock.lock();
     if (command.status != MTLCommandBufferStatusCompleted || command.error) {
         s.error = "Metal display copy failed"; return nil;
     }
-    s.copyMs = elapsedMs(started); s.copyGpuMs = gpuMs(command);
-    if (pixel) {
-        std::memcpy(&s.centre, pixel.contents, 4); s.centreBGRA = source.pixelFormat == MTLPixelFormatBGRA8Unorm;
-        s.targetPixels.clear();
-        s.samples.clear();
-        if (id<MTLBuffer> v = s.renderer.lastVisibility) {
-            const auto* counts = static_cast<const uint64_t*>(v.contents);
-            for (unsigned k = 0; k < s.renderer.lastVisibilityCount; ++k) {
-                char text[32];
-                std::snprintf(text, sizeof text, " %llu", (unsigned long long)counts[k]);
-                s.samples += text;
-            }
-        }
-        const auto* bytes = static_cast<const uint8_t*>(pixel.contents);
-        for (size_t k = 0; k < targets.size(); ++k) {
-            char text[96];
-            const uint8_t* p = bytes + 4 * (k + 1);
-            std::snprintf(text, sizeof text, "\n  - 0x%llx %lux%lu %s : %u %u %u %u", (unsigned long long)targets[k].first,
-                          (unsigned long)targets[k].second.width, (unsigned long)targets[k].second.height,
-                          targets[k].second.pixelFormat == MTLPixelFormatBGRA8Unorm ? "BGRA" : "RGBA", p[0], p[1], p[2], p[3]);
-            s.targetPixels += text;
-        }
-    }
+    recordDisplayCopy(s, command, started, source, targets, pixel);
     self.lastReport = s.report();
     return texture;
+}
+- (id<MTLSharedEvent>)displayEvent { return state_->displayEvent; }
+- (uint64_t)displayEventValue {
+    return state_->displayEventValue.load(std::memory_order_relaxed);
 }
 - (NSString*)report {
     // An immutable atomic snapshot: reading diagnostics must not wait for the
