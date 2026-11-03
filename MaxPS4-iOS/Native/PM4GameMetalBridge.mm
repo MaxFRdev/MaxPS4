@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -32,8 +33,9 @@ struct GameMetalState {
     id<MTLSharedEvent> displayEvent;
     std::atomic<uint64_t> displayEventValue{0};
     std::string error;
-    // The previous submission, still running on the GPU while the game goes on.
-    id<MTLCommandBuffer> inflight;
+    // Keep at most two render submissions ahead of the GPU. Metal preserves
+    // queue order; upload buffers remain owned by their command buffers.
+    std::deque<id<MTLCommandBuffer>> inflight;
     double encodeMs = 0, waitMs = 0, renderGpuMs = -1, copyMs = 0, copyGpuMs = -1;
     // Display copies: flipped buffers found among the colour targets or not
     // (then what the game shows was never drawn by Metal), and the last one.
@@ -147,26 +149,44 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         // draw reads, large textures excepted (read in place), is copied while
         // encoding (upload buffers are reused only once their command buffer
         // has completed, constants go by value), targets are GPU-only, and display
-        // copies follow on the same queue. One submission at a time stays in
-        // flight: the next one waits for it here, after the game's CPU work in
-        // between, without the lock, so display copies go on meanwhile.
+        // copies follow on the same queue. The queue preserves dependencies
+        // between submissions; cap queued work at two so a slow GPU cannot
+        // build an unbounded backlog.
         struct Leave { GameMetalState& s; ~Leave() { s.phase = 0; } } leave{s};
-        id<MTLCommandBuffer> previous = nil;
+        id<MTLCommandBuffer> waitFor = nil;
         s.enter(2);
-        { std::lock_guard<std::mutex> peek(s.mutex); previous = s.inflight; }
-        s.enter(1);
-        if (previous) [previous waitUntilCompleted];
+        {
+            std::lock_guard<std::mutex> peek(s.mutex);
+            while (!s.inflight.empty()) {
+                id<MTLCommandBuffer> front = s.inflight.front();
+                if (front.status != MTLCommandBufferStatusCompleted && front.status != MTLCommandBufferStatusError) break;
+                if (front.status != MTLCommandBufferStatusCompleted || front.error)
+                    s.error = front.error ? front.error.localizedDescription.UTF8String : "Metal GPU completion failed";
+                else if (gpuMs(front) >= 0) s.renderGpuMs = gpuMs(front);
+                s.inflight.pop_front();
+            }
+            if (s.inflight.size() >= 2) waitFor = s.inflight.front();
+        }
+        if (waitFor) {
+            s.enter(1);
+            [waitFor waitUntilCompleted];
+        }
         s.enter(2);
         std::lock_guard<std::mutex> lock(s.mutex);
         if (!s.error.empty()) return -EIO;
-        if (previous) {
-            s.inflight = nil;
+        s.waitMs = 0;
+        if (waitFor) {
             s.waitMs = elapsedMs(started);
-            if (previous.status != MTLCommandBufferStatusCompleted || previous.error) {
-                s.error = previous.error ? previous.error.localizedDescription.UTF8String : "Metal GPU completion failed";
-                return -EIO;
+            while (!s.inflight.empty()) {
+                id<MTLCommandBuffer> front = s.inflight.front();
+                if (front.status != MTLCommandBufferStatusCompleted && front.status != MTLCommandBufferStatusError) break;
+                if (front.status != MTLCommandBufferStatusCompleted || front.error) {
+                    s.error = front.error ? front.error.localizedDescription.UTF8String : "Metal GPU completion failed";
+                    return -EIO;
+                }
+                if (gpuMs(front) >= 0) s.renderGpuMs = gpuMs(front);
+                s.inflight.pop_front();
             }
-            if (gpuMs(previous) >= 0) s.renderGpuMs = gpuMs(previous);
         }
         const auto encodingStarted = Clock::now();
         id<MTLCommandBuffer> command = [s.queue commandBuffer];
@@ -229,11 +249,23 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         if (barrierFailure) return -EIO;
         if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }
         const double encoding = elapsedMs(encodingStarted);
-        [command commit];
-        if (segmentEncoded || s.stats.rendered != rendered) {
-            s.encodeMs = encoding;
-            s.inflight = command;
+        const bool hasRenderWork = segmentEncoded || s.stats.rendered != rendered;
+        if (hasRenderWork) {
+            auto heldState = state_;
+            [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+                @autoreleasepool {
+                    auto& state = *heldState;
+                    std::lock_guard<std::mutex> completionLock(state.mutex);
+                    if (completed.status != MTLCommandBufferStatusCompleted || completed.error)
+                        state.error = completed.error ? completed.error.localizedDescription.UTF8String : "Metal GPU completion failed";
+                    else if (gpuMs(completed) >= 0) state.renderGpuMs = gpuMs(completed);
+                    self.lastReport = state.report();
+                }
+            }];
+            s.inflight.push_back(command);
         }
+        [command commit];
+        if (hasRenderWork) s.encodeMs = encoding;
         self.submitMilliseconds += elapsedMs(started);
         self.lastReport = s.report();
         // The native queue retires synchronization packets only after this return.
