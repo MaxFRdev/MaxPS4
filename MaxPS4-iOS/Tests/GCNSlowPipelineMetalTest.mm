@@ -76,7 +76,8 @@ int slowPipelineTimes() {
         if (@available(macOS 15.0, iOS 18.0, *)) game.mathMode = MTLMathModeSafe;
         MTLCompileOptions* size = [game copy];
         size.optimizationLevel = MTLLibraryOptimizationLevelSize;
-        build(device, source + "\n// size\n", size, "optimise for size", 150);
+        build(device, source + "\n// size\n", size, "optimise for size", 120);
+        build(device, source, game, "game options", 120);
     }
     std::fflush(stdout);
     _exit(0); // Builds past their limit would slow every later measure.
