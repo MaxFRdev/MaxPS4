@@ -109,11 +109,19 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         // Metal compiles on its own threads: this submission and the next go
         // on without the draws (a new screen's large programs took the iPhone
         // over 10 s each, the game's image frozen meanwhile).
+        std::string programs = programWords("VS", d.vs, d.vsUser, d.vsUserCount);
+        if (d.vsUserCount >= 2) programs += programWords("Fetch", std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32, d.vsUser, 0);
+        programs += programWords("PS", d.ps, d.psUser, d.psUserCount);
+        programs += "
+Source Metal : " + std::to_string(source.size()) + " octets";
         auto async = async_;
         { std::lock_guard<std::mutex> lock(async->mutex);
-          async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation"}; }
+          async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation", std::move(programs)}; }
         auto finish = [async, key](id<MTLRenderPipelineState> state, NSError* error) {
             std::lock_guard<std::mutex> lock(async->mutex);
+            const auto built = async->pending.find(key);
+            if (built != async->pending.end())
+                async->slowest = std::max(async->slowest, std::chrono::duration<double>(std::chrono::steady_clock::now() - built->second.since).count());
             async->pending.erase(key);
             async->ready[key] = state;
             if (!state) async->lastError = error ? error.localizedDescription.UTF8String : "unknown";
@@ -147,6 +155,22 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     return state;
 }
 
+// The words of a program, to rebuild a slow pipeline in a test: up to the first
+// word that is no instruction, past s_endpgm for code it branches over.
+std::string PM4MetalRenderer::programWords(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) const {
+    std::vector<std::uint32_t> words;
+    for (std::uint32_t word = 0; words.size() < 4096 && code_.read(address + 4 * words.size(), &word, 4) && word;) words.push_back(word);
+    std::size_t end = 0;
+    for (GCNInstruction i; end < words.size() && decodeGCNInstruction(words.data() + end, words.size() - end, end, i) == GCNError::none;) end += i.size;
+    char text[64];
+    std::snprintf(text, sizeof text, "\n%s 0x%llx, %zu mots, SGPR :", stage, (unsigned long long)address, end);
+    std::string out = text;
+    for (unsigned k = 0; k < userCount && k < 16; ++k) { std::snprintf(text, sizeof text, " %x", user[k]); out += text; }
+    out += "\n   ";
+    for (std::size_t k = 0; k < end; ++k) { std::snprintf(text, sizeof text, " %08x", words[k]); out += text; }
+    return out;
+}
+
 std::string PM4MetalRenderer::pipelineStatus() const {
     std::lock_guard<std::mutex> lock(async_->mutex);
     if (async_->pending.empty()) return {};
@@ -154,10 +178,11 @@ std::string PM4MetalRenderer::pipelineStatus() const {
         [](const auto& a, const auto& b) { return a.second.since < b.second.since; });
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - oldest->second.since).count();
     char text[192];
-    std::snprintf(text, sizeof text, " · plus ancien : %s %.1f s, VS 0x%llx / PS 0x%llx",
+    std::snprintf(text, sizeof text, " · plus lent construit %.1f s · plus ancien : %s %.1f s, VS 0x%llx / PS 0x%llx", async_->slowest,
                   oldest->second.stage, seconds, (unsigned long long)std::get<0>(oldest->first),
                   (unsigned long long)std::get<1>(oldest->first));
-    return text;
+    // Long enough to be worth rebuilding on a Mac.
+    return seconds < 5 ? std::string(text) : text + oldest->second.programs;
 }
 
 MTLCompileOptions* PM4MetalRenderer::compileOptions() {

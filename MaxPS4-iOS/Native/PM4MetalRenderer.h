@@ -136,12 +136,13 @@ private:
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
     struct AsyncPipelines {
-        struct Pending { std::chrono::steady_clock::time_point since; const char* stage; };
+        struct Pending { std::chrono::steady_clock::time_point since; const char* stage; std::string programs; };
         std::mutex mutex;
         std::map<PipelineKey, Pending> pending;
         std::set<PipelineKey> refused;
         std::map<PipelineKey, id<MTLRenderPipelineState>> ready; // nil: refused
         std::string lastError;
+        double slowest = 0; // Seconds the slowest finished build took.
     };
     std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
     bool deferred_ = false; // the last pipeline() call left its draw to a pending build
@@ -159,6 +160,7 @@ private:
     id<MTLBuffer> visibility_ = nil;
     unsigned visibilityCount_ = 0;
     void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount, bool always = false);
+    std::string programWords(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) const;
     bool batching_ = false;
     id<MTLRenderCommandEncoder> encoder_ = nil;
     id<MTLCommandBuffer> commands_ = nil;
