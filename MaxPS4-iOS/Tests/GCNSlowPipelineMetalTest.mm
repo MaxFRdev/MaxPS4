@@ -2,7 +2,8 @@
 // finished on the iPhone (Mortal Kombat: Legacy Kollection, after choosing a
 // game; over 52 s, its draws deferred and the screen black), with its VS and
 // fetch shader as the session report listed them. Prints timings; a build
-// that outlasts its limit is reported and left running.
+// that outlasts its limit is reported and left running. Included by
+// GCNShaderCostMetalTest, which CI builds.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "../Native/GCNTranslator.hpp"
@@ -12,7 +13,6 @@
 #include <cstdlib>
 #include <sstream>
 #include <string>
-#include <unistd.h>
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
@@ -51,7 +51,7 @@ void build(id<MTLDevice> device, const std::string& source, MTLCompileOptions* o
     std::fflush(stdout);
 }
 }
-int main() {
+int slowPipelineTimes() {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) { std::puts("SKIP slow pipeline: no Metal device"); return 0; }
@@ -71,12 +71,12 @@ int main() {
         for (std::size_t at = 0; (at = ps.source.find("gcn_sample", at)) != std::string::npos; at += 10) ++samples;
         std::printf("SLOW source %zu bytes, PS %zu bytes, %zu lines, %zu sample calls\n", source.size(), ps.source.size(), lines, samples);
         MTLCompileOptions* game = [MTLCompileOptions new];
-        if (@available(macOS 15.0, iOS 18.0, *)) game.mathMode = MTLMathModeSafe; else game.fastMathEnabled = NO;
+        if (@available(macOS 15.0, iOS 18.0, *)) game.mathMode = MTLMathModeSafe;
         MTLCompileOptions* size = [game copy];
         size.optimizationLevel = MTLLibraryOptimizationLevelSize;
         build(device, source, game, "game options", 150);
         build(device, source + "\n// size\n", size, "optimise for size", 150);
     }
     std::fflush(stdout);
-    _exit(0); // Builds past their limit are still running.
+    return 0; // Builds past their limit go on in the background.
 }
