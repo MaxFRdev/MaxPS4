@@ -209,6 +209,8 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     // Copies of the ranges the program addresses, as for a draw (copy mode only).
     if (guest_) return fail("compute with a guest memory window");
     const auto& ranges = scanner_.scan(c);
+    if (!scanner_.dispatchError().empty())
+        return fail("compute resource scan stopped: " + scanner_.dispatchError());
     if (ranges.empty()) return fail("compute program addresses no memory");
     if (ranges.size() > 16) return fail("compute reads more than 16 memory ranges");
     auto stored = [&](std::uint64_t address, std::uint64_t length) {
