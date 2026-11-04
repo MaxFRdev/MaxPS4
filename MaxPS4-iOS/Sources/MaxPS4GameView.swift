@@ -293,6 +293,8 @@ struct MaxPS4GameView: View {
         .onAppear { MaxPS4Orientation.landscape() }
         .onDisappear { MaxPS4Orientation.release() }
         .persistentSystemOverlays(.hidden)
+        // Controls sit near the edges: touches there reach them first, not the system.
+        .defersSystemGestures(on: .all)
         .sheet(isPresented: $showingMenu) {
             NavigationStack {
                 ZStack {
