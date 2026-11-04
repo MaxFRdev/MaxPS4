@@ -201,7 +201,7 @@ struct MaxPS4GameView: View {
     @State private var fps = 0.0
     // Réglages › Mode développeur: test options and the technical session report.
     @AppStorage("maxps4.developer") private var developer = false
-    private let poll = Timer.publish(every: 1.0 / 60, on: .main, in: .common).autoconnect()
+    private let poll = Timer.publish(every: 1.0 / 120, on: .main, in: .common).autoconnect()
 #endif
     init(directory: URL) {
         self.directory = directory
