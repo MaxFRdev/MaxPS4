@@ -57,7 +57,7 @@ void build(id<MTLDevice> device, const std::string& source, MTLCompileOptions* o
 }
 int slowPipelineTimes() {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 240 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-        std::puts("SLOW watchdog after 240 s"); std::fflush(stdout); _exit(0);
+        std::puts("SLOW watchdog after 240 s"); std::fflush(stdout); _exit(1);
     });
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -85,5 +85,5 @@ int slowPipelineTimes() {
         build(device, source, game, "game options", 100);
     }
     std::fflush(stdout);
-    _exit(0); // Builds past their limit would slow every later measure.
+    _exit(1); // Research: end the job here, its log is lost if it reaches the 15 min limit.
 }
