@@ -126,7 +126,11 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
             if (!state) async->lastError = error ? error.localizedDescription.UTF8String : "unknown";
         };
         id<MTLDevice> device = device_;
-        [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:compileOptions()
+        // Large programs: the iPhone never finished one with default optimisation
+        // (over 52 s; 0.4 s on a Mac), its draws deferred and the screen black.
+        MTLCompileOptions* options = compileOptions();
+        if (@available(macOS 13.0, iOS 16.0, *)) if (source.size() > 60000) options.optimizationLevel = MTLLibraryOptimizationLevelSize;
+        [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options
                     completionHandler:^(id<MTLLibrary> library, NSError* error) {
             if (!library) { finish(nil, error); return; }
             { std::lock_guard<std::mutex> lock(async->mutex);

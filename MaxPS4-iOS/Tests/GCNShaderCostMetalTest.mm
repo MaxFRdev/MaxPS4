@@ -26,12 +26,10 @@ std::string replaced(std::string s, const std::string& from, const std::string& 
     return s;
 }
 }
-#include "GCNSlowPipelineMetalTest.mm"
 int main() {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) { std::puts("SKIP shader cost: no Metal device"); return 0; }
-        slowPipelineTimes();
         constexpr unsigned screenW = 1920, screenH = 1080, imageW = 512, imageH = 256;
         constexpr uint64_t texturedPS = 0x11400, image = 0x40000;
         Arena arena;
