@@ -580,6 +580,36 @@ int main() {
         assert(guestWrites.load() >= 5);
         assert([barrier.report containsString:@"Barrières compute : 5 ("] && [barrier.report containsString:@"CS 0x11000"]);
         std::puts("PASS compute barrier completes with submissions and display copies in flight");
+        // The same with Gnmx's fill: no kernel, no barrier, into guest memory
+        // or a target.
+        constexpr std::uint64_t fillCS = 0x12000, fillTable = 0x12200, fillLimits = 0x12300, fillGuest = 0x17000;
+        constexpr std::uint32_t fillValue = 0x80402010;
+        computeArena.code(fillCS, {0xbeeb03ff, 0xd, 0x8f6a860c, 0xc2060900, 0x4a00006a, 0xbf8c007f, 0x7da8000c, 0xbf88000a,
+                                   0xc2040901, 0xbf8c007f, 0x36020008, 0xe0002000, 0x80000101, 0xd1a80000, 0x00020006,
+                                   0xbf8c0f70, 0xe0102000, 0x80010100, 0xbf810000});
+        computeArena.put(fillTable, fillValue);
+        auto fill = [&](std::uint64_t destination, std::uint32_t count) {
+            computeArena.put(fillLimits, count); computeArena.put(fillLimits + 4, 0);
+            Stream stream;
+            stream.set(0x76,0x207,{64,1,1});
+            stream.set(0x76,0x20c,{std::uint32_t(fillCS>>8),0});
+            stream.set(0x76,0x213,{0x98}); // 12 user SGPRs, thread group id x
+            stream.set(0x76,0x240,{std::uint32_t(fillTable),4u<<16,1,0x20024004,std::uint32_t(destination),0x7000|4u<<16,count,0x18024004,
+                                   std::uint32_t(fillLimits),16u<<16,1,0x20077fac});
+            stream.words.insert(stream.words.end(),{0xc0031500U,(count+63)/64,1,1,1});
+            assert([barrier submit:stream.words.data() count:stream.words.size()] == 0);
+        };
+        fill(fillGuest,64);
+        if (![barrier.report containsString:@"remplissages 1 "]) std::printf("FAIL fill not recognised:\n%s\n", barrier.report.UTF8String);
+        assert([barrier.report containsString:@"Barrières compute : 5 ("] && [barrier.report containsString:@"remplissages 1 "]);
+        std::uint32_t filled[2]; assert(computeArena.memory.read(fillGuest+63*4,filled,8));
+        assert(filled[0] == fillValue && filled[1] == 0);
+        fill(targetB,width*height);
+        assert([barrier.report containsString:@"remplissages 2 "]);
+        std::uint8_t cleared[width*height*4]{};
+        readPixels(device,queue,[barrier copyTargetAtAddress:targetB width:width height:height],cleared);
+        for (unsigned n = 0; n < width*height; ++n) { std::uint32_t pixel; std::memcpy(&pixel,cleared+4*n,4); assert(pixel == fillValue); }
+        std::puts("PASS fill dispatches reach guest memory and targets without a kernel");
         const uint32_t bad[]={0};
         assert([bridge submit:bad count:1]!=0 && bridge.failure);
         assert([bridge submit:s.words.data() count:s.words.size()]!=0);

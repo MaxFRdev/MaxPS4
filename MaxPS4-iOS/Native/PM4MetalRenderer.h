@@ -53,6 +53,7 @@ public:
     // written back after the GPU.
     double dispatchCopyMs = 0, writebackMs = 0;
     std::uint64_t dispatchCopyBytes = 0, writebackBytes = 0;
+    unsigned fillsDone = 0; // Fill dispatches done without their kernel.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
     bool writebackGuestWrites();
@@ -150,6 +151,8 @@ private:
     static MTLCompileOptions* compileOptions();
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
+    bool fillProgram(std::uint64_t address);
+    bool fillDispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     id<MTLLibrary> library(const std::string& source);
     std::map<std::uint64_t, Target> targets_;
     std::vector<std::uint64_t> listed_;
@@ -171,6 +174,9 @@ private:
     static constexpr std::uint64_t sharedRangeBytes = 1ull << 20;
     struct Shared { id<MTLBuffer> buffer; std::uint64_t offset; }; // the range's first byte in `buffer`
     std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
+    std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_; // Guest ranges the GPU reads directly.
+    std::map<std::uint64_t, bool> fillPrograms_;
+    std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.
     id<MTLCommandBuffer> sharedOwner_ = nil;
     Shared sharedRange(std::uint64_t base, std::uint64_t size, bool texture, id<MTLCommandBuffer> commands);
     // Guest [address, address + size) into `out`; unreadable pages read as zero.

@@ -205,6 +205,87 @@ id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
     return state;
 }
 
+// Gnmx's buffer fill (cs_set_uint): out[i] = table[i & mask] below a count.
+bool PM4MetalRenderer::fillProgram(std::uint64_t address) {
+    const auto known = fillPrograms_.find(address);
+    if (known != fillPrograms_.end()) return known->second;
+    static const char* const expected[] = {
+        "s_mov_b32 vcc_hi, 0xd", "s_lshl_b32 vcc_lo, s12, 6", "s_buffer_load_dword s12, s[8:11], 0x0",
+        "v_add_i32 v0, vcc, vcc_lo, v0", "s_waitcnt lgkmcnt(0)", "v_cmpx_gt_u32 vcc, s12, v0", "s_cbranch_execz 18",
+        "s_buffer_load_dword s8, s[8:11], 0x1", "s_waitcnt lgkmcnt(0)", "v_and_b32 v1, s8, v0",
+        "buffer_load_format_x v1, v1, s[0:3], 0 idxen", "v_cmpx_gt_u32 s[0:1], s6, v0", "s_waitcnt vmcnt(0) lgkmcnt(15)",
+        "buffer_store_format_x v1, v0, s[4:7], 0 idxen", "s_endpgm"};
+    std::uint32_t words[32] = {};
+    bool same = code_.read(address, words, sizeof words);
+    std::size_t at = 0;
+    for (const char* line : expected) {
+        GCNInstruction i;
+        if (!same || decodeGCNInstruction(words + at, 32 - at, at, i) != GCNError::none || gcnDisassemble(i) != line) { same = false; break; }
+        at += i.size;
+    }
+    return fillPrograms_[address] = same;
+}
+
+// A fill without its kernel, whose lanes cost far more than the stores: a blit
+// into a target, or a write to guest memory. False: run it as any dispatch.
+bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> commands) {
+    if (c.userCount != 12 || (c.rsrc2 & 0x380) != 0x80 || c.threads[0] != 64 || c.threads[1] != 1 || c.threads[2] != 1 ||
+        c.groups[1] != 1 || c.groups[2] != 1 || !fillProgram(c.program)) return false;
+    auto base = [&](unsigned k) { return std::uint64_t(c.user[k]) | std::uint64_t(c.user[k + 1] & 0xfff) << 32; };
+    auto dwords = [&](unsigned k) { // One 32-bit uint per 4-byte record, unswizzled.
+        return ((c.user[k + 1] >> 16) & 0x3fff) == 4 && !(c.user[k + 1] >> 30) && (c.user[k + 3] & 7) == 4 &&
+               ((c.user[k + 3] >> 12) & 7) == 4 && ((c.user[k + 3] >> 15) & 15) == 4;
+    };
+    std::uint32_t limits[2], value = 0; // Count and mask.
+    if (!dwords(0) || !dwords(4) || !c.user[10] || !code_.read(base(8), limits, sizeof limits) || limits[1]) return false;
+    if (c.user[2] && !code_.read(base(0), &value, 4)) return false;
+    const std::uint64_t bytes = 4 * std::min<std::uint64_t>({std::uint64_t(c.groups[0]) * 64, limits[0], c.user[6]});
+    const std::uint64_t address = base(4);
+    if (!bytes || bytes > (256ull << 20)) return false;
+    auto overlaps = [&](std::uint64_t at, std::uint64_t length) { return address < at + length && at < address + bytes; };
+    Target* target = nullptr;
+    for (auto& [at, candidate] : targets_) {
+        if (!candidate.texture) continue;
+        const std::uint64_t row = candidate.texture.width * 4, length = row * candidate.texture.height;
+        if (!overlaps(at, length)) continue;
+        if (target || at != address || bytes % row || bytes > length || (candidate.fresh && bytes < length)) return false;
+        target = &candidate;
+    }
+    if (!target && !writeGuest_) return false;
+    if (!target) for (const auto& [at, length] : inPlace_) if (overlaps(at, length)) return false;
+    auto fill = fills_.find(value);
+    if (fill == fills_.end() || fill->second.length < bytes) {
+        if (fills_.size() >= 4) fills_.clear();
+        id<MTLBuffer> buffer = [device_ newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        if (!buffer) return false;
+        std::fill_n(static_cast<std::uint32_t*>(buffer.contents), bytes / 4, value);
+        fill = fills_.insert_or_assign(value, buffer).first;
+    }
+    if (target) {
+        if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; }
+        id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+        if (!blit) return false;
+        const std::uint64_t row = target->texture.width * 4;
+        [blit copyFromBuffer:fill->second sourceOffset:0 sourceBytesPerRow:row sourceBytesPerImage:bytes
+                  sourceSize:MTLSizeMake(target->texture.width, bytes / row, 1)
+                   toTexture:target->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        target->fresh = false;
+        ++dispatchesEncoded;
+        ++targetsSynced;
+    } else {
+        std::uint64_t failedAddress = address;
+        if (writeGuest_(address, fill->second.contents, bytes, &failedAddress) != 0) return false;
+        writebackBytes += bytes;
+        // Copies taken for this command buffer predate the fill.
+        for (auto it = shared_.begin(); it != shared_.end();)
+            it = overlaps(it->first.first, it->first.second) ? shared_.erase(it) : std::next(it);
+    }
+    ++fillsDone;
+    lastDispatchNote_ = target ? "remplissage d'une cible" : "remplissage de la memoire du jeu";
+    return true;
+}
+
 bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> commands) {
     error.clear();
     lastDispatchNote_.clear();
@@ -212,6 +293,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     const std::uint64_t tx = std::max(1u, c.threads[0]), ty = std::max(1u, c.threads[1]), tz = std::max(1u, c.threads[2]);
     // Copies of the ranges the program addresses, as for a draw (copy mode only).
     if (guest_) return fail("compute with a guest memory window");
+    if (fillDispatch(c, commands)) return true;
     const auto& ranges = scanner_.scan(c);
     if (!scanner_.dispatchError().empty())
         return fail("compute resource scan stopped: " + scanner_.dispatchError());
@@ -447,7 +529,7 @@ PM4MetalRenderer::Shared PM4MetalRenderer::sharedRange(std::uint64_t base, std::
         if (host && reinterpret_cast<std::uintptr_t>(host) % page == 0)
             shared = {[device_ newBufferWithBytesNoCopy:const_cast<void*>(host) length:end - start
                                                 options:MTLResourceStorageModeShared deallocator:nil], base - start};
-        if (shared.buffer) ++rangesMapped;
+        if (shared.buffer) { ++rangesMapped; inPlace_.insert({start, end - start}); }
     }
     if (!shared.buffer) {
         // At its guest address modulo 256, as in a draw's buffer (native texture views).
