@@ -371,7 +371,13 @@ struct MaxPS4GameView: View {
         // The game waits while its menu is open.
         .onChange(of: showingMenu) { _, open in session.setPaused(open) }
         .onDisappear { touch = 0; leftStick = .zero; rightStick = .zero; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { touch = 0; leftStick = .zero; rightStick = .zero; session.stop() } }
+        .onChange(of: scenePhase) { _, phase in
+            // Control Center or a call only interrupts: the game waits. The GPU
+            // is off limits in the background, so that ends the run.
+            guard phase != .active else { session.setPaused(showingMenu); return }
+            touch = 0; leftStick = .zero; rightStick = .zero
+            if phase == .inactive { session.input(MaxPS4PadState()); session.setPaused(true) } else { session.stop() }
+        }
         // A running game keeps the screen awake: auto-lock would stop it.
         .onChange(of: session.running, initial: true) { _, running in UIApplication.shared.isIdleTimerDisabled = running }
 #endif
