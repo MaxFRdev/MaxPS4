@@ -533,18 +533,28 @@ private:
         case 303: expr = "gcn_f16rtz(fa) | (gcn_f16rtz(fb) << 16)"; break;
         case 320: expr = "(fa == 0.0f || fb == 0.0f) ? gu(fc) : gu(fa * fb + fc)"; break;
         case 321: expr = "gu(fa * fb + fc)"; break;
+        case 322: expr = "uint(int(a << 8) >> 8) * uint(int(b << 8) >> 8) + c"; break;
         case 323: expr = "(a & 0xffffffu) * (b & 0xffffffu) + c"; break;
         case 324: case 325: case 326: case 327: expr = "gcn_cube(" + std::to_string(op) + "u, fa, fb, fc)"; break;
         case 328: expr = "(c & 31u) != 0u ? (a >> (b & 31u)) & ((1u << (c & 31u)) - 1u) : 0u"; break;
+        case 329: expr = "(c & 31u) != 0u ? uint(int(((a >> (b & 31u)) & ((1u << (c & 31u)) - 1u)) << (32u - (c & 31u))) >> (32u - (c & 31u))) : 0u"; break;
         case 330: expr = "(a & b) | (~a & c)"; break;
         case 331: expr = "gu(gcn_fma(fa, fb, fc))"; break;
         case 334: expr = "uint(((ulong(a) << 32) | ulong(b)) >> (c & 31u))"; break;
+        case 335: expr = "uint(((ulong(a) << 32) | ulong(b)) >> (8u * (c & 3u)))"; break;
         case 337: expr = "gu(gcn_fmin(gcn_fmin(fa, fb), fc))"; break;
+        case 338: expr = "uint(gcn_mini(gcn_mini(int(a), int(b)), int(c)))"; break;
+        case 339: expr = "gcn_minu(gcn_minu(a, b), c)"; break;
         case 340: expr = "gu(gcn_fmax(gcn_fmax(fa, fb), fc))"; break;
+        case 341: expr = "uint(gcn_maxi(gcn_maxi(int(a), int(b)), int(c)))"; break;
+        case 342: expr = "gcn_maxu(gcn_maxu(a, b), c)"; break;
         case 343: expr = "gu(gcn_med3(fa, fb, fc))"; break;
+        case 344: expr = "uint(gcn_maxi(gcn_mini(int(a), int(b)), gcn_mini(gcn_maxi(int(a), int(b)), int(c))))"; break;
+        case 345: expr = "gcn_maxu(gcn_minu(a, b), gcn_minu(gcn_maxu(a, b), c))"; break;
         case 349: expr = "(a > b ? a - b : b - a) + c"; break;
         case 361: case 363: expr = "a * b"; break;
         case 362: expr = "uint((ulong(a) * ulong(b)) >> 32)"; break;
+        case 364: expr = "uint(gcn_mul_i64(a, b) >> 32)"; break;
         case 374: case 375: {
             if (!vop3) return false;
             const std::string c64 = src[2] >= 256 ? "gcn_u64(" + v(src[2] - 256) + ", " + v(src[2] - 255) + ")" : scalar64(src[2], i);
