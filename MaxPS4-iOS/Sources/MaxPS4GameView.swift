@@ -371,7 +371,13 @@ struct MaxPS4GameView: View {
         // The game waits while its menu is open.
         .onChange(of: showingMenu) { _, open in session.setPaused(open) }
         .onDisappear { touch = 0; leftStick = .zero; rightStick = .zero; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { touch = 0; leftStick = .zero; rightStick = .zero; session.stop() } }
+        .onChange(of: scenePhase) { _, phase in
+            // An interruption, Control Center included (it reached .background on an
+            // iPhone 15 Pro Max), only pauses the game: its flips wait for the return.
+            guard phase != .active else { session.setPaused(showingMenu); return }
+            touch = 0; leftStick = .zero; rightStick = .zero
+            session.input(MaxPS4PadState()); session.setPaused(true)
+        }
         // A running game keeps the screen awake: auto-lock would stop it.
         .onChange(of: session.running, initial: true) { _, running in UIApplication.shared.isIdleTimerDisabled = running }
 #endif

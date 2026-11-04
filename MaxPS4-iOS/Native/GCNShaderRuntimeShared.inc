@@ -66,6 +66,10 @@ GCN_FN uint gcn_cube(uint op, float x, float y, float z) {
     else { id = x < 0.0f ? 1.0f : 0.0f; sc = x < 0.0f ? z : -z; tc = -y; ma = 2.0f * x; }
     return gu(op == 324u ? id : op == 325u ? sc : op == 326u ? tc : ma);
 }
+GCN_FN int gcn_mini(int a, int b) { return a < b ? a : b; }
+GCN_FN int gcn_maxi(int a, int b) { return a > b ? a : b; }
+GCN_FN uint gcn_minu(uint a, uint b) { return a < b ? a : b; }
+GCN_FN uint gcn_maxu(uint a, uint b) { return a > b ? a : b; }
 GCN_FN uint gcn_sel(uint sel, uint4 c, uint one) {
     if (sel >= 4u) return c[sel - 4u];
     return sel == 1u ? one : 0u;
