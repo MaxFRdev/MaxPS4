@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
@@ -75,9 +76,8 @@ int slowPipelineTimes() {
         if (@available(macOS 15.0, iOS 18.0, *)) game.mathMode = MTLMathModeSafe;
         MTLCompileOptions* size = [game copy];
         size.optimizationLevel = MTLLibraryOptimizationLevelSize;
-        build(device, source, game, "game options", 150);
         build(device, source + "\n// size\n", size, "optimise for size", 150);
     }
     std::fflush(stdout);
-    return 0; // Builds past their limit go on in the background.
+    _exit(0); // Builds past their limit would slow every later measure.
 }
