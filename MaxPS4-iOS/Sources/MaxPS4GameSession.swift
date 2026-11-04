@@ -105,6 +105,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var liveReport: URL?
     private var folderListing = "" // What /app0 holds, read once per run, under lock.
     private var vblanksSent = 0 // With vblankPort, under inputLock.
+    private var touchesArrived = 0, touchSeconds: TimeInterval = 0 // Under inputLock.
     private var vblankPort: UInt64 = 1
     private var lastTicket: UInt64 = 0
     private var relocation: UInt64 = 0
@@ -161,7 +162,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let missing = missingImports(engine)
         let compatibility = missing.called.isEmpty ? "" : "Fonctions PS4 manquantes appelées : \(missing.called.count) sur \(missing.total) absentes · "
             + missing.called.prefix(5).joined(separator: " · ") + "\n"
-        let text = compatibility + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
+        let text = compatibility + inputDelays(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
         if let liveReport {
             MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
@@ -330,6 +331,18 @@ final class MaxPS4GameSource: @unchecked Sendable {
         audio.setPaused(paused)
         inputLock.lock(); defer { inputLock.unlock() }
         if let inputEngine { maxps4_fex_engine_videoout_pause(inputEngine, paused ? 1 : 0) }
+    }
+    // How long presses took: iOS to the app (arrows), the app to the game's read.
+    func touchArrived(_ seconds: TimeInterval) {
+        inputLock.lock(); touchesArrived += 1; touchSeconds += seconds; inputLock.unlock()
+    }
+    private func inputDelays(_ engine: OpaquePointer) -> String {
+        var count: UInt64 = 0, total: UInt64 = 0, most: UInt64 = 0
+        maxps4_fex_engine_pad_latency(engine, &count, &total, &most)
+        inputLock.lock(); let touches = touchesArrived, seconds = touchSeconds; inputLock.unlock()
+        guard count > 0 else { return "" }
+        return String(format: "Commandes : %llu appuis lus par le jeu en %.1f ms en moyenne (au plus %.1f ms) · flèches : %ld touches livrées par iOS en %.1f ms en moyenne\n",
+                      count, Double(total) / Double(count) / 1000, Double(most) / 1000, touches, touches > 0 ? seconds * 1000 / Double(touches) : 0)
     }
     func input(_ pad: MaxPS4PadState) {
         inputLock.lock(); defer { inputLock.unlock() }
@@ -620,6 +633,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         }
     }
     func input(_ pad: MaxPS4PadState) { worker?.input(pad) }
+    func touchArrived(_ seconds: TimeInterval) { worker?.touchArrived(seconds) }
     func presented(_ text: String) { if running { hasPresented = true; report = text } }
     func failed(_ text: String) { stop(); stopping = nil; report = text }
     // The game menu's pause: no vblank and no audio read, so a game paced on

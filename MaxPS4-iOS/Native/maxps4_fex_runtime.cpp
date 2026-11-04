@@ -2107,6 +2107,9 @@ extern "C" int32_t maxps4_fex_engine_gnm_software_status(maxps4_fex_engine* engi
     }
     return 0;
 }
+extern "C" void maxps4_fex_engine_pad_latency(maxps4_fex_engine* engine, uint64_t* reads, uint64_t* total_us, uint64_t* most_us) {
+    if (engine && reads && total_us && most_us) engine->libkernel.pad().latency(*reads, *total_us, *most_us);
+}
 extern "C" int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint32_t buttons,
     uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected) {
     if (!engine || connected > 1) return -EINVAL;

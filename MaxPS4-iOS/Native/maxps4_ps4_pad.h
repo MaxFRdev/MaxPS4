@@ -1,6 +1,7 @@
 #pragma once
 #include "maxps4_ps4_guest_memory.h"
 #include "maxps4_ps4_abi.h"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <mutex>
@@ -52,12 +53,12 @@ public:
         wire[8] = connected_ ? l2_ : 0; wire[9] = connected_ ? r2_ : 0;
         ps4::put_le(wire.data(), 24, 0x3f800000, 4); // identity quaternion W
         wire[76] = connected_ ? 1 : 0;
-        const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto now = now_us();
         ps4::put_le(wire.data(), 80, uint64_t(now), 8);
         wire[104] = connections_;
         if (!memory_.write(output, wire.data(), wire.size())) return error(1);
         tapped_ = unread_ = 0;
+        if (pressed_at_) { const uint64_t delay = uint64_t(now) - pressed_at_; pressed_at_ = 0; ++press_reads_; press_total_ += delay; press_most_ = std::max(press_most_, delay); }
         return state ? 0 : 1;
     }
     int64_t information(int32_t handle, uint64_t output) {
@@ -75,25 +76,36 @@ public:
         std::lock_guard<std::mutex> lock(lock_);
         if (connected && !connected_ && connections_ != UINT8_MAX) ++connections_;
         if (!connected) buttons = 0;
+        if (buttons & ~buttons_ && !pressed_at_) pressed_at_ = now_us();
         unread_ |= buttons & ~buttons_;
         tapped_ |= buttons_ & ~buttons & unread_; unread_ &= buttons;
         connected_ = connected; buttons_ = buttons;
         axes_ = axes; l2_ = l2; r2_ = r2; return 0;
     }
+    void latency(uint64_t& reads, uint64_t& total, uint64_t& most) {
+        std::lock_guard<std::mutex> lock(lock_);
+        reads = press_reads_; total = press_total_; most = press_most_;
+    }
     void reset() {
         std::lock_guard<std::mutex> lock(lock_);
         initialized_ = connected_ = false; handle_ = 0; buttons_ = tapped_ = unread_ = 0;
+        pressed_at_ = 0;
         axes_.fill(128); l2_ = r2_ = connections_ = 0;
         // next_ survives reset so an old handle cannot name a reopened pad.
     }
 private:
     bool valid(int32_t handle) const { return initialized_ && handle_ && handle_ == handle; }
+    static uint64_t now_us() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
     PS4GuestMemory& memory_;
     std::mutex lock_;
     bool initialized_ = false, connected_ = false;
     int32_t handle_ = 0, next_ = 1;
     // unread_: pressed since the last read; tapped_: those released before it.
     uint32_t buttons_ = 0, unread_ = 0, tapped_ = 0;
+    // When the oldest unread press came, and how long presses waited for a read.
+    uint64_t pressed_at_ = 0, press_reads_ = 0, press_total_ = 0, press_most_ = 0;
     std::array<uint8_t, 4> axes_{{128,128,128,128}};
     uint8_t l2_ = 0, r2_ = 0, connections_ = 0;
 };
