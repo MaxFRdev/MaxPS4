@@ -407,7 +407,7 @@ private:
         // without rasterization.
         const std::string n = std::to_string(count);
         if (i.opcode >= 8) {
-            body_ += "{ ulong o = " + offset + "; ulong a = gcn_u64(" + s(base) + ", " + s(base + 1) + " & 0xffffu) + o; "
+            body_ += "{ ulong o = " + offset + "; ulong a = gcn_u64(" + s(base) + ", " + s(base + 1) + " & 0xfffu) + o; "
                      "uint stride = (" + s(base + 1) + " >> 16) & 0x3fffu; "
                      "ulong lim = stride != 0u ? ulong(" + s(base + 2) + ") * stride : ulong(" + s(base + 2) + "); ";
             if (count == 1) setScalar(d, "(o + 4ul <= lim) ? gcn_ld32(M, a) : 0u");

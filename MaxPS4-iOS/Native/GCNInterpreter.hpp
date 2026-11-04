@@ -403,7 +403,7 @@ private:
         std::uint64_t address;
         std::uint64_t limit = std::numeric_limits<std::uint64_t>::max();
         if (i.opcode >= 8) { // s_buffer_load: V# base; NUM_RECORDS counts STRIDE-byte records (bytes if 0)
-            address = (std::uint64_t(s[base]) | std::uint64_t(s[base + 1] & 0xffff) << 32) + offset;
+            address = (std::uint64_t(s[base]) | std::uint64_t(s[base + 1] & 0xfff) << 32) + offset;
             const std::uint32_t stride = (s[base + 1] >> 16) & 0x3fff;
             limit = stride ? std::uint64_t(s[base + 2]) * stride : s[base + 2];
         } else {
@@ -689,7 +689,7 @@ private:
         const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
         if ((w >> 15) & 1) return fail("addr64 buffer access");
         const std::uint32_t* d = &s[rsrc];
-        const std::uint64_t base = std::uint64_t(d[0]) | std::uint64_t(d[1] & 0xffff) << 32;
+        const std::uint64_t base = std::uint64_t(d[0]) | std::uint64_t(d[1] & 0xfff) << 32; // 44 bits, then the memory type
         const std::uint32_t stride = (d[1] >> 16) & 0x3fff, records = d[2];
         const std::uint32_t soffset = scalar(w1 >> 24, i), instOffset = w & 0xfff;
         const unsigned dst_sel[4] = {d[3] & 7, (d[3] >> 3) & 7, (d[3] >> 6) & 7, (d[3] >> 9) & 7};
