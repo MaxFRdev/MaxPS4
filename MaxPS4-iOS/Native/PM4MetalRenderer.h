@@ -180,6 +180,9 @@ private:
     std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
     std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_; // Guest ranges the GPU reads directly.
     std::set<std::uint64_t> costly_;
+    struct Decoded { id<MTLTexture> texture; std::uint64_t mark; };
+    std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, Decoded> bc7Textures_;
+    id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch);
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
     std::map<std::uint64_t, bool> fillPrograms_;
     std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.

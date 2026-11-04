@@ -2,6 +2,13 @@
 #include "GCNTranslator.hpp"
 #include "PM4ResourceScan.hpp"
 #include "PM4Blend.hpp"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wall"
+#pragma clang diagnostic ignored "-Wextra"
+#define BCDEC_STATIC
+#define BCDEC_IMPLEMENTATION
+#include "bcdec.h"
+#pragma clang diagnostic pop
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -629,6 +636,40 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
     return buffer;
 }
 
+// A BC7 T# in tile mode 13 (Thin_1dThin: blocks in 8x8 micro tiles, Morton
+// order inside) decoded once into a texture: Metal cannot sample it on iPhone.
+id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch) {
+    const std::uint64_t blocksWide = (pitch + 3) / 4, blocksHigh = (height + 3) / 4;
+    const std::uint64_t tilesWide = (blocksWide + 7) / 8, tilesHigh = (blocksHigh + 7) / 8;
+    const std::uint64_t bytes = tilesWide * tilesHigh * 64 * 16;
+    if (!bytes || bytes > (64ull << 20)) return nil;
+    // The start of the data tells a reloaded texture from the one decoded.
+    std::uint8_t start[4096] = {};
+    copyGuest(base, start, std::min<std::uint64_t>(bytes, sizeof start));
+    std::uint64_t mark = 1469598103934665603ull;
+    for (const std::uint8_t byte : start) mark = (mark ^ byte) * 1099511628211ull;
+    const auto key = std::make_tuple(base, width, height);
+    const auto found = bc7Textures_.find(key);
+    if (found != bc7Textures_.end() && found->second.mark == mark) return found->second.texture;
+    std::vector<std::uint8_t> blocks(bytes);
+    copyGuest(base, blocks.data(), bytes);
+    const std::uint64_t rowBytes = blocksWide * 16;
+    std::vector<std::uint8_t> pixels(rowBytes * blocksHigh * 4);
+    for (std::uint64_t y = 0; y < blocksHigh; ++y) for (std::uint64_t x = 0; x < blocksWide; ++x) {
+        const std::uint64_t morton = (x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3;
+        const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * 16;
+        bcdec_bc7(blocks.data() + at, pixels.data() + y * 4 * rowBytes + x * 16, int(rowBytes));
+    }
+    auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
+    if (!texture) return nil;
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
+    if (bc7Textures_.size() >= 32) bc7Textures_.clear();
+    bc7Textures_[key] = {texture, mark};
+    return texture;
+}
+
 id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
                                                const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing) {
     // dfmt 8_8_8_8 or 5_6_5 (gcn_texel_at reads both as unorm whatever the nfmt), linear tiling.
@@ -644,6 +685,11 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         nativeLastMiss = text;
         return nil;
     };
+    if (dfmt == 41) {
+        if (((t[3] >> 20) & 31) != 13 || ((t[1] >> 26) & 15) != 0) return miss(1, 0);
+        id<MTLTexture> decoded = bc7Texture(base, width, height, pitch);
+        return decoded ? decoded : miss(4, 0);
+    }
     // A colour target lives only in its Metal texture, never written back to
     // guest memory: an 8_8_8_8 T# at its address reads it there (an emulator
     // renders its console's frame, then draws that frame scaled on screen).
