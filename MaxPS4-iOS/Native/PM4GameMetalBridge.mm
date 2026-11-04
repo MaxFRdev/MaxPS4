@@ -79,7 +79,7 @@ struct GameMetalState {
         const std::string refusal = renderer.pipelineError();
         const std::string pending = renderer.pipelineStatus();
         native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u en cours, %u refusés · %u dessins reportés%s%s%s%@",
-            renderer.pipelinesBuilt, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
+            renderer.pipelinesBuilt, renderer.pipelinesReplaced, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
             refusal.empty() ? "" : " · dernier refus : ", refusal.c_str(), pending.c_str(), native];
         native = [NSString stringWithFormat:@"\nBarrières compute : %u (%u au plus par lot) · remplissages %u · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%s%s%@",
             barriers, mostBarriers, renderer.fillsDone, barrierMs, renderer.dispatchCopyMs, double(renderer.dispatchCopyBytes) / (1 << 20),
@@ -285,6 +285,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             std::vector<std::pair<std::uint64_t, std::pair<double, unsigned>>> costs(drawCosts.begin(), drawCosts.end());
             std::sort(costs.begin(), costs.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
             s.programCosts.clear();
+            for (size_t k = 0; k < costs.size() && k < 2; ++k) s.renderer.listCostly(costs[k].first);
             for (size_t k = 0; k < costs.size() && k < 8; ++k) {
                 char text[80];
                 std::snprintf(text, sizeof text, " · PS 0x%llx %.1f ms (%u)", (unsigned long long)costs[k].first,

@@ -53,8 +53,6 @@ std::string inputKey(const PM4Draw& d) {
 id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format) {
     const PipelineKey key{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
                           (d.blend >> 30) & 1 ? d.blend : 0u, d.mask};
-    const auto found = pipelines_.find(key);
-    if (found != pipelines_.end()) return found->second;
     if (asyncPipelines) {
         std::lock_guard<std::mutex> lock(async_->mutex);
         const auto ready = async_->ready.find(key);
@@ -62,9 +60,18 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
             id<MTLRenderPipelineState> built = ready->second;
             async_->ready.erase(ready);
             // A pipeline Metal refused stays deferred: its draws are skipped.
-            if (built) { ++pipelinesBuilt; pipelines_[key] = built; return built; }
-            async_->refused.insert(key);
+            if (built) {
+                if (pipelines_.count(key)) ++pipelinesReplaced; else ++pipelinesBuilt;
+                pipelines_[key] = built;
+                return built;
+            }
+            if (!pipelines_.count(key)) async_->refused.insert(key);
         }
+    }
+    const auto found = pipelines_.find(key);
+    if (found != pipelines_.end()) return found->second;
+    if (asyncPipelines) {
+        std::lock_guard<std::mutex> lock(async_->mutex);
         if (async_->pending.count(key) || async_->refused.count(key)) { deferred_ = true; return nil; }
     }
     GCNTranslateOptions vsOptions;
@@ -116,9 +123,13 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         auto async = async_;
         { std::lock_guard<std::mutex> lock(async->mutex);
           async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation", std::move(programs)}; }
-        auto finish = [async, key](id<MTLRenderPipelineState> state, NSError* error) {
+        // `fast`: built with default optimisation. A size build shows the draws
+        // first; a fast build replaces it, and is never replaced by one.
+        auto finish = [async, key](id<MTLRenderPipelineState> state, NSError* error, bool fast) {
             std::lock_guard<std::mutex> lock(async->mutex);
             const auto built = async->pending.find(key);
+            if (built == async->pending.end() && (!state || !fast)) return;
+            if (!fast && !state) return; // The default build may still succeed.
             if (built != async->pending.end())
                 async->slowest = std::max(async->slowest, std::chrono::duration<double>(std::chrono::steady_clock::now() - built->second.since).count());
             async->pending.erase(key);
@@ -126,23 +137,32 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
             if (!state) async->lastError = error ? error.localizedDescription.UTF8String : "unknown";
         };
         id<MTLDevice> device = device_;
-        // Default optimisation never finished some programs on the iPhone, large or
-        // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
-        // deferred and the screen black.
-        MTLCompileOptions* options = compileOptions();
-        if (@available(macOS 13.0, iOS 16.0, *)) options.optimizationLevel = MTLLibraryOptimizationLevelSize;
-        [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options
-                    completionHandler:^(id<MTLLibrary> library, NSError* error) {
-            if (!library) { finish(nil, error); return; }
-            { std::lock_guard<std::mutex> lock(async->mutex);
-              const auto pending = async->pending.find(key);
-              if (pending != async->pending.end()) pending->second.stage = "render pipeline creation"; }
-            descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
-            descriptor.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
-            [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
-                finish(state, failed);
+        NSString* text = [NSString stringWithUTF8String:source.c_str()];
+        auto build = [=](MTLCompileOptions* options, bool fast) {
+            [device newLibraryWithSource:text options:options completionHandler:^(id<MTLLibrary> library, NSError* error) {
+                if (!library) { finish(nil, error, fast); return; }
+                { std::lock_guard<std::mutex> lock(async->mutex);
+                  const auto pending = async->pending.find(key);
+                  if (pending != async->pending.end()) pending->second.stage = "render pipeline creation"; }
+                MTLRenderPipelineDescriptor* own = [descriptor copy];
+                own.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
+                own.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
+                [device newRenderPipelineStateWithDescriptor:own completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
+                    finish(state, failed, fast);
+                }];
             }];
-        }];
+        };
+        build(compileOptions(), true);
+        // Default optimisation did not finish some programs on the iPhone, large or
+        // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
+        // deferred and the screen black. Metal caches whichever build completes.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            { std::lock_guard<std::mutex> lock(async->mutex);
+              if (!async->pending.count(key)) return; }
+            MTLCompileOptions* size = compileOptions();
+            if (@available(macOS 13.0, iOS 16.0, *)) size.optimizationLevel = MTLLibraryOptimizationLevelSize;
+            build(size, false);
+        });
         deferred_ = true;
         return nil;
     }
@@ -159,11 +179,12 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     return state;
 }
 
-// The words of a program, to rebuild a slow pipeline in a test: up to the first
+// The words of a program, to study a slow pipeline: up to the first
 // word that is no instruction, past s_endpgm for code it branches over.
 std::string PM4MetalRenderer::programWords(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) const {
     std::vector<std::uint32_t> words;
-    for (std::uint32_t word = 0; words.size() < 4096 && code_.read(address + 4 * words.size(), &word, 4) && word;) words.push_back(word);
+    unsigned zeros = 0;
+    for (std::uint32_t word = 0; words.size() < 4096 && zeros < 4 && code_.read(address + 4 * words.size(), &word, 4);) { words.push_back(word); zeros = word ? 0 : zeros + 1; }
     std::size_t end = 0;
     for (GCNInstruction i; end < words.size() && decodeGCNInstruction(words.data() + end, words.size() - end, end, i) == GCNError::none;) end += i.size;
     char text[64];
@@ -173,6 +194,10 @@ std::string PM4MetalRenderer::programWords(const char* stage, std::uint64_t addr
     out += "\n   ";
     for (std::size_t k = 0; k < end; ++k) { std::snprintf(text, sizeof text, " %08x", words[k]); out += text; }
     return out;
+}
+
+void PM4MetalRenderer::listCostly(std::uint64_t address) {
+    if (costly_.insert(address).second) programListings += programWords("PS couteux", address, nullptr, 0);
 }
 
 std::string PM4MetalRenderer::pipelineStatus() const {

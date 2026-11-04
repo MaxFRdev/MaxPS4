@@ -54,6 +54,8 @@ public:
     double dispatchCopyMs = 0, writebackMs = 0;
     std::uint64_t dispatchCopyBytes = 0, writebackBytes = 0;
     unsigned fillsDone = 0; // Fill dispatches done without their kernel.
+    unsigned pipelinesReplaced = 0; // Size builds replaced by their default build.
+    void listCostly(std::uint64_t address); // Adds a program's words to programListings, once.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
     bool writebackGuestWrites();
@@ -177,6 +179,7 @@ private:
     struct Shared { id<MTLBuffer> buffer; std::uint64_t offset; }; // the range's first byte in `buffer`
     std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
     std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_; // Guest ranges the GPU reads directly.
+    std::set<std::uint64_t> costly_;
     std::map<std::uint64_t, bool> fillPrograms_;
     std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.
     id<MTLCommandBuffer> sharedOwner_ = nil;
