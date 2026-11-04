@@ -10,7 +10,12 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
     private var lastTexture: MTLTexture?
     private let snapshots = DispatchQueue(label: "com.enermaxfr.maxps4.display-copy", qos: .userInteractive)
     private var snapshotID: UUID?
-    private var pendingTexture: MTLTexture?
+    private struct PendingFrame {
+        let texture: MTLTexture
+        let event: MTLSharedEvent?
+        let eventValue: UInt64
+    }
+    private var pendingFrame: PendingFrame?
     private var reportTime = ProcessInfo.processInfo.systemUptime
     private var reportFrames = 0
     // MTKView refresh callbacks (not the redraws a finished copy asks for):
@@ -38,7 +43,7 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
         }
     }
     func cancel() {
-        snapshotID = nil; pendingTexture = nil
+        snapshotID = nil; pendingFrame = nil
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsRedraw = true }
     // Each flip is copied into an owned texture and handed back to the game at
@@ -49,11 +54,11 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
         refreshes += 1
         guard !view.isPaused, view.drawableSize.width > 0, view.drawableSize.height > 0, let source else { return }
         // Acquire the drawable and encode only inside MTKView's draw cycle.
-        if let texture = pendingTexture {
-            pendingTexture = nil
-            present(texture, in: view)
+        if let frame = pendingFrame {
+            pendingFrame = nil
+            present(frame, in: view)
         } else if needsRedraw, let lastTexture {
-            present(lastTexture, in: view)
+            present(PendingFrame(texture: lastTexture, event: nil, eventValue: 0), in: view)
         }
         let refreshed = ProcessInfo.processInfo.systemUptime
         // A copy still running: the game gets this refresh's vblank anyway.
@@ -93,21 +98,26 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
                     // Shown on the next refresh, which also starts the next copy.
                     // Drawing at once here could wait for a free drawable and
                     // make the main thread miss every other refresh (31 Hz).
-                    self.pendingTexture = frame.texture
+                    self.pendingFrame = PendingFrame(texture: frame.texture, event: frame.event, eventValue: frame.eventValue)
                 case .failure(let error): self.failed(error.localizedDescription)
                 }
             }
         }
     }
-    private func present(_ texture: MTLTexture, in view: MTKView) {
+    private func present(_ frame: PendingFrame, in view: MTKView) {
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else {
-            pendingTexture = texture // Retry on the next draw cycle.
+            pendingFrame = frame // Retry on the next draw cycle.
             return
         }
-        guard let command = queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+        guard let command = queue.makeCommandBuffer() else {
+            failed("Metal display command buffer allocation failed.")
+            return
+        }
+        if let event = frame.event { command.encodeWaitForEvent(event, value: frame.eventValue) }
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
             failed("Création de la présentation Metal impossible."); return
         }
-        MaxPS4VideoOutMetal.encode(encoder: encoder, pipeline: pipeline, texture: texture,
+        MaxPS4VideoOutMetal.encode(encoder: encoder, pipeline: pipeline, texture: frame.texture,
             output: view.drawableSize, fill: scaling == "fill", stretch: scaling == "stretch")
         encoder.endEncoding()
         command.addCompletedHandler { [weak self] buffer in
@@ -115,7 +125,7 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
             let reason = buffer.error?.localizedDescription ?? "statut \(buffer.status.rawValue)"
             DispatchQueue.main.async { self?.failed("Présentation Metal : échec de la commande GPU (\(reason)).") }
         }
-        lastTexture = texture
+        lastTexture = frame.texture
         needsRedraw = false
         command.present(drawable); command.commit()
     }
@@ -191,7 +201,7 @@ struct MaxPS4GameView: View {
     @State private var fps = 0.0
     // Réglages › Mode développeur: test options and the technical session report.
     @AppStorage("maxps4.developer") private var developer = false
-    private let poll = Timer.publish(every: 1.0 / 60, on: .main, in: .common).autoconnect()
+    private let poll = Timer.publish(every: 1.0 / 120, on: .main, in: .common).autoconnect()
 #endif
     init(directory: URL) {
         self.directory = directory
@@ -283,6 +293,8 @@ struct MaxPS4GameView: View {
         .onAppear { MaxPS4Orientation.landscape() }
         .onDisappear { MaxPS4Orientation.release() }
         .persistentSystemOverlays(.hidden)
+        // Controls sit near the edges: touches there reach them first, not the system.
+        .defersSystemGestures(on: .all)
         .sheet(isPresented: $showingMenu) {
             NavigationStack {
                 ZStack {
@@ -530,20 +542,22 @@ struct MaxPS4GameView: View {
                 // The D-pad, then the left stick beside it.
                 HStack(alignment: .bottom, spacing: size * 0.25) {
                     VStack(spacing: 0) {
-                        control("↑", label: "Haut", bit: 0x10, size: size)
+                        controlFace("↑", label: "Haut", bit: 0x10, size: size)
                         HStack(spacing: 0) {
-                            control("←", label: "Gauche", bit: 0x80, size: size)
+                            controlFace("←", label: "Gauche", bit: 0x80, size: size)
                             Color.clear.frame(width: size, height: size).allowsHitTesting(false)
-                            control("→", label: "Droite", bit: 0x20, size: size)
+                            controlFace("→", label: "Droite", bit: 0x20, size: size)
                         }
-                        control("↓", label: "Bas", bit: 0x40, size: size)
-                    }
-                    stickControl($leftStick, name: "L", label: "Stick gauche", size: size * 2)
+                        controlFace("↓", label: "Bas", bit: 0x40, size: size)
+                    }.overlay(ControlTouchLayer(reading: ControlTouchLayer.arrows,
+                                                  changed: { bits in touch = touch & ~0xf0 | bits; session.input(touchPad) },
+                                                  arrived: { session.touchArrived($0) }).accessibilityHidden(true))
+                    stickControl($leftStick, name: "L", label: "Stick gauche", click: MaxPS4PadState.l3, size: size * 2)
                 }
                 Spacer(minLength: 0)
                 // Where a DualShock 4 has it: below and left of the face buttons.
                 if rightStickShown {
-                    stickControl($rightStick, name: "R", label: "Stick droit", size: size * 1.9).padding(.trailing, size * 0.25)
+                    stickControl($rightStick, name: "R", label: "Stick droit", click: MaxPS4PadState.r3, size: size * 1.9).padding(.trailing, size * 0.25)
                 }
                 VStack(spacing: 0) {
                     control("△", label: "Triangle", bit: 0x1000, size: size)
@@ -562,8 +576,8 @@ struct MaxPS4GameView: View {
     }
 
     // A touch stick: full deflection at 80% of the radius; the knob stays inside the ring.
-    private func stickControl(_ stick: Binding<CGPoint>, name: String, label: LocalizedStringKey, size: CGFloat) -> some View {
-        let radius = size / 2, position = stick.wrappedValue, active = position != .zero
+    private func stickControl(_ stick: Binding<CGPoint>, name: String, label: LocalizedStringKey, click: UInt32, size: CGFloat) -> some View {
+        let radius = size / 2, position = stick.wrappedValue, active = position != .zero || touch & click != 0
         return ZStack {
             Circle().fill(Color.black.opacity(0.25))
                 .overlay(Circle().stroke(active ? Color.cyan : Color.white.opacity(0.35), lineWidth: 1))
@@ -578,19 +592,29 @@ struct MaxPS4GameView: View {
         .shadow(color: .purple.opacity(active ? 0.45 : 0.15), radius: 6)
         .contentShape(Circle())
         .accessibilityLabel(label)
-        .gesture(DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                var x = (value.location.x - radius) / (radius * 0.8)
-                var y = (value.location.y - radius) / (radius * 0.8)
-                let length = (x * x + y * y).squareRoot()
-                if length > 1 { x /= length; y /= length }
-                stick.wrappedValue = CGPoint(x: x, y: y)
-                session.input(touchPad)
-            }
-            .onEnded { _ in stick.wrappedValue = .zero; session.input(touchPad) })
+        .overlay(StickTouchLayer(moved: { point in
+            guard let point else { stick.wrappedValue = .zero; session.input(touchPad); return }
+            var x = (point.x - radius) / (radius * 0.8)
+            var y = (point.y - radius) / (radius * 0.8)
+            let length = (x * x + y * y).squareRoot()
+            if length > 1 { x /= length; y /= length }
+            stick.wrappedValue = CGPoint(x: x, y: y)
+            session.input(touchPad)
+        }, clicked: { down in
+            touch = down ? touch | click : touch & ~click
+            session.input(touchPad)
+        }, arrived: { session.touchArrived($0) }).accessibilityHidden(true))
     }
 
+
     private func control(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
+        controlFace(name, label: label, bit: bit, size: size)
+            .overlay(ControlTouchLayer(reading: { _, _ in bit },
+                                       changed: { bits in touch = touch & ~bit | bits; session.input(touchPad) },
+                                       arrived: { session.touchArrived($0) }).accessibilityHidden(true))
+    }
+
+    private func controlFace(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
         let pressed = touch & bit != 0
         return Text(name)
             .font(.system(size: name == "Options" ? 10 : name.count == 2 ? 14 : 22, weight: .bold, design: .rounded))
@@ -605,9 +629,127 @@ struct MaxPS4GameView: View {
                 touch |= bit; session.input(touchPad)
                 touch &= ~bit
             }
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in touch |= bit; session.input(touchPad) }
-                .onEnded { _ in touch &= ~bit; session.input(touchPad) })
     }
 #endif
 }
+
+#if MAXPS4_FEX_APP
+// A touch control read straight from UIKit touches: no gesture recognizer or
+// SwiftUI update between the finger and the pad. `reading` gives the buttons a
+// point of the control presses, `changed` receives them.
+private struct ControlTouchLayer: UIViewRepresentable {
+    let reading: (CGPoint, CGSize) -> UInt32
+    let changed: (UInt32) -> Void
+    let arrived: (TimeInterval) -> Void
+    // The arrows: a thumb slides between them and reaches the diagonals, in
+    // eight 45° sectors around the centre.
+    static func arrows(at point: CGPoint, in size: CGSize) -> UInt32 {
+        let x = point.x - size.width / 2, y = point.y - size.height / 2
+        guard max(abs(x), abs(y)) > size.width * 0.08 else { return 0 }
+        var bits: UInt32 = 0
+        if abs(x) > abs(y) * 0.414 { bits |= x < 0 ? 0x80 : 0x20 }
+        if abs(y) > abs(x) * 0.414 { bits |= y < 0 ? 0x10 : 0x40 }
+        return bits
+    }
+    final class Surface: UIView {
+        // A tap stays pressed this long: the game reads the pad twice a frame
+        // and passes it on between threads, so a shorter one can get lost.
+        private static let shortestPress: TimeInterval = 0.08
+        var reading: (CGPoint, CGSize) -> UInt32 = { _, _ in 0 }
+        var changed: (UInt32) -> Void = { _ in }
+        var arrived: (TimeInterval) -> Void = { _ in }
+        private var finger: UITouch?
+        private var pressed: UInt32 = 0
+        private var pressedAt: TimeInterval = 0
+        private var release: DispatchWorkItem?
+        private func press(_ bits: UInt32) {
+            release?.cancel(); release = nil
+            guard bits != pressed else { return }
+            if pressed == 0 { pressedAt = ProcessInfo.processInfo.systemUptime }
+            pressed = bits
+            changed(bits)
+        }
+        private func lift() {
+            finger = nil
+            let left = Self.shortestPress - (ProcessInfo.processInfo.systemUptime - pressedAt)
+            guard pressed != 0, left > 0 else { press(0); return }
+            let work = DispatchWorkItem { [weak self] in self?.press(0) }
+            release = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + left, execute: work)
+        }
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard finger == nil, let touch = touches.first else { return }
+            finger = touch
+            press(reading(touch.location(in: self), bounds.size))
+            arrived(ProcessInfo.processInfo.systemUptime - touch.timestamp)
+        }
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { press(reading(finger.location(in: self), bounds.size)) }
+        }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { lift() }
+        }
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { lift() }
+        }
+    }
+    func makeUIView(context: Context) -> Surface {
+        let surface = Surface()
+        surface.backgroundColor = .clear
+        return surface
+    }
+    func updateUIView(_ surface: Surface, context: Context) {
+        surface.reading = reading; surface.changed = changed; surface.arrived = arrived
+    }
+}
+#endif
+#if MAXPS4_FEX_APP
+// A touch stick, read like the buttons. A second touch soon after the last one
+// clicks it (L3, R3) until the finger lifts, and it still moves meanwhile.
+private struct StickTouchLayer: UIViewRepresentable {
+    let moved: (CGPoint?) -> Void
+    let clicked: (Bool) -> Void
+    let arrived: (TimeInterval) -> Void
+    final class Surface: UIView {
+        private static let secondTouch: TimeInterval = 0.3, shortestClick: TimeInterval = 0.08
+        var moved: (CGPoint?) -> Void = { _ in }
+        var clicked: (Bool) -> Void = { _ in }
+        var arrived: (TimeInterval) -> Void = { _ in }
+        private var finger: UITouch?
+        private var lifted: TimeInterval = 0
+        private var clickedAt: TimeInterval?
+        private func lift(_ touch: UITouch) {
+            finger = nil; lifted = touch.timestamp
+            moved(nil)
+            guard let clickedAt else { return }
+            self.clickedAt = nil
+            let left = Self.shortestClick - (touch.timestamp - clickedAt)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(left, 0)) { [weak self] in self?.clicked(false) }
+        }
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard finger == nil, let touch = touches.first else { return }
+            finger = touch
+            if touch.timestamp - lifted < Self.secondTouch { clickedAt = touch.timestamp; clicked(true) }
+            moved(touch.location(in: self))
+            arrived(ProcessInfo.processInfo.systemUptime - touch.timestamp)
+        }
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { moved(finger.location(in: self)) }
+        }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { lift(finger) }
+        }
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { lift(finger) }
+        }
+    }
+    func makeUIView(context: Context) -> Surface {
+        let surface = Surface()
+        surface.backgroundColor = .clear
+        return surface
+    }
+    func updateUIView(_ surface: Surface, context: Context) {
+        surface.moved = moved; surface.clicked = clicked; surface.arrived = arrived
+    }
+}
+#endif

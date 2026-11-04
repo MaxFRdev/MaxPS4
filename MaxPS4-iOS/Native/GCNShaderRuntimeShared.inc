@@ -84,7 +84,7 @@ GCN_FN uint gcn_convert(uint raw, uint bits, uint nfmt) {
 // buffer_load_format_*: V# data/number format and DST_SEL applied.
 GCN_FN uint4 gcn_buffer_format(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen) {
     uint4 out;
-    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xffffu) << 32);
+    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xfffu) << 32); // 44 bits, then the memory type
     uint stride = (r.d[1] >> 16) & 0x3fffu; uint records = r.d[2];
     uint dfmt = (r.d[3] >> 15) & 15u; uint nfmt = (r.d[3] >> 12) & 7u;
     uint channels = 0u; uint bits = 32u;
@@ -110,7 +110,7 @@ GCN_FN uint4 gcn_buffer_format(GCNMemory M, GCNRes4 r, uint index, uint voffset,
     return out;
 }
 GCN_FN uint gcn_buffer_dword(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen, uint n) {
-    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xffffu) << 32);
+    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xfffu) << 32); // 44 bits, then the memory type
     uint stride = (r.d[1] >> 16) & 0x3fffu; uint records = r.d[2];
     uint idx = idxen ? index : 0u; uint off = offen ? voffset : 0u;
     bool inside = stride != 0u ? idx < records : ulong(inst) + off < ulong(records);
@@ -138,7 +138,7 @@ GCN_FN void gcn_store_bits(GCNMemory M, ulong at, uint bits, uint raw) {
 // buffer_store_format_*: `count` components (x, xy, xyz, xyzw) of `value`.
 GCN_FN void gcn_buffer_store_format(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen,
                                     uint4 value, uint count) {
-    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xffffu) << 32);
+    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xfffu) << 32); // 44 bits, then the memory type
     uint stride = (r.d[1] >> 16) & 0x3fffu; uint records = r.d[2];
     uint dfmt = (r.d[3] >> 15) & 15u; uint nfmt = (r.d[3] >> 12) & 7u;
     uint channels = 0u; uint bits = 32u;
@@ -156,7 +156,7 @@ GCN_FN void gcn_buffer_store_format(GCNMemory M, GCNRes4 r, uint index, uint vof
 }
 GCN_FN void gcn_buffer_store_dword(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen,
                                    uint n, uint value) {
-    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xffffu) << 32);
+    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xfffu) << 32); // 44 bits, then the memory type
     uint stride = (r.d[1] >> 16) & 0x3fffu; uint records = r.d[2];
     uint idx = idxen ? index : 0u; uint off = offen ? voffset : 0u;
     bool inside = stride != 0u ? idx < records : ulong(inst) + off < ulong(records);
@@ -164,7 +164,7 @@ GCN_FN void gcn_buffer_store_dword(GCNMemory M, GCNRes4 r, uint index, uint voff
 }
 GCN_FN void gcn_buffer_store_bytes(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen,
                                    uint value, uint bytes) {
-    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xffffu) << 32);
+    ulong base = ulong(r.d[0]) | (ulong(r.d[1] & 0xfffu) << 32); // 44 bits, then the memory type
     uint stride = (r.d[1] >> 16) & 0x3fffu; uint records = r.d[2];
     uint idx = idxen ? index : 0u; uint off = offen ? voffset : 0u;
     bool inside = stride != 0u ? idx < records : ulong(inst) + off < ulong(records);

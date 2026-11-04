@@ -37,7 +37,7 @@ public:
     // `guest` nil: each draw copies the memory ranges its programs read.
     PM4MetalRenderer(id<MTLDevice> device, const GCNMemory& code, id<MTLBuffer> guest, std::uint64_t guestBase,
                      bool nativeTextures = false,
-                     std::function<bool(std::uint64_t, const void*, std::size_t)> writeGuest = {})
+                     std::function<std::int32_t(std::uint64_t, const void*, std::size_t, std::uint64_t*)> writeGuest = {})
         : device_(device), code_(code), guest_(guest), guestBase_(guestBase),
           scanMemory_{code.read, [](std::uint64_t, const void*, std::size_t) { return true; }},
           scanner_(scanMemory_, nativeTextures), native_(nativeTextures), writeGuest_(std::move(writeGuest)) {}
@@ -49,6 +49,11 @@ public:
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     unsigned kernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
     unsigned dispatchesEncoded = 0;
+    // Compute traffic with guest memory, cumulated: copied in while encoding,
+    // written back after the GPU.
+    double dispatchCopyMs = 0, writebackMs = 0;
+    std::uint64_t dispatchCopyBytes = 0, writebackBytes = 0;
+    unsigned fillsDone = 0; // Fill dispatches done without their kernel.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
     bool writebackGuestWrites();
@@ -126,7 +131,7 @@ private:
     GCNMemory scanMemory_; // code_ reads; scanned lanes' stores are dropped
     PM4ResourceScanner scanner_;
     bool native_;
-    std::function<bool(std::uint64_t, const void*, std::size_t)> writeGuest_;
+    std::function<std::int32_t(std::uint64_t, const void*, std::size_t, std::uint64_t*)> writeGuest_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
@@ -146,12 +151,14 @@ private:
     static MTLCompileOptions* compileOptions();
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
+    bool fillProgram(std::uint64_t address);
+    bool fillDispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     id<MTLLibrary> library(const std::string& source);
     std::map<std::uint64_t, Target> targets_;
     std::vector<std::uint64_t> listed_;
     id<MTLBuffer> visibility_ = nil;
     unsigned visibilityCount_ = 0;
-    void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount);
+    void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount, bool always = false);
     bool batching_ = false;
     id<MTLRenderCommandEncoder> encoder_ = nil;
     id<MTLCommandBuffer> commands_ = nil;
@@ -167,6 +174,9 @@ private:
     static constexpr std::uint64_t sharedRangeBytes = 1ull << 20;
     struct Shared { id<MTLBuffer> buffer; std::uint64_t offset; }; // the range's first byte in `buffer`
     std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
+    std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_; // Guest ranges the GPU reads directly.
+    std::map<std::uint64_t, bool> fillPrograms_;
+    std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.
     id<MTLCommandBuffer> sharedOwner_ = nil;
     Shared sharedRange(std::uint64_t base, std::uint64_t size, bool texture, id<MTLCommandBuffer> commands);
     // Guest [address, address + size) into `out`; unreadable pages read as zero.

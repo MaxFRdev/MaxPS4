@@ -101,7 +101,7 @@ public:
     // are not written; their resources are also given by stored(). Images
     // the program addresses are captured whatever captureImages.
     const std::vector<PM4Range>& scan(const PM4Dispatch& c) {
-        found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); stored_.clear();
+        found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); stored_.clear(); dispatchError_.clear();
         constexpr std::uint64_t largest = 256ull << 20;
         auto& wave = wave_;
         wave.reset();
@@ -119,7 +119,11 @@ public:
             if (to > from) found_.push_back({from, std::min<std::uint64_t>(to - from, largest)});
         };
         for (unsigned k = 0; k < c.userCount; ++k) wave.s[k] = c.user[k];
-        wave.run(c.program);
+        // Resource discovery executes one representative lane. Some game
+        // compute shaders contain work loops that are unsuitable for this
+        // scan; stop promptly and let the caller refuse that dispatch.
+        if (!wave.run(c.program, 4096) && wave.error == "instruction limit reached")
+            dispatchError_ = wave.error;
         wave.resource = {}; wave.stored = {}; wave.imageResource = {}; wave.buffer = {};
         std::sort(found_.begin(), found_.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
         for (const auto& r : found_) {
@@ -129,6 +133,7 @@ public:
         }
         return merged_;
     }
+    const std::string& dispatchError() const { return dispatchError_; }
     const std::vector<PM4Range>& stored() const { return stored_; }
     const std::vector<std::array<std::uint32_t, 8>>& images() const { return images_; }
     // The S# first sampling each of images() (zeros: read without a sampler).
@@ -145,6 +150,7 @@ private:
     GCNCodeCache cache_;
     GCNWave wave_;
     std::vector<PM4Range> found_, merged_, stored_;
+    std::string dispatchError_;
     std::vector<std::array<std::uint32_t, 5>> vsExports_;
     bool vsRan_ = false;
     std::string vsError_, psError_;

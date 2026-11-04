@@ -9,7 +9,7 @@ NS_ASSUME_NONNULL_BEGIN
 // submitting thread is paused. Neither reader nor submit may reenter GNM.
 typedef BOOL (^MaxPS4GameMemoryReader)(uint64_t, void*, size_t);
 // Writer is invoked only synchronously while the guest submission is paused.
-typedef BOOL (^MaxPS4GameMemoryWriter)(uint64_t, const void*, size_t);
+typedef int32_t (^MaxPS4GameMemoryWriter)(uint64_t, const void*, size_t, uint64_t*);
 // The host bytes backing guest memory (maxps4_fex_engine_gpu_view), or NULL:
 // large textures become no-copy buffers the GPU reads in place.
 typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
@@ -30,11 +30,14 @@ typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
                                   view:(nullable MaxPS4GameMemoryView)view
                         nativeTextures:(BOOL)nativeTextures;
 - (int32_t)submit:(const uint32_t*)words count:(size_t)count;
-// Returns an owned, immutable display copy, cropped to VideoOut dimensions.
-// Waits for a submission being encoded; nil if the address was not drawn.
+// Returns an owned display copy, cropped to VideoOut dimensions. If displayEvent
+// is non-null, wait for displayEventValue before sampling it; nil if not drawn.
 - (nullable id<MTLTexture>)copyTargetAtAddress:(uint64_t)address
                                        width:(uint32_t)width height:(uint32_t)height
     NS_SWIFT_NAME(copyTarget(address:width:height:));
+// Shared event signalled after the latest display copy; nil on older devices.
+@property(nonatomic, readonly, nullable) id<MTLSharedEvent> displayEvent;
+@property(nonatomic, readonly) uint64_t displayEventValue;
 @property(nonatomic, readonly, copy) NSString* report;
 // Milliseconds the game's submitting thread has spent in submit so far
 // (encoding, GPU and waiting), every submission included.

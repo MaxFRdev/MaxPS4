@@ -90,7 +90,7 @@ int32_t maxps4_fex_engine_read_memory(maxps4_fex_engine* engine,
 // guest submission thread is paused until the callback returns; caller keeps
 // the engine alive and serializes close, as for read_memory.
 int32_t maxps4_fex_engine_write_memory(maxps4_fex_engine* engine,
-    uint64_t address, const void* source, size_t bytes);
+    uint64_t address, const void* source, size_t bytes, uint64_t* failed_address);
 // The host bytes backing readable guest [address, address + bytes), for the
 // GPU to read guest textures in place (a no-copy Metal buffer). Valid until
 // the game unmaps them; same calling rules as read_memory.
@@ -109,6 +109,8 @@ int32_t maxps4_fex_engine_gnm_software_status(maxps4_fex_engine* engine, uint32_
 // Concurrent host input. Values use PS4 button bits and 0..255 stick/trigger
 // samples (sticks centered at 128). No global execution lock is acquired.
 // Caller retains the engine and serializes against close; connected is 0 or 1.
+// Presses read by the game, and their total and longest wait for that read.
+void maxps4_fex_engine_pad_latency(maxps4_fex_engine* engine, uint64_t* reads, uint64_t* total_us, uint64_t* most_us);
 int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint32_t buttons,
     uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected);
 // Concurrent host audio: mixes up to `frames` 48 kHz interleaved stereo float

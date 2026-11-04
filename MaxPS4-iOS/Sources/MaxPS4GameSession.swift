@@ -64,7 +64,13 @@ final class MaxPS4GameAudio: @unchecked Sendable {
 // The FEX worker owns execution and close. Concurrent display/input/stop calls
 // retain the engine under lock, using only the native concurrent APIs.
 final class MaxPS4GameSource: @unchecked Sendable {
-    struct Frame { let info: maxps4_videoout_frame; let texture: MTLTexture; let report: String }
+    struct Frame {
+        let info: maxps4_videoout_frame
+        let texture: MTLTexture
+        let event: MTLSharedEvent?
+        let eventValue: UInt64
+        let report: String
+    }
     private let lock = NSLock()
     private let inputLock = NSLock()
     private var engine: OpaquePointer?
@@ -99,6 +105,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var liveReport: URL?
     private var folderListing = "" // What /app0 holds, read once per run, under lock.
     private var vblanksSent = 0 // With vblankPort, under inputLock.
+    private var touchesArrived = 0, touchSeconds: TimeInterval = 0 // Under inputLock.
     private var vblankPort: UInt64 = 1
     private var lastTicket: UInt64 = 0
     private var relocation: UInt64 = 0
@@ -155,7 +162,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let missing = missingImports(engine)
         let compatibility = missing.called.isEmpty ? "" : "Fonctions PS4 manquantes appelées : \(missing.called.count) sur \(missing.total) absentes · "
             + missing.called.prefix(5).joined(separator: " · ") + "\n"
-        let text = compatibility + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
+        let text = compatibility + inputDelays(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
         if let liveReport {
             MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
@@ -325,6 +332,18 @@ final class MaxPS4GameSource: @unchecked Sendable {
         inputLock.lock(); defer { inputLock.unlock() }
         if let inputEngine { maxps4_fex_engine_videoout_pause(inputEngine, paused ? 1 : 0) }
     }
+    // How long presses took: iOS to the app, the app to the game's read.
+    func touchArrived(_ seconds: TimeInterval) {
+        inputLock.lock(); touchesArrived += 1; touchSeconds += seconds; inputLock.unlock()
+    }
+    private func inputDelays(_ engine: OpaquePointer) -> String {
+        var count: UInt64 = 0, total: UInt64 = 0, most: UInt64 = 0
+        maxps4_fex_engine_pad_latency(engine, &count, &total, &most)
+        inputLock.lock(); let touches = touchesArrived, seconds = touchSeconds; inputLock.unlock()
+        guard count > 0 else { return "" }
+        return String(format: "Commandes : %llu appuis lus par le jeu en %.1f ms en moyenne (au plus %.1f ms) · %ld touches livrées par iOS en %.1f ms en moyenne\n",
+                      count, Double(total) / Double(count) / 1000, Double(most) / 1000, touches, touches > 0 ? seconds * 1000 / Double(touches) : 0)
+    }
     func input(_ pad: MaxPS4PadState) {
         inputLock.lock(); defer { inputLock.unlock() }
         self.pad = pad
@@ -355,6 +374,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
         // The retained bridge owns the texture copy. No engine pointer is used
         // here, so GPU completion need not block pad updates, vblank or stop.
         let copied = bridge.copyTarget(address: address, width: info.width, height: info.height)
+        let displayEvent = bridge.displayEvent
+        let displayEventValue = bridge.displayEventValue
         let timing = String(format: "Préparation : verrou session %.1f ms · cible %.1f ms · copie %.1f ms",
                             lockWait * 1000, (located - started - lockWait) * 1000,
                             (ProcessInfo.processInfo.systemUptime - located) * 1000)
@@ -366,7 +387,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
             return nil
         }
         missingSince = nil
-        return Frame(info: info, texture: texture, report: bridge.report + "\n" + timing)
+        return Frame(info: info, texture: texture, event: displayEvent, eventValue: displayEventValue,
+                     report: bridge.report + "\n" + timing)
     }
     @discardableResult func complete(ticket: UInt64, presented: Bool) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -456,8 +478,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
             progress(String(localized: "Jeu chargé. Préparation du rendu Metal…", bundle: .maxps4))
             guard let metal = MaxPS4GameMetalBridge(device: device, reader: { address, destination, count in
                 maxps4_fex_engine_read_memory(opened, address, destination, count) == 0
-            }, writer: { address, source, count in
-                maxps4_fex_engine_write_memory(opened, address, source, count) == 0
+            }, writer: { address, source, count, failedAddress in
+                maxps4_fex_engine_write_memory(opened, address, source, count, failedAddress)
             }, view: { address, count in
                 var pointer: UnsafeRawPointer?
                 return maxps4_fex_engine_gpu_view(opened, address, count, &pointer) == 0 ? pointer : nil
@@ -611,6 +633,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         }
     }
     func input(_ pad: MaxPS4PadState) { worker?.input(pad) }
+    func touchArrived(_ seconds: TimeInterval) { worker?.touchArrived(seconds) }
     func presented(_ text: String) { if running { hasPresented = true; report = text } }
     func failed(_ text: String) { stop(); stopping = nil; report = text }
     // The game menu's pause: no vblank and no audio read, so a game paced on

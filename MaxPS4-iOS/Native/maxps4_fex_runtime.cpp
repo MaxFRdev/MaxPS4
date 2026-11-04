@@ -2063,9 +2063,11 @@ extern "C" int32_t maxps4_fex_engine_read_memory(maxps4_fex_engine* engine,
     return engine->system_memory.read(address,destination,bytes) ? 0 : -EFAULT;
 }
 extern "C" int32_t maxps4_fex_engine_write_memory(maxps4_fex_engine* engine,
-    uint64_t address, const void* source, size_t bytes) {
+    uint64_t address, const void* source, size_t bytes, uint64_t* failed_address) {
+    if (failed_address) *failed_address = address;
     if (!engine || !source || !bytes || bytes > (256ull << 20)) return -EINVAL;
-    return engine->system_memory.write_host_result(address,source,bytes) ? 0 : -EFAULT;
+    if (failed_address) *failed_address = 0;
+    return engine->system_memory.write_gpu_result(address,source,bytes);
 }
 extern "C" int32_t maxps4_fex_engine_gpu_view(maxps4_fex_engine* engine,
     uint64_t address, size_t bytes, const void** pointer) {
@@ -2104,6 +2106,9 @@ extern "C" int32_t maxps4_fex_engine_gnm_software_status(maxps4_fex_engine* engi
         error[n] = 0;
     }
     return 0;
+}
+extern "C" void maxps4_fex_engine_pad_latency(maxps4_fex_engine* engine, uint64_t* reads, uint64_t* total_us, uint64_t* most_us) {
+    if (engine && reads && total_us && most_us) engine->libkernel.pad().latency(*reads, *total_us, *most_us);
 }
 extern "C" int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint32_t buttons,
     uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected) {
@@ -2318,6 +2323,9 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         tso_emulation.load() ? "émulé" : "désactivé", (unsigned long long)alignment_repairs.load(),
         (unsigned long long)last_repair_pc.load());
     std::string out = header;
+    out += engine->libkernel.graphics().submit_activity();
+    out += engine->libkernel.videoout().submit_activity();
+    out += engine->libkernel.videoout().flip_activity();
     const uint64_t now = ProbeAddressSpace::now_ns();
     for (const auto& a : engine->probe.activity) {
         const uint64_t thread = a.thread.load();
