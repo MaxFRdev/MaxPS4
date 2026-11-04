@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <atomic>
 #include <dispatch/dispatch.h>
+#include <unistd.h>
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
@@ -534,6 +535,50 @@ int main() {
         if (!nonblocking) dispatch_semaphore_wait(reported,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC));
         assert(nonblocking);
         std::puts("PASS diagnostic snapshot is readable while the Metal submission is blocked");
+        // A compute dispatch writing guest memory waits for the GPU inside the
+        // submission, lock held. The previous submission and display copy
+        // complete during that time: their handlers must not stop Metal from
+        // finishing the awaited work. The pause lets them fire under the lock.
+        Arena computeArena;
+        loadComputeCS(computeArena);
+        Arena* computeMemory = &computeArena;
+        std::atomic<bool> computing{false}, pauseOnce{false}; std::atomic<unsigned> guestWrites{0};
+        auto* inCompute = &computing; auto* pause = &pauseOnce; auto* writes = &guestWrites;
+        MaxPS4GameMetalBridge* barrier = [[MaxPS4GameMetalBridge alloc] initWithDevice:device
+            reader:^BOOL(uint64_t address, void* destination, size_t count) {
+                if (!inCompute->load()) return reader->memory.read(address,destination,count);
+                if (pause->exchange(false)) usleep(50000);
+                return computeMemory->memory.read(address,destination,count);
+            }
+            writer:^int32_t(uint64_t address, const void* source, size_t count, uint64_t*) {
+                ++*writes;
+                return computeMemory->memory.write(address,source,count) ? 0 : -1;
+            } view:nil nativeTextures:NO];
+        Stream computeStream;
+        computeStream.set(0x76,0x207,{32,1,1});
+        computeStream.set(0x76,0x20c,{std::uint32_t(computeCS>>8),0});
+        computeStream.set(0x76,0x213,{0xa0}); // 16 user SGPRs, thread group id x
+        computeStream.words.insert(computeStream.words.end(),{0xc0107600U,0x240}); // COMPUTE_USER_DATA_0..15
+        computeStream.words.insert(computeStream.words.end(),computeSgprs,computeSgprs+16);
+        computeStream.words.insert(computeStream.words.end(),{0xc0031500U,2,1,1,1}); // DISPATCH_DIRECT
+        const auto* computeWords = computeStream.words.data(); const auto computeCount = computeStream.words.size();
+        auto barrierDone = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+            for (unsigned round = 0; round < 5; ++round) {
+                inCompute->store(false);
+                assert([barrier submit:streamWords count:streamCount] == 0);
+                assert([barrier copyTargetAtAddress:targetB width:width height:height]);
+                inCompute->store(true); pause->store(true);
+                assert([barrier submit:computeWords count:computeCount] == 0);
+            }
+            dispatch_semaphore_signal(barrierDone);
+        });
+        const bool barrierFinished = dispatch_semaphore_wait(barrierDone,dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC))==0;
+        if (!barrierFinished) std::printf("FAIL compute barrier deadlocked:\n%s\n", barrier.report.UTF8String);
+        assert(barrierFinished);
+        if (!guestWrites.load()) std::printf("FAIL no guest write reached the barrier:\n%s\n", barrier.report.UTF8String);
+        assert(guestWrites.load() >= 5);
+        std::puts("PASS compute barrier completes with submissions and display copies in flight");
         const uint32_t bad[]={0};
         assert([bridge submit:bad count:1]!=0 && bridge.failure);
         assert([bridge submit:s.words.data() count:s.words.size()]!=0);
