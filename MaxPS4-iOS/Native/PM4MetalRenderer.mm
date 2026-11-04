@@ -112,8 +112,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         std::string programs = programWords("VS", d.vs, d.vsUser, d.vsUserCount);
         if (d.vsUserCount >= 2) programs += programWords("Fetch", std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32, d.vsUser, 0);
         programs += programWords("PS", d.ps, d.psUser, d.psUserCount);
-        programs += "
-Source Metal : " + std::to_string(source.size()) + " octets";
+        programs += "\nSource Metal : " + std::to_string(source.size()) + " octets";
         auto async = async_;
         { std::lock_guard<std::mutex> lock(async->mutex);
           async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation", std::move(programs)}; }
