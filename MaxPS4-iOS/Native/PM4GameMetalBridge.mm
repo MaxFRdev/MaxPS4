@@ -47,6 +47,9 @@ struct GameMetalState {
     uint64_t lastShown = 0;
     // Compute dispatches run as kernels, or refused (and skipped) with the last reason.
     unsigned computeRun = 0, computeRefused = 0;
+    // Waits for compute results inside submissions, and how long batches took.
+    unsigned barriers = 0, batchBarriers = 0, mostBarriers = 0, batches = 0, slowBatches = 0;
+    double barrierMs = 0;
     std::string computeError;
     // The draws of the last batch that had any, and the centre pixel of the
     // last displayed image (its four bytes in texture order).
@@ -76,6 +79,10 @@ struct GameMetalState {
         native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u en cours, %u refusés · %u dessins reportés%s%s%s%@",
             renderer.pipelinesBuilt, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
             refusal.empty() ? "" : " · dernier refus : ", refusal.c_str(), pending.c_str(), native];
+        native = [NSString stringWithFormat:@"
+Barrières compute : %u (%u au plus par lot) · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%@",
+            barriers, mostBarriers, barrierMs, renderer.dispatchCopyMs, double(renderer.dispatchCopyBytes) / (1 << 20),
+            renderer.writebackMs, double(renderer.writebackBytes) / (1 << 20), batches, slowBatches, native];
         return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés, %u grandes zones partagées (%u lues sans copie)\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées · dernier : %s\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nÉchantillons dessinés par dessin (dernier lot) :%s\nDessins du dernier lot :%s\nProgrammes des premiers dessins :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused, renderer.rangesShared, renderer.rangesMapped,
             stats.skipped, renderer.targetCount(), stats.dispatches, computeRun - renderer.dispatchesWithoutEffect,
@@ -207,6 +214,8 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             s.enter(5);
             [command waitUntilCompleted];
             s.waitMs += elapsedMs(barrierStarted);
+            s.barrierMs += elapsedMs(barrierStarted);
+            ++s.barriers; ++s.batchBarriers;
             if (command.status != MTLCommandBufferStatusCompleted || command.error) {
                 s.error = command.error ? command.error.localizedDescription.UTF8String : "Metal compute barrier failed";
                 barrierFailure = true;
@@ -231,6 +240,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         };
         s.renderer.beginBatch();
         s.phaseDraw = 0; s.phasePS = 0;
+        s.batchBarriers = 0;
         s.enter(3);
         s.collector.execute(words, count, [&](const PM4Draw& draw) {
             ++s.phaseDraw; s.phasePS = draw.ps;
@@ -276,6 +286,8 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         }
         [command commit];
         if (hasRenderWork) s.encodeMs = encoding;
+        ++s.batches; s.slowBatches += elapsedMs(started) > 33.3;
+        s.mostBarriers = std::max(s.mostBarriers, s.batchBarriers);
         self.submitMilliseconds += elapsedMs(started);
         self.lastReport = s.report();
         // The native queue retires synchronization packets only after this return.

@@ -49,6 +49,10 @@ public:
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     unsigned kernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
     unsigned dispatchesEncoded = 0;
+    // Compute traffic with guest memory, cumulated: copied in while encoding,
+    // written back after the GPU.
+    double dispatchCopyMs = 0, writebackMs = 0;
+    std::uint64_t dispatchCopyBytes = 0, writebackBytes = 0;
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
     bool writebackGuestWrites();
@@ -151,7 +155,7 @@ private:
     std::vector<std::uint64_t> listed_;
     id<MTLBuffer> visibility_ = nil;
     unsigned visibilityCount_ = 0;
-    void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount);
+    void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount, bool always = false);
     bool batching_ = false;
     id<MTLRenderCommandEncoder> encoder_ = nil;
     id<MTLCommandBuffer> commands_ = nil;

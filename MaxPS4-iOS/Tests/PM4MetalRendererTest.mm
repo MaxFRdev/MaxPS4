@@ -578,6 +578,7 @@ int main() {
         assert(barrierFinished);
         if (!guestWrites.load()) std::printf("FAIL no guest write reached the barrier:\n%s\n", barrier.report.UTF8String);
         assert(guestWrites.load() >= 5);
+        assert([barrier.report containsString:@"Barrières compute : 5 ("] && [barrier.report containsString:@"CS 0x11000"]);
         std::puts("PASS compute barrier completes with submissions and display copies in flight");
         const uint32_t bad[]={0};
         assert([bridge submit:bad count:1]!=0 && bridge.failure);

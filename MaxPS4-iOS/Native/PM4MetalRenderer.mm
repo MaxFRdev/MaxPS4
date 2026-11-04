@@ -200,6 +200,7 @@ id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
                                                                                error:&failure];
     if (!state) { fail(std::string("compute pipeline: ") + failure.localizedDescription.UTF8String); return nil; }
     ++kernelsBuilt;
+    if (kernelsBuilt <= 4) listProgram("CS", c.program, c.user, c.userCount, true);
     kernels_[key] = state;
     return state;
 }
@@ -258,6 +259,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     id<MTLBuffer> memory = uploadBuffer(std::max<std::uint64_t>(total, 256), commands);
     if (!memory) return fail("compute memory buffer");
     DispatchState dispatchState{};
+    const auto copyStarted = std::chrono::steady_clock::now();
     std::uint64_t offset = 0;
     auto* bytes = static_cast<std::uint8_t*>(memory.contents);
     for (std::size_t k = 0; k < ranges.size(); ++k) {
@@ -268,6 +270,8 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
         dispatchState.ranges[3 * k + 2] = offset;
         offset += ranges[k].size;
     }
+    dispatchCopyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copyStarted).count();
+    dispatchCopyBytes += offset;
     dispatchState.rangeCount = std::uint32_t(ranges.size());
     dispatchState.userCount = c.userCount; dispatchState.rsrc2 = c.rsrc2;
     for (unsigned k = 0; k < 16; ++k) dispatchState.user[k] = c.user[k];
@@ -355,6 +359,12 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
         ++targetsSynced;
     }
     [blit endEncoding];
+    std::uint64_t written = 0;
+    for (const auto& write : pending) written += write.size;
+    char note[96];
+    std::snprintf(note, sizeof note, "%zu zones, %.1f Mio en entree, %.1f Mio en sortie, %zu images", ranges.size(),
+                  double(offset) / (1 << 20), double(written) / (1 << 20), outputs.size());
+    lastDispatchNote_ = note;
     pendingGuestWrites_.insert(pendingGuestWrites_.end(), pending.begin(), pending.end());
     return true;
 }
@@ -362,8 +372,10 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
 bool PM4MetalRenderer::writebackGuestWrites() {
     if (pendingGuestWrites_.empty()) return true;
     if (!writeGuest_) return fail("compute guest-memory writeback is unavailable");
+    const auto writeStarted = std::chrono::steady_clock::now();
     for (const auto& write : pendingGuestWrites_) {
         const auto* source = static_cast<const std::uint8_t*>(write.buffer.contents) + write.offset;
+        writebackBytes += write.size;
         std::uint64_t failedAddress = write.address;
         const std::int32_t status = writeGuest_(write.address, source, write.size, &failedAddress);
         if (status != 0) {
@@ -377,12 +389,13 @@ bool PM4MetalRenderer::writebackGuestWrites() {
             return fail(detail);
         }
     }
+    writebackMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - writeStarted).count();
     pendingGuestWrites_.clear();
     return true;
 }
 
-void PM4MetalRenderer::listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) {
-    if (listed_.size() >= 9 || std::find(listed_.begin(), listed_.end(), address) != listed_.end()) return;
+void PM4MetalRenderer::listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount, bool always) {
+    if ((!always && listed_.size() >= 9) || std::find(listed_.begin(), listed_.end(), address) != listed_.end()) return;
     listed_.push_back(address);
     std::vector<std::uint32_t> words;
     for (std::uint32_t word = 0; words.size() < 1024 && code_.read(address + 4 * words.size(), &word, 4);) words.push_back(word);
