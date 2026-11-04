@@ -30,6 +30,10 @@ struct GameMetalState {
     PM4MetalRenderer renderer;
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
+    // Completion handlers only hop here: they need the lock, and a submission
+    // can wait for the GPU holding it (flushComputeWrites), while Metal may not
+    // finish that work until the handlers of earlier command buffers return.
+    dispatch_queue_t completions = dispatch_queue_create("maxps4.metal.completions", DISPATCH_QUEUE_SERIAL);
     id<MTLSharedEvent> displayEvent;
     std::atomic<uint64_t> displayEventValue{0};
     std::string error;
@@ -54,7 +58,8 @@ struct GameMetalState {
     bool nativeTextures;
     // Where the submission in progress is, read without the lock by the live
     // report: 0 none, 1 waiting for the previous one's GPU work, 2 waiting for
-    // the lock, 3 encoding draw `phaseDraw` (PS `phasePS`), 4 committing.
+    // the lock, 3 encoding draw `phaseDraw` (PS `phasePS`), 4 committing,
+    // 5 waiting for compute work, 6 writing its results to guest memory.
     std::atomic<int> phase{0};
     std::atomic<long long> phaseSince{0};
     std::atomic<unsigned> phaseDraw{0};
@@ -198,13 +203,17 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         const auto flushComputeWrites = [&]() {
             s.renderer.endBatch();
             [command commit];
+            const auto barrierStarted = Clock::now();
+            s.enter(5);
             [command waitUntilCompleted];
+            s.waitMs += elapsedMs(barrierStarted);
             if (command.status != MTLCommandBufferStatusCompleted || command.error) {
                 s.error = command.error ? command.error.localizedDescription.UTF8String : "Metal compute barrier failed";
                 barrierFailure = true;
                 return;
             }
             if (gpuMs(command) >= 0) s.renderGpuMs = gpuMs(command);
+            s.enter(6);
             if (!s.renderer.writebackGuestWrites()) {
                 s.error = s.renderer.error;
                 barrierFailure = true;
@@ -217,6 +226,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                 return;
             }
             segmentEncoded = false;
+            s.enter(3);
             s.renderer.resumeBatch();
         };
         s.renderer.beginBatch();
@@ -253,14 +263,14 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         if (hasRenderWork) {
             auto heldState = state_;
             [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-                @autoreleasepool {
+                dispatch_async(heldState->completions, ^{ @autoreleasepool {
                     auto& state = *heldState;
                     std::lock_guard<std::mutex> completionLock(state.mutex);
                     if (completed.status != MTLCommandBufferStatusCompleted || completed.error)
                         state.error = completed.error ? completed.error.localizedDescription.UTF8String : "Metal GPU completion failed";
                     else if (gpuMs(completed) >= 0) state.renderGpuMs = gpuMs(completed);
                     self.lastReport = state.report();
-                }
+                }});
             }];
             s.inflight.push_back(command);
         }
@@ -317,7 +327,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         [command encodeSignalEvent:s.displayEvent value:eventValue];
         auto heldState = state_;
         [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-            @autoreleasepool {
+            dispatch_async(heldState->completions, ^{ @autoreleasepool {
                 auto& state = *heldState;
                 std::lock_guard<std::mutex> completionLock(state.mutex);
                 if (completed.status != MTLCommandBufferStatusCompleted || completed.error) {
@@ -327,7 +337,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                     recordDisplayCopy(state, completed, started, source, targets, pixel);
                 }
                 self.lastReport = state.report();
-            }
+            }});
         }];
         [command commit];
         s.copyMs = elapsedMs(started); // CPU encoding only; GPU completion is asynchronous.
@@ -360,7 +370,8 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
     const double seconds = std::chrono::duration<double>(Clock::now().time_since_epoch() -
                                                          Clock::duration(s.phaseSince.load())).count();
     if (!phase || seconds < 0.5) return self.lastReport;
-    static const char* const phases[] = {"", "attente du GPU (lot précédent)", "attente du verrou Metal", "encodage", "fin du lot"};
+    static const char* const phases[] = {"", "attente du GPU (lot précédent)", "attente du verrou Metal", "encodage", "fin du lot",
+                                         "attente du GPU (écritures compute)", "écriture en mémoire du jeu"};
     static const char* const work[] = {"", " · compilation MSL", " · création du pipeline", " · traduction GCN"};
     const int compiling = s.renderer.compiling;
     return [NSString stringWithFormat:@"Soumission en cours depuis %.1f s : %s, dessin %u (PS 0x%llx)%s\n%@", seconds, phases[phase],
