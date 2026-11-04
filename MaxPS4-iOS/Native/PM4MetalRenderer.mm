@@ -187,8 +187,11 @@ id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
     if (found != kernels_.end()) return found->second;
     GCNTranslateOptions options;
     options.stage = GCNStage::compute; options.name = "cs_program"; options.userCount = c.userCount;
+    options.maxInstructions = 1024;
     for (unsigned k = 0; k < 16; ++k) options.userData[k] = c.user[k];
+    compiling = 3;
     const auto cs = translateGCN(code_, c.program, options);
+    compiling = 0;
     if (!cs) { fail("CS translation: " + cs.error); return nil; }
     id<MTLLibrary> library = this->library(gcnMetalPrelude(native_, 1, 1, 1) + cs.source + gcnMetalComputeEntry("cs_program"));
     if (!library) return nil;

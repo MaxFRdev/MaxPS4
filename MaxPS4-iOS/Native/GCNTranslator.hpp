@@ -27,6 +27,7 @@ struct GCNTranslateOptions {
     GCNStage stage = GCNStage::pixel;
     std::uint32_t userData[16] = {}; // resolves s_swappc_b64 targets
     unsigned userCount = 0;
+    std::size_t maxInstructions = 16384;
     std::string name = "gcn_program";
 };
 struct GCNTranslation {
@@ -106,7 +107,7 @@ private:
             std::uint64_t pc = work.back();
             work.pop_back();
             while (!code_.count(pc)) {
-                if (code_.size() > 16384) return fail("program too large");
+                if (code_.size() >= options_.maxInstructions) return fail("program too large");
                 Inst in;
                 if (!decodeAt(pc, in)) return false;
                 code_[pc] = in;
