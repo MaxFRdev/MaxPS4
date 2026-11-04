@@ -31,7 +31,9 @@ void build(id<MTLDevice> device, const std::string& source, MTLCompileOptions* o
     NSDate* started = [NSDate date];
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block std::string stage = "library";
-    [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options
+    NSString* text = [NSString stringWithUTF8String:source.c_str()];
+    // Off this thread: the call itself may not return for minutes.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ [device newLibraryWithSource:text options:options
                completionHandler:^(id<MTLLibrary> library, NSError* error) {
         std::printf("SLOW %-18s library %8.1f s%s\n", name, -[started timeIntervalSinceNow], library ? "" : " REFUSED");
         std::fflush(stdout);
@@ -47,13 +49,16 @@ void build(id<MTLDevice> device, const std::string& source, MTLCompileOptions* o
             std::fflush(stdout);
             dispatch_semaphore_signal(done);
         }];
-    }];
+    }]; });
     if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, std::int64_t(limit * NSEC_PER_SEC))))
         std::printf("SLOW %-18s still in %s after %.0f s\n", name, stage.c_str(), limit);
     std::fflush(stdout);
 }
 }
 int slowPipelineTimes() {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 240 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        std::puts("SLOW watchdog after 240 s"); std::fflush(stdout); _exit(0);
+    });
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) { std::puts("SKIP slow pipeline: no Metal device"); return 0; }
@@ -76,8 +81,8 @@ int slowPipelineTimes() {
         if (@available(macOS 15.0, iOS 18.0, *)) game.mathMode = MTLMathModeSafe;
         MTLCompileOptions* size = [game copy];
         size.optimizationLevel = MTLLibraryOptimizationLevelSize;
-        build(device, source + "\n// size\n", size, "optimise for size", 120);
-        build(device, source, game, "game options", 120);
+        build(device, source + "\n// size\n", size, "optimise for size", 100);
+        build(device, source, game, "game options", 100);
     }
     std::fflush(stdout);
     _exit(0); // Builds past their limit would slow every later measure.
