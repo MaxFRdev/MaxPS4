@@ -79,8 +79,7 @@ struct GameMetalState {
         native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u en cours, %u refusés · %u dessins reportés%s%s%s%@",
             renderer.pipelinesBuilt, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
             refusal.empty() ? "" : " · dernier refus : ", refusal.c_str(), pending.c_str(), native];
-        native = [NSString stringWithFormat:@"
-Barrières compute : %u (%u au plus par lot) · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%@",
+        native = [NSString stringWithFormat:@"\nBarrières compute : %u (%u au plus par lot) · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%@",
             barriers, mostBarriers, barrierMs, renderer.dispatchCopyMs, double(renderer.dispatchCopyBytes) / (1 << 20),
             renderer.writebackMs, double(renderer.writebackBytes) / (1 << 20), batches, slowBatches, native];
         return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés, %u grandes zones partagées (%u lues sans copie)\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées · dernier : %s\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nÉchantillons dessinés par dessin (dernier lot) :%s\nDessins du dernier lot :%s\nProgrammes des premiers dessins :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@%@",
