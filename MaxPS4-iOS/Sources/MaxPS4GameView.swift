@@ -542,14 +542,14 @@ struct MaxPS4GameView: View {
                 // The D-pad, then the left stick beside it.
                 HStack(alignment: .bottom, spacing: size * 0.25) {
                     VStack(spacing: 0) {
-                        control("↑", label: "Haut", bit: 0x10, size: size)
+                        controlFace("↑", label: "Haut", bit: 0x10, size: size)
                         HStack(spacing: 0) {
-                            control("←", label: "Gauche", bit: 0x80, size: size)
+                            controlFace("←", label: "Gauche", bit: 0x80, size: size)
                             Color.clear.frame(width: size, height: size).allowsHitTesting(false)
-                            control("→", label: "Droite", bit: 0x20, size: size)
+                            controlFace("→", label: "Droite", bit: 0x20, size: size)
                         }
-                        control("↓", label: "Bas", bit: 0x40, size: size)
-                    }
+                        controlFace("↓", label: "Bas", bit: 0x40, size: size)
+                    }.contentShape(Rectangle()).gesture(dpadGesture(size * 3))
                     stickControl($leftStick, name: "L", label: "Stick gauche", size: size * 2)
                 }
                 Spacer(minLength: 0)
@@ -602,7 +602,33 @@ struct MaxPS4GameView: View {
             .onEnded { _ in stick.wrappedValue = .zero; session.input(touchPad) })
     }
 
+    // One gesture for the four arrows: a thumb slides between them and reaches
+    // the diagonals, in eight 45° sectors around the centre.
+    private func dpadGesture(_ side: CGFloat) -> some Gesture {
+        func press(_ bits: UInt32) {
+            guard touch & 0xf0 != bits else { return }
+            touch = touch & ~0xf0 | bits; session.input(touchPad)
+        }
+        return DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let x = value.location.x - side / 2, y = value.location.y - side / 2
+                guard max(abs(x), abs(y)) > side * 0.08 else { return press(0) }
+                var bits: UInt32 = 0
+                if abs(x) > abs(y) * 0.414 { bits |= x < 0 ? 0x80 : 0x20 }
+                if abs(y) > abs(x) * 0.414 { bits |= y < 0 ? 0x10 : 0x40 }
+                press(bits)
+            }
+            .onEnded { _ in press(0) }
+    }
+
     private func control(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
+        controlFace(name, label: label, bit: bit, size: size)
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { _ in touch |= bit; session.input(touchPad) }
+                .onEnded { _ in touch &= ~bit; session.input(touchPad) })
+    }
+
+    private func controlFace(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
         let pressed = touch & bit != 0
         return Text(name)
             .font(.system(size: name == "Options" ? 10 : name.count == 2 ? 14 : 22, weight: .bold, design: .rounded))
@@ -617,9 +643,6 @@ struct MaxPS4GameView: View {
                 touch |= bit; session.input(touchPad)
                 touch &= ~bit
             }
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in touch |= bit; session.input(touchPad) }
-                .onEnded { _ in touch &= ~bit; session.input(touchPad) })
     }
 #endif
 }
