@@ -552,12 +552,12 @@ struct MaxPS4GameView: View {
                     }.overlay(ControlTouchLayer(reading: ControlTouchLayer.arrows,
                                                   changed: { bits in touch = touch & ~0xf0 | bits; session.input(touchPad) },
                                                   arrived: { session.touchArrived($0) }).accessibilityHidden(true))
-                    stickControl($leftStick, name: "L", label: "Stick gauche", size: size * 2)
+                    stickControl($leftStick, name: "L", label: "Stick gauche", click: MaxPS4PadState.l3, size: size * 2)
                 }
                 Spacer(minLength: 0)
                 // Where a DualShock 4 has it: below and left of the face buttons.
                 if rightStickShown {
-                    stickControl($rightStick, name: "R", label: "Stick droit", size: size * 1.9).padding(.trailing, size * 0.25)
+                    stickControl($rightStick, name: "R", label: "Stick droit", click: MaxPS4PadState.r3, size: size * 1.9).padding(.trailing, size * 0.25)
                 }
                 VStack(spacing: 0) {
                     control("△", label: "Triangle", bit: 0x1000, size: size)
@@ -576,8 +576,8 @@ struct MaxPS4GameView: View {
     }
 
     // A touch stick: full deflection at 80% of the radius; the knob stays inside the ring.
-    private func stickControl(_ stick: Binding<CGPoint>, name: String, label: LocalizedStringKey, size: CGFloat) -> some View {
-        let radius = size / 2, position = stick.wrappedValue, active = position != .zero
+    private func stickControl(_ stick: Binding<CGPoint>, name: String, label: LocalizedStringKey, click: UInt32, size: CGFloat) -> some View {
+        let radius = size / 2, position = stick.wrappedValue, active = position != .zero || touch & click != 0
         return ZStack {
             Circle().fill(Color.black.opacity(0.25))
                 .overlay(Circle().stroke(active ? Color.cyan : Color.white.opacity(0.35), lineWidth: 1))
@@ -592,16 +592,18 @@ struct MaxPS4GameView: View {
         .shadow(color: .purple.opacity(active ? 0.45 : 0.15), radius: 6)
         .contentShape(Circle())
         .accessibilityLabel(label)
-        .gesture(DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                var x = (value.location.x - radius) / (radius * 0.8)
-                var y = (value.location.y - radius) / (radius * 0.8)
-                let length = (x * x + y * y).squareRoot()
-                if length > 1 { x /= length; y /= length }
-                stick.wrappedValue = CGPoint(x: x, y: y)
-                session.input(touchPad)
-            }
-            .onEnded { _ in stick.wrappedValue = .zero; session.input(touchPad) })
+        .overlay(StickTouchLayer(moved: { point in
+            guard let point else { stick.wrappedValue = .zero; session.input(touchPad); return }
+            var x = (point.x - radius) / (radius * 0.8)
+            var y = (point.y - radius) / (radius * 0.8)
+            let length = (x * x + y * y).squareRoot()
+            if length > 1 { x /= length; y /= length }
+            stick.wrappedValue = CGPoint(x: x, y: y)
+            session.input(touchPad)
+        }, clicked: { down in
+            touch = down ? touch | click : touch & ~click
+            session.input(touchPad)
+        }, arrived: { session.touchArrived($0) }).accessibilityHidden(true))
     }
 
 
@@ -698,6 +700,56 @@ private struct ControlTouchLayer: UIViewRepresentable {
     }
     func updateUIView(_ surface: Surface, context: Context) {
         surface.reading = reading; surface.changed = changed; surface.arrived = arrived
+    }
+}
+#endif
+#if MAXPS4_FEX_APP
+// A touch stick, read like the buttons. A second touch soon after the last one
+// clicks it (L3, R3) until the finger lifts, and it still moves meanwhile.
+private struct StickTouchLayer: UIViewRepresentable {
+    let moved: (CGPoint?) -> Void
+    let clicked: (Bool) -> Void
+    let arrived: (TimeInterval) -> Void
+    final class Surface: UIView {
+        private static let secondTouch: TimeInterval = 0.3, shortestClick: TimeInterval = 0.08
+        var moved: (CGPoint?) -> Void = { _ in }
+        var clicked: (Bool) -> Void = { _ in }
+        var arrived: (TimeInterval) -> Void = { _ in }
+        private var finger: UITouch?
+        private var lifted: TimeInterval = 0
+        private var clickedAt: TimeInterval?
+        private func lift(_ touch: UITouch) {
+            finger = nil; lifted = touch.timestamp
+            moved(nil)
+            guard let clickedAt else { return }
+            self.clickedAt = nil
+            let left = Self.shortestClick - (touch.timestamp - clickedAt)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(left, 0)) { [weak self] in self?.clicked(false) }
+        }
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard finger == nil, let touch = touches.first else { return }
+            finger = touch
+            if touch.timestamp - lifted < Self.secondTouch { clickedAt = touch.timestamp; clicked(true) }
+            moved(touch.location(in: self))
+            arrived(ProcessInfo.processInfo.systemUptime - touch.timestamp)
+        }
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { moved(finger.location(in: self)) }
+        }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { lift(finger) }
+        }
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if let finger, touches.contains(finger) { lift(finger) }
+        }
+    }
+    func makeUIView(context: Context) -> Surface {
+        let surface = Surface()
+        surface.backgroundColor = .clear
+        return surface
+    }
+    func updateUIView(_ surface: Surface, context: Context) {
+        surface.moved = moved; surface.clicked = clicked; surface.arrived = arrived
     }
 }
 #endif
