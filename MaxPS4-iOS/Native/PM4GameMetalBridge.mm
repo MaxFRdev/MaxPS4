@@ -84,8 +84,7 @@ struct GameMetalState {
         native = [NSString stringWithFormat:@"\nBarrières compute : %u (%u au plus par lot) · remplissages %u · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%s%s%@",
             barriers, mostBarriers, renderer.fillsDone, barrierMs, renderer.dispatchCopyMs, double(renderer.dispatchCopyBytes) / (1 << 20),
             renderer.writebackMs, double(renderer.writebackBytes) / (1 << 20), batches, slowBatches,
-            programCosts.empty() ? "" : "
-GPU par programme, un lot :", programCosts.c_str(), native];
+            programCosts.empty() ? "" : "\nGPU par programme, un lot :", programCosts.c_str(), native];
         return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés, %u grandes zones partagées (%u lues sans copie)\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées · dernier : %s\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nÉchantillons dessinés par dessin (dernier lot) :%s\nDessins du dernier lot :%s\nProgrammes des premiers dessins :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused, renderer.rangesShared, renderer.rangesMapped,
             stats.skipped, renderer.targetCount(), stats.dispatches, computeRun - renderer.dispatchesWithoutEffect,
