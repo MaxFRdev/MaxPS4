@@ -102,8 +102,8 @@ inline void loadFetchVS(Arena& arena) {
 // record as 8_8_8_8 UNORM, then as pixel (n, g) of a linear 8x8 image.
 constexpr std::uint64_t computeCS = 0x11000, computeSource = 0x14000, computeBuffer = 0x15000, computeImage = 0x16000;
 inline const std::uint32_t computeSgprs[16] = {
-    0x14000, 16u << 16, 40, 0x77fac,                        // V# source: stride 16, 40 records, float xyzw
-    0x15000, 4u << 16, 100, 0x50fac,                        // V# destination: stride 4, 8_8_8_8 UNORM
+    0x14000, 0x7000 | 16u << 16, 40, 0x77fac,               // V# source: memory type 7, stride 16, 40 records, float xyzw
+    0x15000, 0x7000 | 4u << 16, 100, 0x50fac,                // V# destination: memory type 7, stride 4, 8_8_8_8 UNORM
     0x160, 10u << 20, 7 | 7u << 14, 0x90800fac, 7u << 13, 0, 0, 0}; // T#: 8x8, pitch 8, 8_8_8_8 UNORM, linear 2D
 inline void loadComputeCS(Arena& arena) {
     arena.code(computeCS, {
