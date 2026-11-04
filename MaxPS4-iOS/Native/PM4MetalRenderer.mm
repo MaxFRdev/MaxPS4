@@ -152,14 +152,20 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                 }];
             }];
         };
-        build(compileOptions(), true);
+        // The game's programs favour speed over bit-exact sin, exp and division.
+        auto gameOptions = [] {
+            MTLCompileOptions* options = compileOptions();
+            if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeFast;
+            return options;
+        };
+        build(gameOptions(), true);
         // Default optimisation did not finish some programs on the iPhone, large or
         // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
         // deferred and the screen black. Metal caches whichever build completes.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             { std::lock_guard<std::mutex> lock(async->mutex);
               if (!async->pending.count(key)) return; }
-            MTLCompileOptions* size = compileOptions();
+            MTLCompileOptions* size = gameOptions();
             if (@available(macOS 13.0, iOS 16.0, *)) size.optimizationLevel = MTLLibraryOptimizationLevelSize;
             build(size, false);
         });
@@ -863,6 +869,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         }
         [nativeArguments_ setArgumentBuffer:arguments offset:0];
         *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = ((1u << found) - 1) | sampled;
+        nativeBound_ = found; nativeFiltered_ = __builtin_popcount(sampled);
         static const NSUInteger fields[3] = {0, 4, 7};
         for (unsigned k = 0; k < 3; ++k) {
             const NSUInteger at = fields[k], low = k ? at + 1 : 2;
@@ -921,6 +928,8 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             unsigned shown = 0;
             // A pixel lane that stopped before its image instructions names no texture: say why.
             if (!scanner_.pixelError().empty()) batchDraws += ", PS interprété : " + scanner_.pixelError();
+            std::snprintf(text, sizeof text, ", natives %u dont %u filtrees sur %zu", nativeBound_, nativeFiltered_, scanner_.images().size());
+            batchDraws += text;
             for (const auto& t : scanner_.images()) {
                 if (shown++ == 3) break;
                 const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
