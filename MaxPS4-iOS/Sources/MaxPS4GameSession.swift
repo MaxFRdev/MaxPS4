@@ -332,7 +332,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         inputLock.lock(); defer { inputLock.unlock() }
         if let inputEngine { maxps4_fex_engine_videoout_pause(inputEngine, paused ? 1 : 0) }
     }
-    // How long presses took: iOS to the app (arrows), the app to the game's read.
+    // How long presses took: iOS to the app, the app to the game's read.
     func touchArrived(_ seconds: TimeInterval) {
         inputLock.lock(); touchesArrived += 1; touchSeconds += seconds; inputLock.unlock()
     }
@@ -341,7 +341,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         maxps4_fex_engine_pad_latency(engine, &count, &total, &most)
         inputLock.lock(); let touches = touchesArrived, seconds = touchSeconds; inputLock.unlock()
         guard count > 0 else { return "" }
-        return String(format: "Commandes : %llu appuis lus par le jeu en %.1f ms en moyenne (au plus %.1f ms) · flèches : %ld touches livrées par iOS en %.1f ms en moyenne\n",
+        return String(format: "Commandes : %llu appuis lus par le jeu en %.1f ms en moyenne (au plus %.1f ms) · %ld touches livrées par iOS en %.1f ms en moyenne\n",
                       count, Double(total) / Double(count) / 1000, Double(most) / 1000, touches, touches > 0 ? seconds * 1000 / Double(touches) : 0)
     }
     func input(_ pad: MaxPS4PadState) {

@@ -549,8 +549,9 @@ struct MaxPS4GameView: View {
                             controlFace("→", label: "Droite", bit: 0x20, size: size)
                         }
                         controlFace("↓", label: "Bas", bit: 0x40, size: size)
-                    }.overlay(DPadTouchLayer(changed: { bits in touch = touch & ~0xf0 | bits; session.input(touchPad) },
-                                               arrived: { session.touchArrived($0) }).accessibilityHidden(true))
+                    }.overlay(ControlTouchLayer(reading: ControlTouchLayer.arrows,
+                                                  changed: { bits in touch = touch & ~0xf0 | bits; session.input(touchPad) },
+                                                  arrived: { session.touchArrived($0) }).accessibilityHidden(true))
                     stickControl($leftStick, name: "L", label: "Stick gauche", size: size * 2)
                 }
                 Spacer(minLength: 0)
@@ -606,9 +607,9 @@ struct MaxPS4GameView: View {
 
     private func control(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
         controlFace(name, label: label, bit: bit, size: size)
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in touch |= bit; session.input(touchPad) }
-                .onEnded { _ in touch &= ~bit; session.input(touchPad) })
+            .overlay(ControlTouchLayer(reading: { _, _ in bit },
+                                       changed: { bits in touch = touch & ~bit | bits; session.input(touchPad) },
+                                       arrived: { session.touchArrived($0) }).accessibilityHidden(true))
     }
 
     private func controlFace(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
@@ -631,30 +632,34 @@ struct MaxPS4GameView: View {
 }
 
 #if MAXPS4_FEX_APP
-// The touch arrows, read straight from UIKit touches: no gesture recognizer or
-// SwiftUI update between the finger and the pad. A thumb slides between them
-// and reaches the diagonals, in eight 45° sectors around the centre.
-private struct DPadTouchLayer: UIViewRepresentable {
+// A touch control read straight from UIKit touches: no gesture recognizer or
+// SwiftUI update between the finger and the pad. `reading` gives the buttons a
+// point of the control presses, `changed` receives them.
+private struct ControlTouchLayer: UIViewRepresentable {
+    let reading: (CGPoint, CGSize) -> UInt32
     let changed: (UInt32) -> Void
     let arrived: (TimeInterval) -> Void
+    // The arrows: a thumb slides between them and reaches the diagonals, in
+    // eight 45° sectors around the centre.
+    static func arrows(at point: CGPoint, in size: CGSize) -> UInt32 {
+        let x = point.x - size.width / 2, y = point.y - size.height / 2
+        guard max(abs(x), abs(y)) > size.width * 0.08 else { return 0 }
+        var bits: UInt32 = 0
+        if abs(x) > abs(y) * 0.414 { bits |= x < 0 ? 0x80 : 0x20 }
+        if abs(y) > abs(x) * 0.414 { bits |= y < 0 ? 0x10 : 0x40 }
+        return bits
+    }
     final class Surface: UIView {
         // A tap stays pressed this long: the game reads the pad twice a frame
         // and passes it on between threads, so a shorter one can get lost.
         private static let shortestPress: TimeInterval = 0.08
+        var reading: (CGPoint, CGSize) -> UInt32 = { _, _ in 0 }
         var changed: (UInt32) -> Void = { _ in }
         var arrived: (TimeInterval) -> Void = { _ in }
         private var finger: UITouch?
         private var pressed: UInt32 = 0
         private var pressedAt: TimeInterval = 0
         private var release: DispatchWorkItem?
-        private func direction(_ touch: UITouch) -> UInt32 {
-            let point = touch.location(in: self), x = point.x - bounds.midX, y = point.y - bounds.midY
-            guard max(abs(x), abs(y)) > bounds.width * 0.08 else { return 0 }
-            var bits: UInt32 = 0
-            if abs(x) > abs(y) * 0.414 { bits |= x < 0 ? 0x80 : 0x20 }
-            if abs(y) > abs(x) * 0.414 { bits |= y < 0 ? 0x10 : 0x40 }
-            return bits
-        }
         private func press(_ bits: UInt32) {
             release?.cancel(); release = nil
             guard bits != pressed else { return }
@@ -673,11 +678,11 @@ private struct DPadTouchLayer: UIViewRepresentable {
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             guard finger == nil, let touch = touches.first else { return }
             finger = touch
-            press(direction(touch))
+            press(reading(touch.location(in: self), bounds.size))
             arrived(ProcessInfo.processInfo.systemUptime - touch.timestamp)
         }
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-            if let finger, touches.contains(finger) { press(direction(finger)) }
+            if let finger, touches.contains(finger) { press(reading(finger.location(in: self), bounds.size)) }
         }
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
             if let finger, touches.contains(finger) { lift() }
@@ -692,7 +697,7 @@ private struct DPadTouchLayer: UIViewRepresentable {
         return surface
     }
     func updateUIView(_ surface: Surface, context: Context) {
-        surface.changed = changed; surface.arrived = arrived
+        surface.reading = reading; surface.changed = changed; surface.arrived = arrived
     }
 }
 #endif
