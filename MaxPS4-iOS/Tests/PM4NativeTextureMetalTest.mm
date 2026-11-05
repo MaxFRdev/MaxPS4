@@ -302,6 +302,45 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             assert(renderer.targetReads == before + 1 && read != zeros);
             std::puts("PASS tiled T# of a colour target reads the target's Metal texture");
         }
+        // 3b. A T# narrower than the colour target it reads, as Mortal Kombat's
+        //     1332 wide T# on a 1344 wide target: Metal's sampler must filter it
+        //     (a software read here cost the iPhone 25 ms a frame), stopping at
+        //     the T#'s last texel. Depth compare bits refuse the sampler: that
+        //     renderer filters the same draw in software, the reference.
+        {
+            const uint32_t linear[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
+                                         (imageW - 1) << 13, 0, 0, 0, 0, 0, 0x500000, 0};
+            auto narrow = [&](bool nativeOnly, uint32_t sampler) {
+                PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
+                renderer.nativeSamplesOnly = nativeOnly;
+                std::memcpy(d.psUser, linear, sizeof linear);
+                id<MTLCommandBuffer> layerCommands = [queue commandBuffer];
+                assert(renderer.encode(d, layerCommands));
+                [layerCommands commit]; [layerCommands waitUntilCompleted];
+                const uint32_t cropped[12] = {std::uint32_t(target >> 8), 10u << 20, (screenW - 13) | ((screenH - 1) << 14), 0x90800facu,
+                                              (screenW - 1) << 13, 0, 0, 0, sampler, 0, 0x500000, 0};
+                PM4Draw c = d;
+                std::memcpy(c.psUser, cropped, sizeof cropped);
+                c.target = 0x400000;
+                id<MTLCommandBuffer> commands = [queue commandBuffer];
+                const bool encoded = renderer.encode(c, commands);
+                if (!encoded) std::printf("narrow T#: %s\n", renderer.error.c_str());
+                assert(encoded);
+                [commands commit]; [commands waitUntilCompleted];
+                assert(commands.status == MTLCommandBufferStatusCompleted && !commands.error);
+                return pixels(renderer.target(c.target));
+            };
+            const auto fast = narrow(true, 2 | (2 << 3));
+            const auto slow = narrow(false, 2 | (2 << 3) | (1 << 12));
+            const auto refused = narrow(true, 2 | (2 << 3) | (1 << 12));
+            assert(fast.size() == slow.size() && slow.size() == refused.size());
+            unsigned worst = 0;
+            for (std::size_t k = 0; k < fast.size(); ++k)
+                worst = std::max(worst, unsigned(std::abs(int(fast[k]) - int(slow[k]))));
+            std::printf("narrow T#: worst difference with software filtering %u\n", worst);
+            assert(worst <= 2 && fast != refused);
+            std::puts("PASS a T# narrower than its colour target is filtered by Metal's sampler");
+        }
         // 4. Asynchronous pipelines (the game bridge): the first draw is
         //    deferred while Metal builds its pipeline, a later one draws.
         {

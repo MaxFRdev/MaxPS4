@@ -103,9 +103,9 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     }
     std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
                                gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
-    // EXPERIMENT: no software sampling path, a T# no bound texture matches reads as
-    // zero. Measures whether its code is what holds the iPhone back.
-    if (native_) {
+    // Tests: a sample Metal's sampler refuses reads as zero instead of filtering in
+    // software, which shows whether a draw really takes the native path.
+    if (native_ && nativeSamplesOnly) {
         const std::string sample = "if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);";
         const auto at = source.find(sample);
         if (at != std::string::npos) source.insert(at + sample.size(), "\n    if (true) return float4(0.0f, 0.0f, 0.0f, 0.0f);");

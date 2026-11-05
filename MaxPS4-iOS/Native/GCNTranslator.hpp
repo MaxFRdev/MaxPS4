@@ -1036,15 +1036,25 @@ GCN_FN bool gcn_native_read(texture2d<float> image, GCNRes8 t, int x, int y, thr
     return true;
 }
 // The whole sample filtered by Metal's sampler (one sample instruction: the
-// CPU built it from this S#): the texture must be exactly the T#'s size
-// (8-bit filtering, within a level of GCN's own). False: gcn_sample filters itself.
+// CPU built it from this S#), 8-bit filtering, within a level of GCN's own. A
+// colour target can be wider than the T# reading it (1344 for 1332: tile
+// alignment): clamped addressing then stops at the T#'s last texel, wrapping
+// would need the T#'s own edge. False: gcn_sample filters itself.
 GCN_FN bool gcn_native_filter(texture2d<float> image, sampler q, bool usable, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v,
                               thread float4& value) {
     const uint w = (t.d[2] & 0x3fffu) + 1u, h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
-    if (!usable || image.get_width() != w || image.get_height() != h) return false;
+    const uint iw = image.get_width(), ih = image.get_height();
+    if (!usable || iw < w || ih < h) return false;
     const bool un = unorm || ((s.d[0] >> 15) & 1u) != 0u;
-    const float2 uv = un ? float2(u / float(w), v / float(h)) : float2(u, v);
-    value = gcn_native_order(t, image.sample(q, uv, level(0.0f)));
+    if (iw == w && ih == h) {
+        const float2 uv = un ? float2(u / float(w), v / float(h)) : float2(u, v);
+        value = gcn_native_order(t, image.sample(q, uv, level(0.0f)));
+        return true;
+    }
+    if ((s.d[0] & 63u) != 18u) return false; // Both axes clamped.
+    const float2 size = float2(float(w), float(h));
+    const float2 texel = clamp(un ? float2(u, v) : float2(u, v) * size, float2(0.5f), size - 0.5f);
+    value = gcn_native_order(t, image.sample(q, texel / float2(float(iw), float(ih)), level(0.0f)));
     return true;
 }
 #endif
