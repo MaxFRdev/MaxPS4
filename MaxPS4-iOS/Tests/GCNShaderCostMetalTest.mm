@@ -12,6 +12,7 @@
 #include "GCNGamePrograms.h"
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -30,7 +31,7 @@ std::string replaced(std::string s, const std::string& from, const std::string& 
     return s;
 }
 }
-int main() {
+int main(int argc, char** argv) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) { std::puts("SKIP shader cost: no Metal device"); return 0; }
@@ -188,6 +189,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         };
         const std::string uniform1800 = uniformLoads(game1800.source, table1800), uniform2000 = uniformLoads(game2000.source, table2000);
         std::vector<std::uint32_t> sites1800, sites2000; // Filled by the scan, below.
+        auto noSites = [&](const std::string& source) { return replaced(source, "gcn_site_hit(M, ", "false && gcn_site_hit(M, "); };
         struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; const std::vector<std::uint32_t>* sites = nullptr; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
@@ -210,6 +212,8 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"native: no T# match (GCN filters)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 0},
             {"PS 1800: fourth image in software", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 3, 4},
             {"PS 1800: four images bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4},
+            {"PS 1800: no table code, three bound", vs.source + noSites(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 3, 4},
+            {"PS 1800: no table code, four bound", vs.source + noSites(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 2, 4},
             {"PS 1800: scalar table, three bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 3, 4, &sites1800},
             {"PS 1800: scalar table, four bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
             {"PS 1800: no software path", vs.source + game1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 5},
@@ -229,6 +233,19 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"scalar: 32 loads, 2 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 2},
             {"scalar: 32 loads, 16 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 3},
         };
+        // A GPU timeout makes Metal ignore the whole process afterwards: each game
+        // program variant runs in a process of its own, this one given by name.
+        if (argc > 1) {
+            variants.erase(std::remove_if(variants.begin(), variants.end(), [&](const Variant& v) { return std::string(v.name) != argv[1]; }), variants.end());
+        } else {
+            for (const auto& v : variants) {
+                if (std::strncmp(v.name, "PS ", 3)) continue;
+                const std::string command = std::string("\"") + argv[0] + "\" \"" + v.name + "\"";
+                const int status = std::system(command.c_str());
+                if (status) std::printf("SHADER CHILD %s: status %d\n", v.name, status);
+            }
+            variants.erase(std::remove_if(variants.begin(), variants.end(), [](const Variant& v) { return !std::strncmp(v.name, "PS ", 3); }), variants.end());
+        }
         MTLCompileOptions* options = [MTLCompileOptions new];
         if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeSafe;
         std::vector<id<MTLRenderPipelineState>> pipelines(variants.size());
@@ -370,9 +387,9 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                 [encoder setVertexBuffer:memory offset:0 atIndex:0]; [encoder setFragmentBuffer:memory offset:0 atIndex:0];
                 State drawn = states[variants[k].state];
                 // As the renderer does, bound for whichever program declares it.
-                static const std::vector<std::uint32_t> noSites(1024, 0);
+                static const std::vector<std::uint32_t> emptySites(1024, 0);
                 if (variants[k].sites) drawn.flags |= 4; // GCN_DRAW_SITES
-                const auto& siteWords = variants[k].sites ? *variants[k].sites : noSites;
+                const auto& siteWords = variants[k].sites ? *variants[k].sites : emptySites;
                 [encoder setFragmentBytes:siteWords.data() length:siteWords.size() * 4 atIndex:4];
                 [encoder setVertexBytes:&drawn length:sizeof state atIndex:1]; [encoder setFragmentBytes:&drawn length:sizeof state atIndex:1];
                 [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
