@@ -24,6 +24,8 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -148,6 +150,17 @@ private:
         std::map<PipelineKey, Pending> pending;
         std::set<PipelineKey> refused;
         std::map<PipelineKey, id<MTLRenderPipelineState>> ready; // nil: refused
+        // Default builds wait here until no size build is left, then run one at a time.
+        std::deque<std::function<void()>> later;
+        unsigned sizing = 0;
+        bool running = false;
+        void next() {
+            std::function<void()> start;
+            { std::lock_guard<std::mutex> lock(mutex);
+              if (sizing || running || later.empty()) return;
+              start = std::move(later.front()); later.pop_front(); running = true; }
+            start();
+        }
         std::string lastError;
         double slowest = 0; // Seconds the slowest finished build took.
     };

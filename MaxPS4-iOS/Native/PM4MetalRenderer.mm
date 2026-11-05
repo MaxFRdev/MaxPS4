@@ -148,11 +148,17 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
             async->ready[key] = state;
             if (!state) async->lastError = error ? error.localizedDescription.UTF8String : "unknown";
         };
+        auto finished = [async, finish](id<MTLRenderPipelineState> state, NSError* error, bool fast) {
+            finish(state, error, fast);
+            { std::lock_guard<std::mutex> lock(async->mutex);
+              if (fast) async->running = false; else --async->sizing; }
+            async->next();
+        };
         id<MTLDevice> device = device_;
         NSString* text = [NSString stringWithUTF8String:source.c_str()];
         auto build = [=](MTLCompileOptions* options, bool fast) {
             [device newLibraryWithSource:text options:options completionHandler:^(id<MTLLibrary> library, NSError* error) {
-                if (!library) { finish(nil, error, fast); return; }
+                if (!library) { finished(nil, error, fast); return; }
                 { std::lock_guard<std::mutex> lock(async->mutex);
                   const auto pending = async->pending.find(key);
                   if (pending != async->pending.end()) pending->second.stage = "render pipeline creation"; }
@@ -160,22 +166,23 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                 own.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
                 own.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
                 [device newRenderPipelineStateWithDescriptor:own completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
-                    finish(state, failed, fast);
+                    finished(state, failed, fast);
                 }];
             }];
         };
-        build(compileOptions(), true); // Fast math did not finish some programs in minutes either.
         // Default optimisation did not finish some programs on the iPhone, large or
         // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
-        // deferred and the screen black. Metal caches whichever build completes.
-        // Soon after the default build starts: until one ends, its draws are missing.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            { std::lock_guard<std::mutex> lock(async->mutex);
-              if (!async->pending.count(key)) return; }
-            MTLCompileOptions* size = compileOptions();
-            if (@available(macOS 13.0, iOS 16.0, *)) size.optimizationLevel = MTLLibraryOptimizationLevelSize;
-            build(size, false);
-        });
+        // deferred and the screen black. Started together, size builds waited behind
+        // them (20.5 s, 2 of 19 first): size goes first, default builds follow one at
+        // a time once none is left, and replace it. Metal caches whichever completes.
+        // Fast math did not finish some programs in minutes either.
+        MTLCompileOptions* fastest = compileOptions();
+        MTLCompileOptions* size = compileOptions();
+        if (@available(macOS 13.0, iOS 16.0, *)) size.optimizationLevel = MTLLibraryOptimizationLevelSize;
+        { std::lock_guard<std::mutex> lock(async->mutex);
+          ++async->sizing;
+          async->later.push_back([build, fastest] { build(fastest, true); }); }
+        build(size, false);
         deferred_ = true;
         return nil;
     }
@@ -338,7 +345,7 @@ bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> c
         target = &candidate;
     }
     if (!target && !writeGuest_) return refuse("sans ecriture", address, bytes);
-    if (!target) for (const auto& [at, length] : inPlace_) if (overlaps(at, length)) return refuse("zone partagee", at, bytes);
+    if (!target) for (const auto& [at, length] : inPlace_) if (overlaps(at, length)) return refuse("zone partagee", address, bytes);
     auto fill = fills_.find(value);
     if (fill == fills_.end() || fill->second.length < bytes) {
         if (fills_.size() >= 4) fills_.clear();
