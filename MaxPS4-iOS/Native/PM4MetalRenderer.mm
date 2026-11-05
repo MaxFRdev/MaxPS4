@@ -946,7 +946,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     [encoder drawPrimitives:d.primitive == 6 ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
     if (counted) [encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
     if (!batching_) [encoder endEncoding];
-    if (batchDraws.size() < 4000) {
+    if (batchDraws.size() < 20000) {
         char text[256];
         std::snprintf(text, sizeof text, "\n  - cible 0x%llx %ux%u (swap %u, masque 0x%x, blend 0x%x), %zu sommets, ciseaux %u,%u-%u,%u, PS 0x%llx",
                       (unsigned long long)d.target, d.pitch, d.height, d.swap, d.mask, d.blend, d.indices.size(),
