@@ -34,6 +34,19 @@ struct Fixture {
 };
 }
 int main() {
+    {
+        // Depth state is only counted: Z enabled and written, back faces culled,
+        // then the same with no colour target mask.
+        Fixture f;
+        f.run({0xc0016900, 0x10, 3, 0xc0016900, 0x14, 0x1000, 0xc0016900, 0x16, 1 | (2 << 11),
+               0xc0016900, 0x200, 2 | 4 | (3 << 4), 0xc0016900, 0x205, 2, 0xc0012d00, 3, 2});
+        assert(f.stats.failed == 0 && f.draws.size() == 1);
+        assert(f.stats.depthTested == 1 && f.stats.depthWritten == 1 && f.stats.depthOnly == 0 && f.stats.cullBack == 1 && !f.stats.cullFront);
+        f.run({0xc0016900, 0x8e, 0, 0xc0012d00, 3, 2});
+        assert(f.stats.depthTested == 2 && f.stats.depthOnly == 1 && f.stats.skipped == 1 && f.draws.size() == 1);
+        assert(f.stats.lastDepth.find("16x24") != std::string::npos && f.stats.lastDepth.find("0x100000") != std::string::npos);
+        assert(f.stats.depthReport().find("2 dessins") != std::string::npos);
+    }
     for (const bool allMarkers : {false, true}) {
         Fixture f;
         // This input would exceed the expansion cap as a single fan. A dense
