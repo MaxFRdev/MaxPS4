@@ -838,7 +838,10 @@ struct GCNMemory { device const uchar* p; ulong base; ulong size; constant ulong
 };
 GCN_FN device const uchar* gcn_at(GCNMemory M, ulong o) {
     uint k = uint(o >> 48); o &= 0xfffffffffffful;
-    return k == 0u ? M.p + o : M.s.x[min(k, GCN_SLOTS) - 1u] + o;
+    // Constant indices only: a variable one puts the slot table in thread memory,
+    // which made every load of every pixel slow.
+    return (k == 0u ? M.p : k == 1u ? M.s.x[0] : k == 2u ? M.s.x[1] : k == 3u ? M.s.x[2] :
+            k == 4u ? M.s.x[3] : k == 5u ? M.s.x[4] : M.s.x[5]) + o;
 }
 struct GCNQuad { uint unused; };
 struct GCNLane {

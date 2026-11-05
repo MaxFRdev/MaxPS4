@@ -90,6 +90,9 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const std::string noLookup = replaced(prelude, "resolved = gcn_locate(M, base, footprint, offset);",
             "offset = M.ranges[5]; resolved = true;");
         // The runtime before per-axis wrapping (same results, measured in the same run).
+        // The translator's text keeps its own line ending: match each line alone.
+        const std::string slotArray = replaced(replaced(prelude, "return (k == 0u ? M.p : k == 1u ? M.s.x[0] : k == 2u ? M.s.x[1] : k == 3u ? M.s.x[2] :", "return k == 0u ? M.p + o : M.s.x[min(k, GCN_SLOTS) - 1u] + o;"),
+            "            k == 4u ? M.s.x[3] : k == 5u ? M.s.x[4] : M.s.x[5]) + o;", "");
         std::string previousWrap = replaced(prelude, "if (x >= 0 && x < size) return x; ", "");
         previousWrap = replaced(previousWrap, "int m = x; if (m < 0 || m >= period) { m = x % period; if (m < 0) m += period; }",
                                 "int m = x % period; if (m < 0) m += period;");
@@ -122,6 +125,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"native: Metal sampler filters", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 1},
             {"native: texel reads (before 50aaa47)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, texelOnly, 1},
             {"native: no T# match (GCN filters)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 0},
+            {"scalar: 32 loads, variable slot index", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, slotArray, -1, 2},
             {"scalar: 32 loads, no range table", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 1},
             {"scalar: 32 loads, 2 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 2},
             {"scalar: 32 loads, 16 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 3},
