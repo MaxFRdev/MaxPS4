@@ -900,11 +900,7 @@ GCN_FN uint gcn_ffbl(uint a) { return a == 0u ? 0xffffffffu : ctz(a); }
 // or before `a` is the only one that can hold it.
 GCN_FN uint gcn_range(GCNMemory M, ulong a) {
     uint k = 0u;
-    for (uint left = M.count; left > 1u;) {
-        uint step = left / 2u;
-        if (a >= M.ranges[3u * (k + step)]) k += step;
-        left -= step;
-    }
+    while (k + 1u < M.count && a >= M.ranges[3u * (k + 1u)]) ++k;
     return k;
 }
 GCN_FN bool gcn_locate(GCNMemory M, ulong a, ulong n, thread ulong& offset) {
