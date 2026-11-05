@@ -204,7 +204,8 @@ private:
             }
             body_ += "    }\n";
         }
-        std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) {\n";
+        std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) {\n"
+                           "    uint gcn_hint = 0u; (void)gcn_hint;\n";
         for (const auto n : sregs_) {
             std::string init = "0u";
             if (n < 20) init = "L.user[" + std::to_string(n) + "]";
@@ -410,10 +411,10 @@ private:
             body_ += "{ ulong o = " + offset + "; ulong a = gcn_u64(" + s(base) + ", " + s(base + 1) + " & 0xfffu) + o; "
                      "uint stride = (" + s(base + 1) + " >> 16) & 0x3fffu; "
                      "ulong lim = stride != 0u ? ulong(" + s(base + 2) + ") * stride : ulong(" + s(base + 2) + "); ";
-            if (count == 1) setScalar(d, "(o + 4ul <= lim) ? gcn_ld32(M, a) : 0u");
+            if (count == 1) setScalar(d, "(o + 4ul <= lim) ? gcn_ld32_hint(M, a, gcn_hint) : 0u");
             else {
                 body_ += "uint w[" + n + "]; ulong at = 0ul; "
-                         "if (o + " + std::to_string(4 * count) + "ul <= lim && gcn_locate(M, a, " + std::to_string(4 * count) + "ul, at)) "
+                         "if (o + " + std::to_string(4 * count) + "ul <= lim && gcn_locate_hint(M, a, " + std::to_string(4 * count) + "ul, at, gcn_hint)) "
                          "{ for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_packed32(M, at + 4ul * k); } "
                          "else { for (uint k = 0u; k < " + n + "u; ++k) w[k] = (o + 4ul * k + 4ul <= lim) ? gcn_ld32(M, a + 4ul * k) : 0u; } ";
                 for (unsigned k = 0; k < count; ++k) setScalar(d + k, "w[" + std::to_string(k) + "]");
@@ -421,10 +422,10 @@ private:
             body_ += "}";
         } else {
             body_ += "{ ulong a = (gcn_u64(" + s(base) + ", " + s(base + 1) + ") & 0xfffffffffffful) + " + offset + "; ";
-            if (count == 1) setScalar(d, "gcn_ld32(M, a)");
+            if (count == 1) setScalar(d, "gcn_ld32_hint(M, a, gcn_hint)");
             else {
                 body_ += "uint w[" + n + "]; ulong at = 0ul; "
-                         "if (gcn_locate(M, a, " + std::to_string(4 * count) + "ul, at)) { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_packed32(M, at + 4ul * k); } "
+                         "if (gcn_locate_hint(M, a, " + std::to_string(4 * count) + "ul, at, gcn_hint)) { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_packed32(M, at + 4ul * k); } "
                          "else { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_ld32(M, a + 4ul * k); } ";
                 for (unsigned k = 0; k < count; ++k) setScalar(d + k, "w[" + std::to_string(k) + "]");
             }
@@ -895,24 +896,42 @@ GCN_FN uint gcn_popcount(uint v) { return popcount(v); }
 GCN_FN uint gcn_bfrev(uint a) { return reverse_bits(a); }
 GCN_FN uint gcn_ffbh(uint a) { return a == 0u ? 0xffffffffu : clz(a); }
 GCN_FN uint gcn_ffbl(uint a) { return a == 0u ? 0xffffffffu : ctz(a); }
-GCN_FN bool gcn_locate(GCNMemory M, ulong a, ulong n, thread ulong& offset) {
-    if (M.count == 0u) {
-        if (a < M.base || a - M.base > M.size || M.size - (a - M.base) < n) return false;
-        offset = a - M.base; return true;
-    }
-    // Ranges are sorted and disjoint (PM4ResourceScan): the last one starting at
-    // or before `a` is the only one that can hold it.
+// Ranges are sorted and disjoint (PM4ResourceScan): the last one starting at
+// or before `a` is the only one that can hold it.
+GCN_FN uint gcn_range(GCNMemory M, ulong a) {
     uint k = 0u;
     for (uint left = M.count; left > 1u;) {
         uint step = left / 2u;
         if (a >= M.ranges[3u * (k + step)]) k += step;
         left -= step;
     }
+    return k;
+}
+GCN_FN bool gcn_locate(GCNMemory M, ulong a, ulong n, thread ulong& offset) {
+    if (M.count == 0u) {
+        if (a < M.base || a - M.base > M.size || M.size - (a - M.base) < n) return false;
+        offset = a - M.base; return true;
+    }
+    uint k = gcn_range(M, a);
     ulong start = M.ranges[3u * k]; ulong length = M.ranges[3u * k + 1u];
     if (a >= start && a - start <= length && length - (a - start) >= n) { offset = M.ranges[3u * k + 2u] + (a - start); return true; }
     return false;
 }
+// gcn_locate for a program's scalar loads, which read the same few buffers in
+// turn: `hint` is the range the last one found, tried before searching.
+GCN_FN bool gcn_locate_hint(GCNMemory M, ulong a, ulong n, thread ulong& offset, thread uint& hint) {
+    if (M.count == 0u) return gcn_locate(M, a, n, offset);
+    ulong start = M.ranges[3u * hint]; ulong length = M.ranges[3u * hint + 1u];
+    if (a < start || a - start > length || length - (a - start) < n) {
+        hint = gcn_range(M, a);
+        start = M.ranges[3u * hint]; length = M.ranges[3u * hint + 1u];
+        if (a < start || a - start > length || length - (a - start) < n) return false;
+    }
+    offset = M.ranges[3u * hint + 2u] + (a - start);
+    return true;
+}
 GCN_FN uint gcn_ld32(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 4ul, o)) return 0u; return *(device const uint*)gcn_at(M, o); }
+GCN_FN uint gcn_ld32_hint(GCNMemory M, ulong a, thread uint& hint) { ulong o = 0ul; if (!gcn_locate_hint(M, a, 4ul, o, hint)) return 0u; return *(device const uint*)gcn_at(M, o); }
 GCN_FN uint gcn_ld16(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 2ul, o)) return 0u; return uint(*(device const ushort*)gcn_at(M, o)); }
 GCN_FN uint gcn_ld8(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 1ul, o)) return 0u; return uint(*gcn_at(M, o)); }
 // Only used with an image span already validated by gcn_locate.
