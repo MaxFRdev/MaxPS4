@@ -341,6 +341,34 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             assert(worst <= 2 && fast != refused);
             std::puts("PASS a T# narrower than its colour target is filtered by Metal's sampler");
         }
+        // 3c. Clamping to a transparent black border, as Sonic Mania samples its
+        //     picture: Metal's sampler filters it. Depth compare bits refuse the
+        //     sampler, as in 3b.
+        {
+            auto bordered = [&](bool nativeOnly, uint32_t sampler) {
+                PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
+                renderer.nativeSamplesOnly = nativeOnly;
+                const uint32_t linear[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
+                                             (imageW - 1) << 13, 0, 0, 0, sampler, 0, 0x500000, 0};
+                std::memcpy(d.psUser, linear, sizeof linear);
+                id<MTLCommandBuffer> commands = [queue commandBuffer];
+                assert(renderer.encode(d, commands));
+                [commands commit]; [commands waitUntilCompleted];
+                assert(commands.status == MTLCommandBufferStatusCompleted && !commands.error);
+                return pixels(renderer.target(target));
+            };
+            const uint32_t border = 6 | (6 << 3);
+            const auto fast = bordered(true, border);
+            const auto slow = bordered(false, border | (1 << 12));
+            const auto refused = bordered(true, border | (1 << 12));
+            assert(fast.size() == slow.size());
+            unsigned worst = 0;
+            for (std::size_t k = 0; k < fast.size(); ++k)
+                worst = std::max(worst, unsigned(std::abs(int(fast[k]) - int(slow[k]))));
+            std::printf("border clamp: worst difference with software filtering %u\n", worst);
+            assert(worst <= 2 && fast != refused);
+            std::puts("PASS a transparent black border is filtered by Metal's sampler");
+        }
         // 4. Asynchronous pipelines (the game bridge): the first draw is
         //    deferred while Metal builds its pipeline, a later one draws.
         {
