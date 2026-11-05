@@ -329,7 +329,10 @@ bool PM4MetalRenderer::fillProgram(std::uint64_t address) {
     std::size_t at = 0;
     for (const char* line : expected) {
         GCNInstruction i;
-        if (!same || decodeGCNInstruction(words + at, 32 - at, at, i) != GCNError::none || gcnDisassemble(i) != line) { same = false; break; }
+        if (!same || decodeGCNInstruction(words + at, 32 - at, at, i) != GCNError::none) { same = false; break; }
+        const std::string text = gcnDisassemble(i);
+        // Sonic Mania's compiler multiplies where Mortal Kombat's shifts.
+        if (text != line && !(line == expected[1] && text == "s_mul_i32 vcc_lo, s12, 64")) { same = false; break; }
         at += i.size;
     }
     return fillPrograms_[address] = same;
@@ -793,9 +796,11 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
 }
 
 MTLSamplerDescriptor* PM4MetalRenderer::nativeSamplerDescriptor(const std::array<std::uint32_t, 4>& s) {
-    // S# CLAMP_X/Y: wrap, mirror, clamp to last texel; XY_MAG/MIN_FILTER:
-    // point, bilinear (anisotropic filters read as bilinear); DEPTH_COMPARE.
-    auto mode = [](std::uint32_t clamp, MTLSamplerAddressMode& out) {
+    // S# CLAMP_X/Y: wrap, mirror, clamp to last texel, or to a transparent black
+    // border (BORDER_COLOR_TYPE 0); XY_MAG/MIN_FILTER: point, bilinear
+    // (anisotropic filters read as bilinear); DEPTH_COMPARE.
+    auto mode = [&s](std::uint32_t clamp, MTLSamplerAddressMode& out) {
+        if (clamp == 6 && !(s[3] >> 30)) { out = MTLSamplerAddressModeClampToZero; return true; }
         if (clamp > 2) return false;
         out = clamp == 0 ? MTLSamplerAddressModeRepeat : clamp == 1 ? MTLSamplerAddressModeMirrorRepeat : MTLSamplerAddressModeClampToEdge;
         return true;
