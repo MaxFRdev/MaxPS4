@@ -82,7 +82,7 @@ struct GameMetalState {
         native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés%s%s%s%@",
             renderer.pipelinesBuilt, renderer.pipelinesReplaced, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
             refusal.empty() ? "" : " · dernier refus : ", refusal.c_str(), pending.c_str(), native];
-        native = [NSString stringWithFormat:@"\nBarrières compute : %u (%u au plus par lot) · remplissages %u, %u refus%s%s · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%s%s%@",
+        native = [NSString stringWithFormat:@"\nBarrières compute : %u (%u au plus par lot) · remplissages %u (%u refus%s%s) · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%s%s%@",
             barriers, mostBarriers, renderer.fillsDone, renderer.fillsRefused, renderer.fillRefusal.empty() ? "" : ", dernier : ", renderer.fillRefusal.c_str(), barrierMs, renderer.dispatchCopyMs, double(renderer.dispatchCopyBytes) / (1 << 20),
             renderer.writebackMs, double(renderer.writebackBytes) / (1 << 20), batches, slowBatches,
             programCosts.empty() ? "" : "\nGPU par programme, un lot :", programCosts.c_str(), native];
