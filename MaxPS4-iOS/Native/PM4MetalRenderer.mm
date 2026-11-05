@@ -86,6 +86,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     for (unsigned k = 0; k < 16; ++k) vsOptions.userData[k] = d.vsUser[k];
     GCNTranslateOptions psOptions;
     psOptions.name = "ps_program"; psOptions.userCount = d.psUserCount;
+    psOptions.directLoads = native_ || !guest_; // Each draw is scanned: its table is complete.
     for (unsigned k = 0; k < 16; ++k) psOptions.userData[k] = d.psUser[k];
     compiling = 3;
     const auto vs = translateGCN(code_, d.vs, vsOptions);
@@ -96,10 +97,19 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     {
         ScalarSites& sites = scalarSites_[d.ps];
         sites.list = ps.sites; sites.words = ps.siteWords;
+        scalarLoadsAll += unsigned(ps.sites.size());
+        for (const auto& site : ps.sites) if (site.from[0]) ++scalarLoadsDirect;
         std::sort(sites.list.begin(), sites.list.end(), [](const GCNScalarSite& a, const GCNScalarSite& b) { return a.pc < b.pc; });
     }
-    const std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
+    std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
                                gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
+    // Tests: a sample Metal's sampler refuses reads as zero instead of filtering in
+    // software, which shows whether a draw really takes the native path.
+    if (native_ && nativeSamplesOnly) {
+        const std::string sample = "if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);";
+        const auto at = source.find(sample);
+        if (at != std::string::npos) source.insert(at + sample.size(), "\n    if (true) return float4(0.0f, 0.0f, 0.0f, 0.0f);");
+    }
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
     NSError* failure = nil;
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
@@ -151,7 +161,13 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         auto finished = [async, finish](id<MTLRenderPipelineState> state, NSError* error, bool fast) {
             finish(state, error, fast);
             { std::lock_guard<std::mutex> lock(async->mutex);
-              if (fast) async->running = false; else --async->sizing; }
+              if (fast) {
+                  char done[48];
+                  std::snprintf(done, sizeof done, " 0x%llx %.1f s%s", (unsigned long long)async->buildingPS,
+                                std::chrono::duration<double>(std::chrono::steady_clock::now() - async->buildingSince).count(), state ? "" : " (refus)");
+                  async->defaultsDone += done;
+                  async->running = false;
+              } else --async->sizing; }
             async->next();
         };
         id<MTLDevice> device = device_;
@@ -181,7 +197,11 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         if (@available(macOS 13.0, iOS 16.0, *)) size.optimizationLevel = MTLLibraryOptimizationLevelSize;
         { std::lock_guard<std::mutex> lock(async->mutex);
           ++async->sizing;
-          async->later.push_back([build, fastest] { build(fastest, true); }); }
+          async->later.push_back([async, build, fastest, ps = d.ps] {
+              { std::lock_guard<std::mutex> lock(async->mutex);
+                async->buildingPS = ps; async->buildingSince = std::chrono::steady_clock::now(); }
+              build(fastest, true);
+          }); }
         build(size, false);
         deferred_ = true;
         return nil;
@@ -222,11 +242,21 @@ void PM4MetalRenderer::listCostly(std::uint64_t address) {
 
 std::string PM4MetalRenderer::pipelineStatus() const {
     std::lock_guard<std::mutex> lock(async_->mutex);
+    // Which programs still run their size build, and what the queue is doing.
+    char queue[96];
+    std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente", async_->later.size());
+    std::string defaults = queue;
+    if (async_->running) {
+        std::snprintf(queue, sizeof queue, ", PS 0x%llx depuis %.1f s", (unsigned long long)async_->buildingPS,
+                      std::chrono::duration<double>(std::chrono::steady_clock::now() - async_->buildingSince).count());
+        defaults += queue;
+    }
+    if (!async_->defaultsDone.empty()) defaults += ", finies :" + async_->defaultsDone;
     if (async_->pending.empty()) {
         if (async_->slowest <= 0) return {};
         char built[48];
         std::snprintf(built, sizeof built, " · plus lent construit %.1f s", async_->slowest);
-        return built;
+        return built + defaults;
     }
     const auto oldest = std::min_element(async_->pending.begin(), async_->pending.end(),
         [](const auto& a, const auto& b) { return a.second.since < b.second.since; });
@@ -236,7 +266,7 @@ std::string PM4MetalRenderer::pipelineStatus() const {
                   oldest->second.stage, seconds, (unsigned long long)std::get<0>(oldest->first),
                   (unsigned long long)std::get<1>(oldest->first));
     // Long enough to be worth rebuilding on a Mac.
-    return seconds < 5 ? std::string(text) : text + oldest->second.programs;
+    return seconds < 5 ? text + defaults : text + defaults + oldest->second.programs;
 }
 
 MTLCompileOptions* PM4MetalRenderer::compileOptions() {

@@ -59,6 +59,8 @@ public:
     unsigned fillsRefused = 0; // Recognised fills sent to their kernel, the last with its reason.
     std::string fillRefusal;
     unsigned pipelinesReplaced = 0; // Size builds replaced by their default build.
+    unsigned scalarLoadsDirect = 0, scalarLoadsAll = 0; // Pixel programs translated so far.
+    bool nativeSamplesOnly = false; // Tests only: no software filtering, see the pipeline source.
     void listCostly(std::uint64_t address); // Adds a program's words to programListings, once.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
@@ -154,6 +156,9 @@ private:
         std::deque<std::function<void()>> later;
         unsigned sizing = 0;
         bool running = false;
+        std::uint64_t buildingPS = 0; // The default build running, for the report.
+        std::chrono::steady_clock::time_point buildingSince;
+        std::string defaultsDone;
         void next() {
             std::function<void()> start;
             { std::lock_guard<std::mutex> lock(mutex);

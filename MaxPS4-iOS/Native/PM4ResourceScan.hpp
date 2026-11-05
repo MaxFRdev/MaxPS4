@@ -15,6 +15,7 @@
 #include "PM4DrawCollector.hpp"
 #include <algorithm>
 #include <array>
+#include <limits>
 
 namespace maxps4::gpu {
 struct PM4Range { std::uint64_t base = 0, size = 0; };
@@ -24,7 +25,7 @@ struct PM4ScalarLoad { std::uint64_t pc, address; std::uint32_t count; std::arra
 class PM4ResourceScanner {
 public:
     explicit PM4ResourceScanner(const GCNMemory& memory, bool captureImages = false)
-        : wave_(memory, 1, &cache_), captureImages_(captureImages) {}
+        : memory_(memory), wave_(memory, 1, &cache_), captureImages_(captureImages) {}
     PM4ResourceScanner(const PM4ResourceScanner&) = delete;
     PM4ResourceScanner& operator=(const PM4ResourceScanner&) = delete;
     // Valid until the next scan. Only storage is reused: code, descriptors and
@@ -77,6 +78,8 @@ public:
         wave.buffer = oversized(false);
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
         for (unsigned k = 0; k < d.psUserCount; ++k) wave.s[k] = d.psUser[k];
+        std::copy(d.psUser, d.psUser + 16, psUser_.begin());
+        psUserCount_ = d.psUserCount;
         const float x = float(d.scissor[0] + d.scissor[2]) / 2, y = float(d.scissor[1] + d.scissor[3]) / 2;
         static const unsigned sizes[16] = {2, 2, 2, 3, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1};
         unsigned reg = 0;
@@ -150,9 +153,10 @@ public:
     // The pixel program's scalar loads, in the order the scan ran them.
     const std::vector<PM4ScalarLoad>& scalarLoads() const { return scalarLoads_; }
     // The table a draw's pixel program reads them from, for `sites` sorted by
-    // pc: its uniform loads then skip the memory search on every pixel. A load
-    // the scan did not reach keeps address 0, and the program searches. False:
-    // no site was reached.
+    // pc: its uniform loads then skip the memory search on every pixel. The scan
+    // runs one pixel's path: loads on the others are read here, in program order
+    // from the user SGPRs, as most are constants of the same tables. A wrong guess
+    // is harmless, the program checks the address and searches. False: no site.
     bool scalarTable(const std::vector<GCNScalarSite>& sites, std::size_t words, std::vector<std::uint32_t>& table) const {
         table.assign(words, 0);
         bool any = false;
@@ -163,6 +167,44 @@ public:
             table[site->offset + 1] = std::uint32_t(load.address >> 32);
             std::copy(load.words.begin(), load.words.begin() + load.count, table.begin() + site->offset + 2);
             any = true;
+        }
+        std::array<std::uint32_t, 128> s{};
+        std::copy(psUser_.begin(), psUser_.begin() + std::min<std::size_t>(psUserCount_, 16), s.begin());
+        for (const auto& site : sites) {
+            std::uint32_t word = 0;
+            if (!memory_.read(site.pc, &word, 4) || (word >> 27) != 0x18) continue; // Not a scalar load.
+            static const unsigned counts[] = {1, 2, 4, 8, 16};
+            const unsigned opcode = (word >> 22) & 31, d = (word >> 15) & 0x7f, base = ((word >> 9) & 0x3f) * 2;
+            if ((opcode & 7) > 4 || opcode > 12 || counts[opcode & 7] != site.count || d + site.count > 128 || base + 3 >= 128) continue;
+            const bool reached = table[site.offset] || table[site.offset + 1];
+            if (!reached) {
+                if (!(word & 0x100) && (word & 0xff) >= 104) continue; // A literal or special offset.
+                // Its registers as the translator proved them, whatever path leads here.
+                for (unsigned k = 0; k < 4; ++k) {
+                    const std::uint32_t from = site.from[k];
+                    if (!from) continue;
+                    if (from < 0x1000) s[base + k] = from - 1 < std::min<unsigned>(psUserCount_, 16) ? psUser_[from - 1] : 0;
+                    else s[base + k] = table[sites[(from - 0x1000) / 16].offset + 2 + from % 16];
+                }
+                const std::uint64_t offset = word & 0x100 ? 4ull * (word & 0xff) : s[word & 0xff];
+                std::uint64_t address, limit = std::numeric_limits<std::uint64_t>::max();
+                if (opcode >= 8) {
+                    address = (std::uint64_t(s[base]) | std::uint64_t(s[base + 1] & 0xfff) << 32) + offset;
+                    const std::uint32_t stride = (s[base + 1] >> 16) & 0x3fff;
+                    limit = stride ? std::uint64_t(s[base + 2]) * stride : s[base + 2];
+                } else address = ((std::uint64_t(s[base]) | std::uint64_t(s[base + 1]) << 32) & 0xffffffffffffull) + offset;
+                bool readable = address != 0;
+                for (unsigned n = 0; readable && n < site.count; ++n) {
+                    std::uint32_t value = 0;
+                    readable = offset + 4 * n + 4 > limit || memory_.read(address + 4 * n, &value, 4);
+                    table[site.offset + 2 + n] = value;
+                }
+                if (!readable) { std::fill_n(table.begin() + site.offset, 2 + site.count, 0u); continue; }
+                table[site.offset] = std::uint32_t(address);
+                table[site.offset + 1] = std::uint32_t(address >> 32);
+                any = true;
+            }
+            std::copy_n(table.begin() + site.offset + 2, site.count, s.begin() + d);
         }
         return any;
     }
@@ -178,6 +220,7 @@ private:
     // Half the span copied around an oversized V#'s access outside the vertex program.
     static constexpr std::uint64_t window = 1ull << 20;
     GCNCodeCache cache_;
+    const GCNMemory& memory_;
     GCNWave wave_;
     std::vector<PM4Range> found_, merged_, stored_;
     std::string dispatchError_;
@@ -186,6 +229,8 @@ private:
     std::string vsError_, psError_;
     std::vector<std::array<std::uint32_t, 8>> images_;
     std::vector<PM4ScalarLoad> scalarLoads_;
+    std::array<std::uint32_t, 16> psUser_{};
+    unsigned psUserCount_ = 0;
     bool captureImages_;
     std::vector<std::array<std::uint32_t, 4>> samplers_;
     void image(const std::array<std::uint32_t, 8>& descriptor) {

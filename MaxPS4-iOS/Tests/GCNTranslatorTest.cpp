@@ -30,6 +30,28 @@ int main(int argc, char** argv) {
     arena.code(coverageProgram,{0xbefe0480,0xf800180f,0,0xbf810000});
     const auto killed=translateGCN(arena.memory,coverageProgram,ps);
     assert(killed && killed.mayKill);
+    // Forward branches only: blocks in order, without the dispatcher's loop.
+    arena.code(coverageProgram,{0xbf840000,0xbf810000});
+    const auto ordered=translateGCN(arena.memory,coverageProgram,ps);
+    assert(ordered && ordered.source.find("while (running)")==std::string::npos && ordered.source.find("if (pc == 1u) do {")!=std::string::npos);
+    GCNTranslateOptions dispatched=ps; dispatched.dispatcher=true;
+    assert(translateGCN(arena.memory,coverageProgram,dispatched).source.find("while (running)")!=std::string::npos);
+    arena.code(coverageProgram,{0xbf84ffff,0xbf810000}); // A branch back to itself.
+    assert(translateGCN(arena.memory,coverageProgram,ps).source.find("while (running)")!=std::string::npos);
+    // Scalar loads whose address only comes from user SGPRs and other such loads
+    // take the table's words; one through a register changed otherwise keeps the check.
+    GCNTranslateOptions direct=ps; direct.directLoads=true;
+    arena.code(coverageProgram,{0xc0880d00,0xc20a1100,0xbf810000});
+    const auto chained=translateGCN(arena.memory,coverageProgram,direct);
+    assert(chained && chained.source.find("gcn_site_hit")==std::string::npos && chained.sites.size()==2);
+    assert(chained.sites[0].from[0]==13 && chained.sites[0].from[1]==14 && chained.sites[1].from[0]==0x1000 && chained.sites[1].from[3]==0x1003);
+    arena.code(coverageProgram,{0xc0880d00,0xbe900380,0xc20a1100,0xbf810000});
+    const auto changed=translateGCN(arena.memory,coverageProgram,direct);
+    assert(changed && changed.source.find("gcn_site_hit")!=std::string::npos && changed.sites[1].from[0]==0);
+    // A register written on one path only is not proved after the paths join.
+    arena.code(coverageProgram,{0xc0880d00,0xbf840001,0xc0880d04,0xc20a1100,0xbf810000});
+    const auto joined=translateGCN(arena.memory,coverageProgram,direct);
+    assert(joined && joined.sites.size()==3 && joined.sites[1].from[0]==13 && joined.sites[2].from[0]==0);
     GCNTranslateOptions fetch; fetch.stage = GCNStage::vertex; fetch.name = "vs_fetch";
     fetch.userCount = 4; fetch.userData[0] = std::uint32_t(fetchShader); fetch.userData[2] = std::uint32_t(vertexTable);
     const auto fetched = translateGCN(arena.memory, fetchVS, fetch);

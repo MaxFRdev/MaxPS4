@@ -3,7 +3,8 @@
 // one portable shader function. The same text compiles as C++ against
 // GCNShaderRuntime.hpp (tests, compared with GCNInterpreter.hpp) and as
 // Metal against gcnMetalPrelude(). Control flow becomes a block dispatcher
-// (a switch in a loop), so any branch structure translates. A fetch shader
+// (a switch in a loop), so any branch structure translates; a pixel program
+// that only branches forward runs its blocks in order instead. A fetch shader
 // reached with s_swappc_b64 through user SGPRs is translated in place; its
 // s_setpc_b64 returns to the calling block.
 //
@@ -16,6 +17,7 @@
 // enabled thread group ids, in L.user; thread ids in v0-v2.
 #include "GCNDecoder.hpp"
 #include "GCNInterpreter.hpp"
+#include <array>
 #include <map>
 #include <set>
 #include <string>
@@ -29,6 +31,10 @@ struct GCNTranslateOptions {
     unsigned userCount = 0;
     std::size_t maxInstructions = 16384;
     std::string name = "gcn_program";
+    bool dispatcher = false;     // keep the switch in a loop where blocks could run in order
+    // Each draw gets a complete table of scalar values (PM4ResourceScanner::scalarTable):
+    // loads whose address is proved the same on every path read it without a check.
+    bool directLoads = false;
 };
 struct GCNTranslation {
     std::string error;           // empty on success
@@ -85,6 +91,18 @@ private:
     std::map<unsigned,unsigned> scalarWrites_;
     unsigned savedEntryExec_=128;
     bool safeExecWrite_=false, restoresEntryExec_=false, execMayKill_=false;
+    // What each SGPR holds, in a program running in order: 0 unknown, n + 1 its value
+    // on entry to register n, 0x1000 + 16 * site + k word k of that scalar load.
+    using Known = std::array<std::uint32_t, 128>;
+    Known known_{};
+    std::map<std::uint64_t, Known> incoming_;
+    std::map<std::array<std::uint32_t, 6>, std::uint32_t> loads_; // Same load, same site.
+    bool inOrder_ = false;
+    void flowTo(std::uint64_t target) {
+        const auto found = incoming_.find(target);
+        if (found == incoming_.end()) { incoming_[target] = known_; return; }
+        for (unsigned k = 0; k < 128; ++k) if (found->second[k] != known_[k]) found->second[k] = 0;
+    }
 
     bool fail(const std::string& message) { if (out_.error.empty()) out_.error = message; return false; }
     static std::string hex(std::uint64_t v, const char* suffix = "u") {
@@ -137,6 +155,18 @@ private:
         }
         return true;
     }
+    // No branch back and no jump through a register: each block can only lead to
+    // a later one, so the blocks can run in address order without a loop.
+    bool forwardOnly(std::uint64_t entry) const {
+        if (entry != *leaders_.begin()) return false;
+        for (const auto& item : code_) {
+            const GCNInstruction& i = item.second.i;
+            if (i.encoding == GCNEncoding::sop1 && (i.opcode == 32 || i.opcode == 33)) return false;
+            if (i.encoding == GCNEncoding::sopp && (i.opcode == 2 || (i.opcode >= 4 && i.opcode <= 9)) &&
+                branchTarget(item.first, i) <= item.first) return false;
+        }
+        return true;
+    }
     std::size_t index(std::uint64_t address) const { return std::size_t(std::distance(leaders_.begin(), leaders_.find(address))); }
 
     // ---- operands ----
@@ -164,13 +194,13 @@ private:
     std::string source(unsigned code, const GCNInstruction& i) { return code >= 256 ? v(code - 256) : scalar(code, i); }
     void setScalar(unsigned d, const std::string& value) {
         if (d > 127) { fail("unsupported scalar destination"); return; }
-        ++scalarWrites_[d];
+        ++scalarWrites_[d]; known_[d] = 0;
         if (d>=126 && !safeExecWrite_) execMayKill_=true;
         body_ += s(d) + " = " + value + "; ";
     }
     void setScalar64(unsigned d, const std::string& value) {
         if (d > 126) { fail("unsupported scalar destination"); return; }
-        ++scalarWrites_[d]; ++scalarWrites_[d+1];
+        ++scalarWrites_[d]; ++scalarWrites_[d+1]; known_[d] = known_[d + 1] = 0;
         if (d>=125 && !safeExecWrite_) execMayKill_=true;
         body_ += "{ ulong w = " + value + "; " + s(d) + " = uint(w); " + s(d + 1) + " = uint(w >> 32); } ";
     }
@@ -185,10 +215,16 @@ private:
 
     // ---- emission ----
     void emit(std::uint64_t entry) {
+        // The loop hides from Metal that a block runs at most once: every register
+        // stays live around it. `break` leaves a block in both forms.
+        const bool inOrder = inOrder_ = options_.stage == GCNStage::pixel && !options_.dispatcher && forwardOnly(entry);
+        for (unsigned n = 0; n < 128; ++n) known_[n] = n + 1;
         std::size_t k = 0;
         for (const auto leader : leaders_) {
-            body_ += "    case " + std::to_string(k++) + "u: {\n";
+            const std::string number = std::to_string(k++);
+            body_ += inOrder ? "    if (pc == " + number + "u) do {\n" : "    case " + number + "u: {\n";
             std::uint64_t pc = leader;
+            if (inOrder && leader != entry) known_ = incoming_[leader];
             for (;;) {
                 const auto found = code_.find(pc);
                 if (found == code_.end()) { fail("block falls into unexplored code"); return; }
@@ -203,10 +239,10 @@ private:
                 body_ += "\n";
                 if (ended) break;
                 const std::uint64_t next = pc + 4ull * found->second.i.size;
-                if (leaders_.count(next)) { body_ += "        pc = " + std::to_string(index(next)) + "u; break;\n"; break; }
+                if (leaders_.count(next)) { flowTo(next); body_ += "        pc = " + std::to_string(index(next)) + "u; break;\n"; break; }
                 pc = next;
             }
-            body_ += "    }\n";
+            body_ += inOrder ? "    } while (false);\n" : "    }\n";
         }
         std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) {\n"
                            "    uint gcn_hint = 0u; (void)gcn_hint;\n";
@@ -221,9 +257,9 @@ private:
         // Blocks are numbered by address: a fetch shader below the program
         // comes first, so execution starts at the entry's own block.
         head += "    bool scc = false; uint pc = " + std::to_string(index(entry)) + "u; bool running = true;\n"
-                "    (void)scc; (void)M; (void)Q;\n"
-                "    while (running) {\n    switch (pc) {\n";
-        out_.source = head + body_ + "    default: running = false; break;\n    }\n    }\n}\n";
+                "    (void)scc; (void)M; (void)Q; (void)running;\n";
+        if (inOrder) out_.source = head + body_ + "}\n";
+        else out_.source = head + "    while (running) {\n    switch (pc) {\n" + body_ + "    default: running = false; break;\n    }\n    }\n}\n";
     }
 
     bool instruction(const Inst& in, std::uint64_t pc, bool& ended) {
@@ -378,12 +414,13 @@ private:
             body_ += "pc = (" + cond + ") ? " + std::to_string(index(branchTarget(pc, i))) + "u : " +
                      std::to_string(index(next)) + "u; break;";
             ended = true;
+            flowTo(branchTarget(pc, i)); flowTo(next);
         };
         switch (i.opcode) {
         case 0: case 10: case 12: case 13: case 14: case 15: case 16: case 17: case 19: case 20: case 21: case 22:
             body_ += "/* " + in.name + " */"; return true;
         case 1: body_ += "running = false; break;"; ended = true; return true;
-        case 2: body_ += "pc = " + std::to_string(index(branchTarget(pc, i))) + "u; break;"; ended = true; return true;
+        case 2: flowTo(branchTarget(pc, i)); body_ += "pc = " + std::to_string(index(branchTarget(pc, i))) + "u; break;"; ended = true; return true;
         case 4: branch("!scc"); return true;
         case 5: branch("scc"); return true;
         case 6: branch("!" + any(s(106) + " != 0u || " + s(107) + " != 0u")); return true;
@@ -417,8 +454,21 @@ private:
         std::string hitOne, hitMany;
         if (options_.stage == GCNStage::pixel) {
             const std::string at = std::to_string(out_.siteWords) + "u";
+            const std::uint32_t site = std::uint32_t(out_.sites.size());
             out_.sites.push_back({4ull * i.word, count, out_.siteWords});
             out_.siteWords += 2 + count;
+            // The base registers proved: no address to compute, check or search.
+            const unsigned regs = i.opcode >= 8 ? 4 : 2;
+            bool direct = options_.directLoads && inOrder_ && (i.word0 & 0x100) && base + regs <= 104;
+            for (unsigned k = 0; direct && k < regs; ++k) direct = known_[base + k] != 0;
+            if (direct) {
+                std::array<std::uint32_t, 6> key{i.opcode, i.word0 & 0xff, 0, 0, 0, 0};
+                for (unsigned k = 0; k < regs; ++k) key[2 + k] = out_.sites.back().from[k] = known_[base + k];
+                const std::uint32_t first = loads_.emplace(key, site).first->second;
+                for (unsigned k = 0; k < count; ++k) setScalar(d + k, "gcn_site_word(M, " + at + ", " + std::to_string(k) + "u)");
+                for (unsigned k = 0; k < count; ++k) known_[d + k] = 0x1000 + 16 * first + k;
+                return out_.error.empty();
+            }
             hitOne = "gcn_site_hit(M, " + at + ", a) ? gcn_site_word(M, " + at + ", 0u) : ";
             hitMany = "if (gcn_site_hit(M, " + at + ", a)) { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_site_word(M, " + at + ", k); } else ";
         }
@@ -986,15 +1036,25 @@ GCN_FN bool gcn_native_read(texture2d<float> image, GCNRes8 t, int x, int y, thr
     return true;
 }
 // The whole sample filtered by Metal's sampler (one sample instruction: the
-// CPU built it from this S#): the texture must be exactly the T#'s size
-// (8-bit filtering, within a level of GCN's own). False: gcn_sample filters itself.
+// CPU built it from this S#), 8-bit filtering, within a level of GCN's own. A
+// colour target can be wider than the T# reading it (1344 for 1332: tile
+// alignment): clamped addressing then stops at the T#'s last texel, wrapping
+// would need the T#'s own edge. False: gcn_sample filters itself.
 GCN_FN bool gcn_native_filter(texture2d<float> image, sampler q, bool usable, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v,
                               thread float4& value) {
     const uint w = (t.d[2] & 0x3fffu) + 1u, h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
-    if (!usable || image.get_width() != w || image.get_height() != h) return false;
+    const uint iw = image.get_width(), ih = image.get_height();
+    if (!usable || iw < w || ih < h) return false;
     const bool un = unorm || ((s.d[0] >> 15) & 1u) != 0u;
-    const float2 uv = un ? float2(u / float(w), v / float(h)) : float2(u, v);
-    value = gcn_native_order(t, image.sample(q, uv, level(0.0f)));
+    if (iw == w && ih == h) {
+        const float2 uv = un ? float2(u / float(w), v / float(h)) : float2(u, v);
+        value = gcn_native_order(t, image.sample(q, uv, level(0.0f)));
+        return true;
+    }
+    if ((s.d[0] & 63u) != 18u) return false; // Both axes clamped.
+    const float2 size = float2(float(w), float(h));
+    const float2 texel = clamp(un ? float2(u, v) : float2(u, v) * size, float2(0.5f), size - 0.5f);
+    value = gcn_native_order(t, image.sample(q, texel / float2(float(iw), float(ih)), level(0.0f)));
     return true;
 }
 #endif

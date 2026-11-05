@@ -28,7 +28,9 @@ struct GCNMemory {
 // bulk read; no instruction cache or immutable-code assumption is introduced.
 // A pixel program's scalar load: its instruction, and where its address and
 // words go in the draw's table of scalar values (see GCNTranslation::sites).
-struct GCNScalarSite { std::uint64_t pc; std::uint32_t count, offset; };
+// `from`: where the base registers of a load read without an address check come
+// from (GCNTranslator::Known); all zero for the others.
+struct GCNScalarSite { std::uint64_t pc; std::uint32_t count, offset; std::uint32_t from[4] = {0, 0, 0, 0}; };
 inline std::size_t readGCNWords(const GCNMemory& memory, std::uint64_t pc, std::uint32_t words[3]) {
     if (memory.read(pc, words, 3 * sizeof(std::uint32_t))) return 3;
     std::fill(words, words + 3, 0);
