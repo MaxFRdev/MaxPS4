@@ -900,10 +900,16 @@ GCN_FN bool gcn_locate(GCNMemory M, ulong a, ulong n, thread ulong& offset) {
         if (a < M.base || a - M.base > M.size || M.size - (a - M.base) < n) return false;
         offset = a - M.base; return true;
     }
-    for (uint k = 0u; k < M.count; ++k) {
-        ulong start = M.ranges[3u * k]; ulong length = M.ranges[3u * k + 1u];
-        if (a >= start && a - start <= length && length - (a - start) >= n) { offset = M.ranges[3u * k + 2u] + (a - start); return true; }
+    // Ranges are sorted and disjoint (PM4ResourceScan): the last one starting at
+    // or before `a` is the only one that can hold it.
+    uint k = 0u;
+    for (uint left = M.count; left > 1u;) {
+        uint half = left / 2u;
+        if (a >= M.ranges[3u * (k + half)]) k += half;
+        left -= half;
     }
+    ulong start = M.ranges[3u * k]; ulong length = M.ranges[3u * k + 1u];
+    if (a >= start && a - start <= length && length - (a - start) >= n) { offset = M.ranges[3u * k + 2u] + (a - start); return true; }
     return false;
 }
 GCN_FN uint gcn_ld32(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 4ul, o)) return 0u; return *(device const uint*)gcn_at(M, o); }

@@ -162,16 +162,16 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                                 (imageW - 1) << 13, 0, 0, 0, 0, 0, 0x500000, 0};
         std::memcpy(state.ps, t, sizeof t);
         // The scalar program's user SGPRs point at its data. Its three tables: a
-        // single window; two ranges; fifteen ranges before the one it reads.
+        // single window; two ranges; sixteen ranges, the one it reads the twelfth.
         State states[4] = {state, state, state, state};
         for (unsigned k = 1; k < 4; ++k) { states[k].ps[0] = std::uint32_t(scalarData); states[k].ps[1] = 0; }
         states[1].count = 0; states[1].base = Arena::start; states[1].size = arena.bytes.size();
         states[3].count = 16;
-        for (unsigned k = 0; k < 15; ++k) {
-            states[3].ranges[3 * k] = 0x7000000000ull + (std::uint64_t(k) << 20);
-            states[3].ranges[3 * k + 1] = 0x1000; states[3].ranges[3 * k + 2] = 0;
+        for (unsigned k = 0; k < 16; ++k) { // Sorted, as the renderer gives them.
+            states[3].ranges[3 * k] = k < 11 ? 0x100ull * k : 0x7000000000ull + (std::uint64_t(k) << 20);
+            states[3].ranges[3 * k + 1] = 0x10; states[3].ranges[3 * k + 2] = 0;
         }
-        states[3].ranges[45] = Arena::start; states[3].ranges[46] = image - Arena::start; states[3].ranges[47] = 0;
+        states[3].ranges[33] = Arena::start; states[3].ranges[34] = image - Arena::start; states[3].ranges[35] = 0;
         const uint32_t indices[3] = {0, 1, 2};
         auto* targetDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:screenW height:screenH mipmapped:NO];
         targetDescriptor.usage = MTLTextureUsageRenderTarget; targetDescriptor.storageMode = MTLStorageModePrivate;
