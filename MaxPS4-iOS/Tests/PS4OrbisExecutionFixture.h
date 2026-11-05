@@ -482,6 +482,37 @@ inline std::vector<uint8_t> make_general_cond_app() {
     put(b,64+32,sizeof(code)); put(b,64+40,sizeof(code));
     return b;
 }
+// Eight threads waiting on a condition in a loop that ignores the result, as
+// games do, while the entry spins: at a stop each wait returns at once, so the
+// loops run almost only in host code.
+inline std::vector<uint8_t> make_general_cond_spin_app() {
+    auto b=make_kernel_app();
+    use_libkernel_imports(b,{"6UgtwV+0zb4","onNY9Byn-W8","9UK1vLZQft4","tn3VlD0hG60","WKAXJ4XBPQ4","kDh-NfxgMtE"});
+    using orbis_fixture::put;
+    constexpr uint64_t create=data, lock=data+0x10, wait=data+0x20;
+    constexpr uint64_t handle=data+0x40, m=cond_mutex, cv=cond_var;
+    constexpr size_t W=0x27;
+    const uint8_t code[]={
+        0x53, 0xbb,8,0,0,0,                                    // 0x00 PUSH RBX; EBX=8
+        0x48,0x8d,0x3d,0,0,0,0, 0x31,0xf6,                     // 0x06 next: LEA RDI,[handle]; XOR ESI,ESI
+        0x48,0x8d,0x15,0,0,0,0, 0x31,0xc9, 0x45,0x31,0xc0,     // 0x0f LEA RDX,[worker]; ECX=R8D=0
+        0xff,0x15,0,0,0,0, 0xff,0xcb, 0x75,0xe1,               // 0x1b CALL [create]; DEC EBX; JNZ next
+        0xeb,0xfe,                                             // 0x25 JMP $
+        // worker (0x27)
+        0x48,0x8d,0x3d,0,0,0,0, 0xff,0x15,0,0,0,0,             // +00 lock(m)
+        0x48,0x8d,0x3d,0,0,0,0, 0x48,0x8d,0x35,0,0,0,0,        // +0d again: LEA RDI,[cv]; LEA RSI,[m]
+        0xff,0x15,0,0,0,0, 0xeb,0xea};                         // +1b wait; JMP again
+    static_assert(sizeof(code)==W+0x23, "condition spin fixture layout");
+    std::fill(b.begin()+0x200,b.begin()+0x300,0);
+    std::copy(std::begin(code),std::end(code),b.begin()+0x200);
+    auto rip=[&](size_t at, size_t end, uint64_t target) { put(b,0x200+at,target-(entry+end),4); };
+    rip(0x09,0x0d,handle); rip(0x12,0x16,entry+W); rip(0x1d,0x21,create);
+    rip(W+0x03,W+0x07,m); rip(W+0x09,W+0x0d,lock);
+    rip(W+0x10,W+0x14,cv); rip(W+0x17,W+0x1b,m); rip(W+0x1d,W+0x21,wait);
+    for (uint64_t slot : {handle, m, cv}) put(b,0x300+(slot-data),0,8);
+    put(b,64+32,sizeof(code)); put(b,64+40,sizeof(code));
+    return b;
+}
 // One thread: lock a statically initialized mutex, then
 // scePthreadCondTimedwait(cv, m, 1000 us) with nobody to signal: exits with
 // its result, ETIMEDOUT.

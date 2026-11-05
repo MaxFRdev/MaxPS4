@@ -1120,6 +1120,27 @@ int main(int argc, char** argv) {
         CHECK(stop_status==0 && ran==-ECANCELED && std::chrono::steady_clock::now()-start<std::chrono::seconds(10));
         maxps4_fex_engine_close(process);
         std::puts("PASS concurrent cancellation interrupts a running native guest without closing its engine");
+        {
+            // Game threads looping on a wait the stop makes return at once.
+            auto spin=orbis_execution::make_general_cond_spin_app();
+            const maxps4_orbis_module looping[] = {{"app.elf",spin.data(),spin.size(),orbis_execution::app_bias,nullptr,0}};
+            CHECK(maxps4_fex_engine_open(&process)==0);
+            CHECK(maxps4_fex_engine_prepare_orbis_general(process,looping,1,"app.elf",&relocation,diagnostic,sizeof diagnostic)==0);
+            CHECK(maxps4_fex_engine_initialize(process)==0);
+            std::chrono::steady_clock::time_point asked;
+            int asked_status=-1;
+            std::thread stopper([&] { std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                asked=std::chrono::steady_clock::now();
+                asked_status=maxps4_fex_engine_request_stop(process); });
+            const int looped=maxps4_fex_engine_run_orbis(process,&value,&cpu,&entry);
+            const auto ended=std::chrono::steady_clock::now();
+            stopper.join();
+            const auto took=std::chrono::duration_cast<std::chrono::milliseconds>(ended-asked).count();
+            std::printf("stop with threads looping on a wait: %lld ms\n",(long long)took);
+            CHECK(asked_status==0 && looped==-ECANCELED && took<2000);
+            maxps4_fex_engine_close(process);
+            std::puts("PASS a stop ends threads looping on a wait at their next call");
+        }
 #endif
     }
     maxps4_fex_engine* engine = nullptr;

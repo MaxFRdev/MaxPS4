@@ -75,6 +75,7 @@ std::atomic<bool> tso_emulation {true};
 class GuestThreads;
 // scePthreadCreate/Join/Exit and the entry's exit function for a general run
 // (see GuestThreads), defined once GuestThreads is complete.
+bool guest_thread_ending(const GuestThreads& threads);
 int64_t guest_thread_service(GuestThreads& threads, maxps4::PS4KernelService service,
                              const maxps4::PS4KernelCall& call);
 // First exported name of an HLE service, for the boot probe's trace.
@@ -289,6 +290,12 @@ public:
                     (unsigned long long)rsp, (unsigned long long)r[x86::REG_RSP]);
             r[x86::REG_RAX] = static_cast<uint64_t>(result);
             state.rip += 2;
+            // A stop: waits now return at once, so a game loop around one spins
+            // almost only in host code, where stop signals retry. The thread ends
+            // here through its return trampoline, whose own exit call goes on.
+            if (threads && orbis != maxps4::PS4KernelService::thread_exit && orbis != maxps4::PS4KernelService::process_exit &&
+                orbis != maxps4::PS4KernelService::abort_process && guest_thread_ending(*threads))
+                state.rip = image->thread_return();
             return static_cast<uint64_t>(result);
         }
         if (!image || !linker || !kernel || !memory || r[x86::REG_RAX] > UINT32_MAX ||
@@ -786,9 +793,12 @@ public:
     // can land.
     void interrupt() {
         { std::lock_guard guard(lock); stopping = timed_out = true; }
+        ending_.store(true, std::memory_order_relaxed);
         changed.notify_all();
         identities.interrupt();
     }
+    // On a child thread once a stop began: its next return to the guest ends it.
+    bool ending() const { return current && ending_.load(std::memory_order_relaxed); }
     bool expired() const {
         std::lock_guard guard(lock);
         return timed_out;
@@ -798,14 +808,19 @@ public:
         std::unique_lock guard(lock);
         if (main_done) return;
         stopping = main_done = true;
+        ending_.store(true, std::memory_order_relaxed);
         changed.notify_all();
         identities.interrupt();
-        for (auto& thread : threads) {
-            while (thread.used && !thread.finished) {
+        // All at once: a thread spinning in JIT code stops on its signal, and
+        // none has to wait for the ones before it.
+        for (bool running = true; running; ) {
+            running = false;
+            for (auto& thread : threads) if (thread.used && !thread.finished) {
+                running = true;
                 if (GuestFaultGuard::available && thread.host.joinable())
                     ::pthread_kill(thread.host.native_handle(), SIGURG);
-                changed.wait_for(guard, std::chrono::milliseconds(1));
             }
+            if (running) changed.wait_for(guard, std::chrono::milliseconds(1));
         }
         // Every child has finished, so every join in progress has returned.
         for (auto& thread : threads) {
@@ -897,7 +912,9 @@ private:
     bool stopping = false, main_done = false, main_exited = false, timed_out = false;
     maxps4_fex_guest_fault first_fault {};
     static inline thread_local Thread* current = nullptr;
+    std::atomic<bool> ending_ {false};
 };
+bool guest_thread_ending(const GuestThreads& threads) { return threads.ending(); }
 int64_t guest_thread_service(GuestThreads& threads, maxps4::PS4KernelService service,
                              const maxps4::PS4KernelCall& call) {
     using maxps4::PS4KernelService;
