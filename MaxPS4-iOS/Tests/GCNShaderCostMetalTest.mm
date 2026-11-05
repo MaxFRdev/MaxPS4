@@ -162,8 +162,8 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         };
         const std::string entry1800 = gameEntry(game1800), entry2000 = gameEntry(game2000);
         // No software path: a T# or S# no bound texture matches reads as zero.
-        const std::string noFallback = replaced(nativePrelude, "// One gcn_sample_at for every case, for the reason given there.",
-                                                "if (true) return float4(0.0f, 0.0f, 0.0f, 0.0f);");
+        const std::string noFallback = replaced(nativePrelude, "if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);",
+                                                "if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);\n    if (true) return float4(0.0f, 0.0f, 0.0f, 0.0f);");
         // No image read at all: what is left is the program's arithmetic and scalar loads.
         const std::string noImages = replaced(nativePrelude, "if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);",
                                               "if (true) return float4(u, v, 0.5f, 1.0f);");
