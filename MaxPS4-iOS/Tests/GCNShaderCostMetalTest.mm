@@ -117,6 +117,12 @@ int main(int argc, char** argv) {
         const auto loop1800 = translateGCN(arena.memory, ps1800At, loopOptions);
         const auto loop2000 = translateGCN(arena.memory, ps2000At, loopOptions);
         assert(loop1800 && loop2000);
+        GCNTranslateOptions directOptions = gameOptions; directOptions.directLoads = true;
+        const auto direct1800 = translateGCN(arena.memory, ps1800At, directOptions);
+        const auto direct2000 = translateGCN(arena.memory, ps2000At, directOptions);
+        assert(direct1800 && direct2000);
+        auto checks = [](const GCNTranslation& t) { std::size_t n = 0; for (std::size_t at = 0; (at = t.source.find("gcn_site_hit", at)) != std::string::npos; ++at) ++n; return n; };
+        std::printf("SHADER DIRECT PS 1800 %zu checks left of %zu, PS 2000 %zu of %zu\n", checks(direct1800), game1800.sites.size(), checks(direct2000), game2000.sites.size());
         std::printf("SHADER FORM PS 1800 %s, PS 2000 %s\n", game1800.source.find("while (running)") == std::string::npos ? "in order" : "loop",
                     game2000.source.find("while (running)") == std::string::npos ? "in order" : "loop");
         std::printf("SHADER SOURCE PS 1800 %zu bytes, PS 2000 %zu bytes\n", game1800.source.size(), game2000.source.size());
@@ -249,6 +255,10 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"PS 1800: loop, constant, no software path", vs.source + uniformLoads(loop1800.source, table1800) + entry1800, "gcn_fragment", true, noFallback, 2, 5},
             {"PS 2000: loop, as bound", vs.source + loop2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
             {"PS 2000: loop, scalar table", vs.source + loop2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
+            {"PS 1800: direct loads", vs.source + direct1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
+            {"PS 1800: direct, no software path", vs.source + direct1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 4, &sites1800},
+            {"PS 2000: direct loads", vs.source + direct2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
+            {"PS 2000: direct, no software path", vs.source + direct2000.source + entry2000, "gcn_fragment", true, noFallback, 2, 6, &sites2000},
             {"PS 1800: loop, scalar table, four bound", vs.source + loop1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
             {"PS 1800: table, no search", vs.source + noSearch(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
             {"PS 1800: table, no check", vs.source + noCheck(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
@@ -342,8 +352,8 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                         translation.siteWords, scanner.scalarLoads().size(), scanner.images().size(), scanner.pixelError().c_str());
             assert(any);
         };
-        scanSites(ps1800At, game1800, states[4], sites1800);
-        scanSites(ps2000At, game2000, states[6], sites2000);
+        scanSites(ps1800At, direct1800, states[4], sites1800);
+        scanSites(ps2000At, direct2000, states[6], sites2000);
         const uint32_t indices[3] = {0, 1, 2};
         auto* targetDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:screenW height:screenH mipmapped:NO];
         targetDescriptor.usage = MTLTextureUsageRenderTarget; targetDescriptor.storageMode = MTLStorageModePrivate;
@@ -441,6 +451,21 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                 continue;
             }
             if (run >= warmup && command.GPUStartTime > 0) samples[k].push_back((command.GPUEndTime - command.GPUStartTime) * 1000);
+        }
+        // A variant alone in its process left its image in the target: variants that
+        // should draw the same must print the same numbers.
+        if (argc > 1 && variants.size() == 1 && variants[0].draws) {
+            const NSUInteger row = screenW * 4;
+            id<MTLBuffer> pixels = [device newBufferWithLength:row * screenH options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+            [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(screenW, screenH, 1)
+                         toBuffer:pixels destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * screenH];
+            [blit endEncoding]; [command commit]; [command waitUntilCompleted];
+            const auto* bytes = static_cast<const std::uint8_t*>(pixels.contents);
+            std::uint64_t sum = 0, hash = 1469598103934665603ull;
+            for (NSUInteger n = 0; n < row * screenH; ++n) { sum += bytes[n]; hash = (hash ^ bytes[n]) * 1099511628211ull; }
+            std::printf("SHADER PIXELS %s: sum %llu hash %016llx\n", variants[0].name, (unsigned long long)sum, (unsigned long long)hash);
         }
         // The shared CI GPU is noisy: the median and the minimum resist outliers better than a mean.
         std::printf("SHADER COST on %s, %ux%u full-screen draw (GPU ms over %u runs):\n", device.name.UTF8String, screenW, screenH, runs - warmup);

@@ -179,6 +179,13 @@ public:
             const bool reached = table[site.offset] || table[site.offset + 1];
             if (!reached) {
                 if (!(word & 0x100) && (word & 0xff) >= 104) continue; // A literal or special offset.
+                // Its registers as the translator proved them, whatever path leads here.
+                for (unsigned k = 0; k < 4; ++k) {
+                    const std::uint32_t from = site.from[k];
+                    if (!from) continue;
+                    if (from < 0x1000) s[base + k] = from - 1 < std::min<unsigned>(psUserCount_, 16) ? psUser_[from - 1] : 0;
+                    else s[base + k] = table[sites[(from - 0x1000) / 16].offset + 2 + from % 16];
+                }
                 const std::uint64_t offset = word & 0x100 ? 4ull * (word & 0xff) : s[word & 0xff];
                 std::uint64_t address, limit = std::numeric_limits<std::uint64_t>::max();
                 if (opcode >= 8) {

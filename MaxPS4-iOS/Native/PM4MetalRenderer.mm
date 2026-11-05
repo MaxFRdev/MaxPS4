@@ -86,6 +86,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     for (unsigned k = 0; k < 16; ++k) vsOptions.userData[k] = d.vsUser[k];
     GCNTranslateOptions psOptions;
     psOptions.name = "ps_program"; psOptions.userCount = d.psUserCount;
+    psOptions.directLoads = native_ || !guest_; // Each draw is scanned: its table is complete.
     for (unsigned k = 0; k < 16; ++k) psOptions.userData[k] = d.psUser[k];
     compiling = 3;
     const auto vs = translateGCN(code_, d.vs, vsOptions);
