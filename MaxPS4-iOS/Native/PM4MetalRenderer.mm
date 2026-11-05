@@ -163,7 +163,8 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         // Default optimisation did not finish some programs on the iPhone, large or
         // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
         // deferred and the screen black. Metal caches whichever build completes.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        // Soon after the default build starts: until one ends, its draws are missing.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             { std::lock_guard<std::mutex> lock(async->mutex);
               if (!async->pending.count(key)) return; }
             MTLCompileOptions* size = compileOptions();
@@ -209,7 +210,12 @@ void PM4MetalRenderer::listCostly(std::uint64_t address) {
 
 std::string PM4MetalRenderer::pipelineStatus() const {
     std::lock_guard<std::mutex> lock(async_->mutex);
-    if (async_->pending.empty()) return {};
+    if (async_->pending.empty()) {
+        if (async_->slowest <= 0) return {};
+        char built[48];
+        std::snprintf(built, sizeof built, " · plus lent construit %.1f s", async_->slowest);
+        return built;
+    }
     const auto oldest = std::min_element(async_->pending.begin(), async_->pending.end(),
         [](const auto& a, const auto& b) { return a.second.since < b.second.since; });
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - oldest->second.since).count();
