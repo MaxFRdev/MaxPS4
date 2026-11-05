@@ -59,11 +59,21 @@ int main() {
             arena.put(scalarData + 4 * n, bits(1.0f / scalarLoads));
         }
         arena.code(scalarPS + 8 * scalarLoads, {0xf800180f, 0x00000000, 0xbf810000}); // exp mrt0, v0 x4 done vm
+        // 32 transcendental instructions per pixel: sin, exp, log and sqrt in turn.
+        constexpr uint64_t mathPS = 0x32000;
+        for (unsigned n = 0; n < 32; ++n) {
+            static const uint32_t ops[4] = {0x7e006b00, 0x7e004b00, 0x7e004f00, 0x7e006700};
+            arena.put(mathPS + 4 * n, ops[n % 4]);
+        }
+        arena.code(mathPS + 4 * 32, {0xf800180f, 0x00000000, 0xbf810000});
+        const auto math = translateGCN(arena.memory, mathPS, psOptions);
+        assert(math);
         const auto scalars = translateGCN(arena.memory, scalarPS, psOptions);
         assert(scalars);
         std::uint32_t inputCntl[32] = {};
         const std::string entry = gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", 0x302, inputCntl);
         const std::string scalarEntry = gcnMetalEntryPoints(vs, scalars, "vs_program", "ps_program", 0x302, inputCntl);
+        const std::string mathEntry = gcnMetalEntryPoints(vs, math, "vs_program", "ps_program", 0x302, inputCntl);
         const std::string trivial = R"MSL(
 fragment float4 trivial_fragment(GCNVaryings in [[stage_in]]) { return float4(in.position.x / 1920.0f, in.position.y / 1080.0f, in.p0.x, 1.0f); }
 fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<float> image [[texture(0)]]) {
@@ -93,6 +103,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         // The translator's text keeps its own line ending: match each line alone.
         const std::string slotArray = replaced(replaced(prelude, "return (k == 0u ? M.p : k == 1u ? M.s.x[0] : k == 2u ? M.s.x[1] : k == 3u ? M.s.x[2] :", "return k == 0u ? M.p + o : M.s.x[min(k, GCN_SLOTS) - 1u] + o;"),
             "            k == 4u ? M.s.x[3] : k == 5u ? M.s.x[4] : M.s.x[5]) + o;", "");
+        const std::string fastMath = replaced(prelude, "return precise::", "return fast::");
         std::string previousWrap = replaced(prelude, "if (x >= 0 && x < size) return x; ", "");
         previousWrap = replaced(previousWrap, "int m = x; if (m < 0 || m >= period) { m = x % period; if (m < 0) m += period; }",
                                 "int m = x % period; if (m < 0) m += period;");
@@ -125,6 +136,8 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"native: Metal sampler filters", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 1},
             {"native: texel reads (before 50aaa47)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, texelOnly, 1},
             {"native: no T# match (GCN filters)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 0},
+            {"math: 32 instructions, precise", vs.source + math.source + mathEntry, "gcn_fragment", true},
+            {"math: 32 instructions, fast", vs.source + math.source + mathEntry, "gcn_fragment", true, fastMath},
             {"scalar: 32 loads, variable slot index", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, slotArray, -1, 2},
             {"scalar: 32 loads, no range table", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 1},
             {"scalar: 32 loads, 2 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 2},

@@ -292,28 +292,42 @@ bool PM4MetalRenderer::fillProgram(std::uint64_t address) {
 bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> commands) {
     if (c.userCount != 12 || (c.rsrc2 & 0x380) != 0x80 || c.threads[0] != 64 || c.threads[1] != 1 || c.threads[2] != 1 ||
         c.groups[1] != 1 || c.groups[2] != 1 || !fillProgram(c.program)) return false;
+    // A fill that goes to its kernel costs a GPU wait: the report says why.
+    auto refuse = [&](const char* why, std::uint64_t at = 0, std::uint64_t length = 0) {
+        ++fillsRefused;
+        char text[128];
+        std::snprintf(text, sizeof text, "%s 0x%llx, %llu octets", why, (unsigned long long)at, (unsigned long long)length);
+        fillRefusal = text;
+        return false;
+    };
     auto base = [&](unsigned k) { return std::uint64_t(c.user[k]) | std::uint64_t(c.user[k + 1] & 0xfff) << 32; };
     auto dwords = [&](unsigned k) { // One 32-bit uint per 4-byte record, unswizzled.
         return ((c.user[k + 1] >> 16) & 0x3fff) == 4 && !(c.user[k + 1] >> 30) && (c.user[k + 3] & 7) == 4 &&
                ((c.user[k + 3] >> 12) & 7) == 4 && ((c.user[k + 3] >> 15) & 15) == 4;
     };
     std::uint32_t limits[2], value = 0; // Count and mask.
-    if (!dwords(0) || !dwords(4) || !c.user[10] || !code_.read(base(8), limits, sizeof limits) || limits[1]) return false;
-    if (c.user[2] && !code_.read(base(0), &value, 4)) return false;
+    if (!dwords(0) || !dwords(4)) return refuse("format", base(4));
+    if (!c.user[10] || !code_.read(base(8), limits, sizeof limits)) return refuse("limites illisibles", base(8));
+    if (limits[1]) return refuse("motif de plusieurs valeurs", base(4), limits[1]);
+    if (c.user[2] && !code_.read(base(0), &value, 4)) return refuse("valeur illisible", base(0));
     const std::uint64_t bytes = 4 * std::min<std::uint64_t>({std::uint64_t(c.groups[0]) * 64, limits[0], c.user[6]});
     const std::uint64_t address = base(4);
-    if (!bytes || bytes > (256ull << 20)) return false;
+    if (!bytes || bytes > (256ull << 20)) return refuse("taille", address, bytes);
     auto overlaps = [&](std::uint64_t at, std::uint64_t length) { return address < at + length && at < address + bytes; };
     Target* target = nullptr;
     for (auto& [at, candidate] : targets_) {
         if (!candidate.texture) continue;
         const std::uint64_t row = candidate.texture.width * 4, length = row * candidate.texture.height;
         if (!overlaps(at, length)) continue;
-        if (target || at != address || bytes % row || bytes > length || (candidate.fresh && bytes < length)) return false;
+        if (target) return refuse("deux cibles", address, bytes);
+        if (at != address) return refuse("cible decalee", at, bytes);
+        if (bytes % row) return refuse("lignes partielles", at, bytes);
+        if (bytes > length) return refuse("plus grand que la cible", at, bytes);
+        if (candidate.fresh && bytes < length) return refuse("cible neuve partielle", at, bytes);
         target = &candidate;
     }
-    if (!target && !writeGuest_) return false;
-    if (!target) for (const auto& [at, length] : inPlace_) if (overlaps(at, length)) return false;
+    if (!target && !writeGuest_) return refuse("sans ecriture", address, bytes);
+    if (!target) for (const auto& [at, length] : inPlace_) if (overlaps(at, length)) return refuse("zone partagee", at, bytes);
     auto fill = fills_.find(value);
     if (fill == fills_.end() || fill->second.length < bytes) {
         if (fills_.size() >= 4) fills_.clear();

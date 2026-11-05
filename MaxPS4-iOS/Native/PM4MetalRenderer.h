@@ -54,6 +54,8 @@ public:
     double dispatchCopyMs = 0, writebackMs = 0;
     std::uint64_t dispatchCopyBytes = 0, writebackBytes = 0;
     unsigned fillsDone = 0; // Fill dispatches done without their kernel.
+    unsigned fillsRefused = 0; // Recognised fills sent to their kernel, the last with its reason.
+    std::string fillRefusal;
     unsigned pipelinesReplaced = 0; // Size builds replaced by their default build.
     void listCostly(std::uint64_t address); // Adds a program's words to programListings, once.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
