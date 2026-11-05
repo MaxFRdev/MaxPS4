@@ -643,14 +643,18 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     const std::uint64_t tilesWide = (blocksWide + 7) / 8, tilesHigh = (blocksHigh + 7) / 8;
     const std::uint64_t bytes = tilesWide * tilesHigh * 64 * 16;
     if (!bytes || bytes > (64ull << 20)) return nil;
-    // The start of the data tells a reloaded texture from the one decoded.
-    std::uint8_t start[4096] = {};
-    copyGuest(base, start, std::min<std::uint64_t>(bytes, sizeof start));
-    std::uint64_t mark = 1469598103934665603ull;
-    for (const std::uint8_t byte : start) mark = (mark ^ byte) * 1099511628211ull;
     const auto key = std::make_tuple(base, width, height);
     const auto found = bc7Textures_.find(key);
-    if (found != bc7Textures_.end() && found->second.mark == mark) return found->second.texture;
+    if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
+    // A game fills its atlases as it loads: 16 bytes of every 4 KiB, once a
+    // batch, tell whether any part has changed since it was decoded.
+    std::uint64_t mark = 1469598103934665603ull;
+    for (std::uint64_t at = 0; at < bytes; at += 4096) {
+        std::uint8_t sample[16] = {};
+        copyGuest(base + at, sample, std::min<std::uint64_t>(bytes - at, sizeof sample));
+        for (const std::uint8_t byte : sample) mark = (mark ^ byte) * 1099511628211ull;
+    }
+    if (found != bc7Textures_.end() && found->second.mark == mark) { found->second.batch = batchSerial_; return found->second.texture; }
     std::vector<std::uint8_t> blocks(bytes);
     copyGuest(base, blocks.data(), bytes);
     const std::uint64_t rowBytes = blocksWide * 16;
@@ -666,7 +670,7 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     if (!texture) return nil;
     [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
     if (bc7Textures_.size() >= 32) bc7Textures_.clear();
-    bc7Textures_[key] = {texture, mark};
+    bc7Textures_[key] = {texture, mark, batchSerial_};
     return texture;
 }
 

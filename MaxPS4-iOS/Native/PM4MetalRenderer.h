@@ -65,7 +65,7 @@ public:
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
     void beginBatch() {
-        endBatch(); batching_ = true; batchDraws.clear();
+        endBatch(); batching_ = true; batchDraws.clear(); ++batchSerial_;
         visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
         if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
         visibilityCount_ = 0;
@@ -180,7 +180,8 @@ private:
     std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
     std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_; // Guest ranges the GPU reads directly.
     std::set<std::uint64_t> costly_;
-    struct Decoded { id<MTLTexture> texture; std::uint64_t mark; };
+    struct Decoded { id<MTLTexture> texture; std::uint64_t mark, batch; };
+    std::uint64_t batchSerial_ = 0;
     std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, Decoded> bc7Textures_;
     id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch);
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
