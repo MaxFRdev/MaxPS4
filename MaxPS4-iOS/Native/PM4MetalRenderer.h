@@ -24,6 +24,8 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -54,7 +56,11 @@ public:
     double dispatchCopyMs = 0, writebackMs = 0;
     std::uint64_t dispatchCopyBytes = 0, writebackBytes = 0;
     unsigned fillsDone = 0; // Fill dispatches done without their kernel.
+    unsigned fillsRefused = 0; // Recognised fills sent to their kernel, the last with its reason.
+    std::string fillRefusal;
     unsigned pipelinesReplaced = 0; // Size builds replaced by their default build.
+    unsigned scalarLoadsDirect = 0, scalarLoadsAll = 0; // Pixel programs translated so far.
+    bool nativeSamplesOnly = false; // Tests only: no software filtering, see the pipeline source.
     void listCostly(std::uint64_t address); // Adds a program's words to programListings, once.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
@@ -135,6 +141,10 @@ private:
     std::function<std::int32_t(std::uint64_t, const void*, std::size_t, std::uint64_t*)> writeGuest_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
+    // Each pixel program's scalar loads, by program address, sorted by pc.
+    struct ScalarSites { std::vector<GCNScalarSite> list; std::size_t words = 0; };
+    std::map<std::uint64_t, ScalarSites> scalarSites_;
+    std::vector<std::uint32_t> siteTable_;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
     struct AsyncPipelines {
         struct Pending { std::chrono::steady_clock::time_point since; const char* stage; std::string programs; };
@@ -142,6 +152,20 @@ private:
         std::map<PipelineKey, Pending> pending;
         std::set<PipelineKey> refused;
         std::map<PipelineKey, id<MTLRenderPipelineState>> ready; // nil: refused
+        // Default builds wait here until no size build is left, then run one at a time.
+        std::deque<std::function<void()>> later;
+        unsigned sizing = 0;
+        bool running = false;
+        std::uint64_t buildingPS = 0; // The default build running, for the report.
+        std::chrono::steady_clock::time_point buildingSince;
+        std::string defaultsDone;
+        void next() {
+            std::function<void()> start;
+            { std::lock_guard<std::mutex> lock(mutex);
+              if (sizing || running || later.empty()) return;
+              start = std::move(later.front()); later.pop_front(); running = true; }
+            start();
+        }
         std::string lastError;
         double slowest = 0; // Seconds the slowest finished build took.
     };

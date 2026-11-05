@@ -69,6 +69,31 @@ int main(int argc, char** argv) {
     assert(observed); // Re-read resource descriptors and vertex data too.
     arena.put(vertexTable, 0x10e00);
     check();
+    // The pixel program's constant load reaches its table; a site not run stays 0.
+    reused.scan(d);
+    assert(reused.scalarLoads().size() == 1);
+    const auto load = reused.scalarLoads()[0];
+    assert(load.pc == quadPS + 8 && load.count == 1);
+    const std::vector<GCNScalarSite> sites = {{quadPS + 4, 2, 3}, {quadPS + 8, 1, 0}};
+    std::vector<std::uint32_t> table;
+    assert(reused.scalarTable(sites, 7, table));
+    assert(table[0] == std::uint32_t(load.address) && table[1] == std::uint32_t(load.address >> 32) && table[2] == load.words[0]);
+    assert(table[3] == 0 && table[4] == 0);
+    const std::vector<GCNScalarSite> elsewhere = {{quadPS + 4, 2, 0}};
+    assert(!reused.scalarTable(elsewhere, 4, table));
+    // A load the scan branches over is read from the user SGPRs all the same.
+    constexpr std::uint64_t skipping = 0x11000;
+    arena.code(skipping, {0xbf820001, 0xc0080d00, 0xbf810000}); // s_branch +1, s_load_dword s16, s[12:13], 0, s_endpgm
+    arena.put(0x13800, 0xabcd1234);
+    PM4Draw branching = d;
+    branching.ps = skipping; branching.psUserCount = 14; branching.psUser[12] = 0x13800; branching.psUser[13] = 0;
+    reused.scan(branching);
+    assert(reused.scalarLoads().empty());
+    const std::vector<GCNScalarSite> skipped = {{skipping + 4, 1, 0}};
+    assert(reused.scalarTable(skipped, 3, table));
+    assert(table[0] == 0x13800 && table[1] == 0 && table[2] == 0xabcd1234);
+    arena.code(skipping, {0, 0, 0});
+    arena.put(0x13800, 0);
     if (argc > 1 && std::strcmp(argv[1], "--benchmark") == 0) {
         constexpr unsigned rounds = 6, count = 2000;
         volatile std::uint64_t checksum = 0;

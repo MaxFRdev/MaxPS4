@@ -26,6 +26,11 @@ struct GCNMemory {
 // Fetch the same three-word decode window with one permission-checked read.
 // Preserve word-sized fallback at mapping edges or for readers that refuse a
 // bulk read; no instruction cache or immutable-code assumption is introduced.
+// A pixel program's scalar load: its instruction, and where its address and
+// words go in the draw's table of scalar values (see GCNTranslation::sites).
+// `from`: where the base registers of a load read without an address check come
+// from (GCNTranslator::Known); all zero for the others.
+struct GCNScalarSite { std::uint64_t pc; std::uint32_t count, offset; std::uint32_t from[4] = {0, 0, 0, 0}; };
 inline std::size_t readGCNWords(const GCNMemory& memory, std::uint64_t pc, std::uint32_t words[3]) {
     if (memory.read(pc, words, 3 * sizeof(std::uint32_t))) return 3;
     std::fill(words, words + 3, 0);
@@ -142,6 +147,8 @@ public:
     // guest memory is built from these (PM4ResourceScan.hpp).
     std::function<void(std::uint64_t base, std::uint64_t bytes)> resource;
     std::function<void(const std::array<std::uint32_t, 8>&)> imageResource;
+    // Each scalar load: its instruction, address and the words it read.
+    std::function<void(std::uint64_t pc, std::uint64_t address, const std::uint32_t* words, unsigned count)> scalarLoad;
     // During imageResource: the S# of a sampling instruction, zeros otherwise.
     std::array<std::uint32_t, 4> imageSampler{};
     // Resource scans only: a tiled image reads as zeros instead of ending the run.
@@ -163,7 +170,7 @@ public:
     void reset() {
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
-        attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false;
+        attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false; scalarLoad = {};
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
 
@@ -415,11 +422,14 @@ private:
             if (i.opcode >= 8) resource(address - offset, limit);
             else resource(address, 4ull * count);
         }
+        std::uint32_t words[16];
         for (unsigned n = 0; n < count; ++n) {
             std::uint32_t value = 0;
             if (offset + 4 * n + 4 <= limit && !memory_.read(address + 4 * n, &value, 4)) return fail("unreadable scalar load");
             setScalar(d + n, value);
+            words[n] = value;
         }
+        if (scalarLoad) scalarLoad(4ull * i.word, address, words, count);
         return true;
     }
 

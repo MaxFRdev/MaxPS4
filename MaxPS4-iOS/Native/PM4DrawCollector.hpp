@@ -23,6 +23,16 @@ struct PM4DrawStats {
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
     std::string lastSkipped, lastDispatch;
+    // Diagnostics, nothing renders them yet: draws with a depth test, those
+    // writing depth, those with no colour, culled faces, the last depth state.
+    unsigned depthTested = 0, depthWritten = 0, depthOnly = 0, cullFront = 0, cullBack = 0;
+    std::string lastDepth;
+    std::string depthReport() const {
+        char text[160];
+        std::snprintf(text, sizeof text, "\nProfondeur : %u dessins testés, %u écrivent, %u sans couleur · culling : %u avant, %u arrière",
+                      depthTested, depthWritten, depthOnly, cullFront, cullBack);
+        return text + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
+    }
     void fail(const std::string& message) { ++failed; if (error.empty()) error = message; }
 };
 struct PM4Draw {
@@ -139,8 +149,29 @@ private:
         for (std::size_t k = 1; k < n; ++k) if (data[0] + k - 1 < bank.size()) bank[data[0] + k - 1] = data[k];
     }
     static float f(std::uint32_t x) { return gcn_detail::f32(x); }
+    // DB_DEPTH_CONTROL, DB_Z_INFO, DB_Z_READ/WRITE_BASE, DB_DEPTH_SIZE (8-pixel
+    // tiles), DB_RENDER_CONTROL, DB_DEPTH_CLEAR, DB_HTILE_DATA_BASE, PA_SU_SC_MODE_CNTL.
+    void noteDepth() {
+        const std::uint32_t control = context_[0x200], mode = context_[0x205];
+        if (mode & 1) ++stats_.cullFront;
+        if (mode & 2) ++stats_.cullBack;
+        if (!(control & 2) || !(context_[0x10] & 3)) return;
+        const bool writes = control & 4;
+        ++stats_.depthTested;
+        if (writes) ++stats_.depthWritten;
+        if (!(context_[0x8e] & 0xf) || !context_[0x318]) ++stats_.depthOnly;
+        char text[192];
+        std::snprintf(text, sizeof text, "format %u, lecture 0x%llx, écriture 0x%llx, %ux%u, fonction %u%s, contrôle 0x%x, rendu 0x%x, effacement %g, HTILE 0x%llx, faces 0x%x",
+                      context_[0x10] & 3, (unsigned long long)(std::uint64_t(context_[0x12]) << 8),
+                      (unsigned long long)(std::uint64_t(context_[0x14]) << 8),
+                      ((context_[0x16] & 0x7ff) + 1) * 8, (((context_[0x16] >> 11) & 0x7ff) + 1) * 8,
+                      (control >> 4) & 7, writes ? " avec écriture" : "", control, context_[0x00], f(context_[0x0b]),
+                      (unsigned long long)(std::uint64_t(context_[0x05]) << 8), mode);
+        stats_.lastDepth = text;
+    }
     template <class Draw> void collect(std::uint32_t count, bool indexed, std::uint64_t indexAddress, Draw& draw) {
         ++stats_.draws;
+        noteDepth();
         if (!(context_[0x8e] & 0xf) || !context_[0x318]) {
             ++stats_.skipped;
             // CB_TARGET_MASK, CB_COLOR0/1 BASE and INFO format, CB_COLOR_CONTROL,
