@@ -49,8 +49,21 @@ int main() {
         const auto vs = translateGCN(arena.memory, fetchVS, vsOptions);
         const auto ps = translateGCN(arena.memory, texturedPS, psOptions);
         assert(vs && ps);
+        // 32 scalar loads per pixel, as the game's costliest programs make, each a
+        // gcn_locate: what the search through a draw's ranges costs.
+        constexpr uint64_t scalarPS = 0x30000, scalarData = 0x31000;
+        constexpr unsigned scalarLoads = 32;
+        for (unsigned n = 0; n < scalarLoads; ++n) {
+            arena.put(scalarPS + 8 * n, 0xc0080100u | n);     // s_load_dword s16, s[0:1], n
+            arena.put(scalarPS + 8 * n + 4, 0x06000010u);     // v_add_f32 v0, s16, v0
+            arena.put(scalarData + 4 * n, bits(1.0f / scalarLoads));
+        }
+        arena.code(scalarPS + 8 * scalarLoads, {0xf800180f, 0x00000000, 0xbf810000}); // exp mrt0, v0 x4 done vm
+        const auto scalars = translateGCN(arena.memory, scalarPS, psOptions);
+        assert(scalars);
         std::uint32_t inputCntl[32] = {};
         const std::string entry = gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", 0x302, inputCntl);
+        const std::string scalarEntry = gcnMetalEntryPoints(vs, scalars, "vs_program", "ps_program", 0x302, inputCntl);
         const std::string trivial = R"MSL(
 fragment float4 trivial_fragment(GCNVaryings in [[stage_in]]) { return float4(in.position.x / 1920.0f, in.position.y / 1080.0f, in.p0.x, 1.0f); }
 fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<float> image [[texture(0)]]) {
@@ -89,7 +102,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const std::string nativePrelude = gcnMetalPrelude(true);
         const std::string texelOnly = replaced(nativePrelude, "    if (k < 0) return false;\n    const uint4 sd",
                                                "    if (true) return false;\n    const uint4 sd");
-        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; };
+        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
             {"trivial Metal fragment", vs.source + ps.source + entry + trivial, "trivial_fragment", true},
@@ -109,6 +122,9 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"native: Metal sampler filters", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 1},
             {"native: texel reads (before 50aaa47)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, texelOnly, 1},
             {"native: no T# match (GCN filters)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 0},
+            {"scalar: 32 loads, no range table", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 1},
+            {"scalar: 32 loads, 2 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 2},
+            {"scalar: 32 loads, 16 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 3},
         };
         MTLCompileOptions* options = [MTLCompileOptions new];
         if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeSafe;
@@ -141,6 +157,17 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const uint32_t t[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
                                 (imageW - 1) << 13, 0, 0, 0, 0, 0, 0x500000, 0};
         std::memcpy(state.ps, t, sizeof t);
+        // The scalar program's user SGPRs point at its data. Its three tables: a
+        // single window; two ranges; fifteen ranges before the one it reads.
+        State states[4] = {state, state, state, state};
+        for (unsigned k = 1; k < 4; ++k) { states[k].ps[0] = std::uint32_t(scalarData); states[k].ps[1] = 0; }
+        states[1].count = 0; states[1].base = Arena::start; states[1].size = arena.bytes.size();
+        states[3].count = 16;
+        for (unsigned k = 0; k < 15; ++k) {
+            states[3].ranges[3 * k] = 0x7000000000ull + (std::uint64_t(k) << 20);
+            states[3].ranges[3 * k + 1] = 0x1000; states[3].ranges[3 * k + 2] = 0;
+        }
+        states[3].ranges[45] = Arena::start; states[3].ranges[46] = image - Arena::start; states[3].ranges[47] = 0;
         const uint32_t indices[3] = {0, 1, 2};
         auto* targetDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:screenW height:screenH mipmapped:NO];
         targetDescriptor.usage = MTLTextureUsageRenderTarget; targetDescriptor.storageMode = MTLStorageModePrivate;
@@ -198,7 +225,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                 [encoder setRenderPipelineState:pipelines[k]];
                 [encoder setViewport:MTLViewport{0, 0, double(screenW), double(screenH), 0, 1}];
                 [encoder setVertexBuffer:memory offset:0 atIndex:0]; [encoder setFragmentBuffer:memory offset:0 atIndex:0];
-                [encoder setVertexBytes:&state length:sizeof state atIndex:1]; [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
+                [encoder setVertexBytes:&states[variants[k].state] length:sizeof state atIndex:1]; [encoder setFragmentBytes:&states[variants[k].state] length:sizeof state atIndex:1];
                 [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
                 [encoder setFragmentTexture:metalImage atIndex:0];
                 if (variants[k].native >= 0) {
