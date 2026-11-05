@@ -73,19 +73,15 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const std::string identitySwizzle = replaced(prelude, "return gcn_texture_swizzle(t, float4(c0, c1, c2, c3));", "return float4(c0, c1, c2, c3);");
         const std::string clampOnly = replaced(prelude, "GCN_FN int gcn_wrap(int x, int size, uint mode, GCN_THREAD bool& border) {",
             "GCN_FN int gcn_wrap(int x, int size, uint mode, GCN_THREAD bool& border) { return x < 0 ? 0 : (x >= size ? size - 1 : x);");
-        const std::string oneTap = replaced(prelude, "if (!linear) return gcn_fetch_at", "if (true) return gcn_fetch_at");
-        const std::string noLookup = replaced(prelude, "if (gcn_locate(M, base, ((ulong(height) - 1ul) * pitch + width) * bytes, offset))",
-            "offset = M.ranges[5]; if (true)");
+        const std::string oneTap = replaced(prelude, "uint taps = linear ? 4u : 1u;", "uint taps = 1u;");
+        const std::string noLookup = replaced(prelude, "resolved = gcn_locate(M, base, footprint, offset);",
+            "offset = M.ranges[5]; resolved = true;");
         // The runtime before per-axis wrapping (same results, measured in the same run).
         std::string previousWrap = replaced(prelude, "if (x >= 0 && x < size) return x; ", "");
         previousWrap = replaced(previousWrap, "int m = x; if (m < 0 || m >= period) { m = x % period; if (m < 0) m += period; }",
                                 "int m = x % period; if (m < 0) m += period;");
-        const std::pair<const char*, const char*> taps[] = {
-            {"c00 = bx0 || by0 ? gcn_border_color(s) : gcn_texel_at(M, t, wx0, wy0, resolved, offset)", "c00 = gcn_fetch_at(M, t, s, x0, y0, resolved, offset)"},
-            {"c10 = bx1 || by0 ? gcn_border_color(s) : gcn_texel_at(M, t, wx1, wy0, resolved, offset)", "c10 = gcn_fetch_at(M, t, s, x0 + 1, y0, resolved, offset)"},
-            {"c01 = bx0 || by1 ? gcn_border_color(s) : gcn_texel_at(M, t, wx0, wy1, resolved, offset)", "c01 = gcn_fetch_at(M, t, s, x0, y0 + 1, resolved, offset)"},
-            {"c11 = bx1 || by1 ? gcn_border_color(s) : gcn_texel_at(M, t, wx1, wy1, resolved, offset)", "c11 = gcn_fetch_at(M, t, s, x0 + 1, y0 + 1, resolved, offset)"}};
-        for (const auto& [from, to] : taps) previousWrap = replaced(previousWrap, from, to);
+        previousWrap = replaced(previousWrap, "gcn_texel_at(M, t, right ? wx1 : wx0, down ? wy1 : wy0, resolved, offset)",
+                                "gcn_fetch_at(M, t, s, right ? x0 + 1 : x0, down ? y0 + 1 : y0, resolved, offset)");
         // Native textures as the game binds them (GCNNativeTexture at buffer(3)):
         // Metal's sampler filters (50aaa47), the texture is only read per texel
         // (before 50aaa47), or no T# matches and GCN filters with the larger code.
