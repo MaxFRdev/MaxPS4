@@ -159,20 +159,15 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                 }];
             }];
         };
-        // The game's programs favour speed over bit-exact sin, exp and division.
-        auto gameOptions = [] {
-            MTLCompileOptions* options = compileOptions();
-            if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeFast;
-            return options;
         };
-        build(gameOptions(), true);
+        build(compileOptions(), true); // Fast math did not finish some programs in minutes either.
         // Default optimisation did not finish some programs on the iPhone, large or
         // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
         // deferred and the screen black. Metal caches whichever build completes.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             { std::lock_guard<std::mutex> lock(async->mutex);
               if (!async->pending.count(key)) return; }
-            MTLCompileOptions* size = gameOptions();
+            MTLCompileOptions* size = compileOptions();
             if (@available(macOS 13.0, iOS 16.0, *)) size.optimizationLevel = MTLLibraryOptimizationLevelSize;
             build(size, false);
         });
