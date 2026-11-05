@@ -6,6 +6,8 @@
 // receives copies of these ranges only (PM4MetalRenderer), never the whole
 // guest address space. A resource used only on a path that representative
 // lane does not take is missed and reads as zero on the GPU, never outside.
+// A tiled image, which the CPU cannot read, gives zeros here: the lane carries
+// on, as constants read after it would otherwise read as zero on the GPU.
 // A V# beyond the copy limit (engines give dynamic buffers an unbounded
 // record count) is copied only where the draw reads it: for the vertex
 // program, the elements of the draw's index range around the one the lane
@@ -17,6 +19,8 @@
 namespace maxps4::gpu {
 struct PM4Range { std::uint64_t base = 0, size = 0; };
 
+struct PM4ScalarLoad { std::uint64_t pc, address; std::uint32_t count; std::array<std::uint32_t, 16> words; };
+
 class PM4ResourceScanner {
 public:
     explicit PM4ResourceScanner(const GCNMemory& memory, bool captureImages = false)
@@ -27,7 +31,7 @@ public:
     // guest values are read again on every draw. Not a concurrent scanner.
     const std::vector<PM4Range>& scan(const PM4Draw& d) {
     constexpr std::uint64_t largest = 256ull << 20;
-    found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear();
+    found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); scalarLoads_.clear();
     auto note = [&](std::uint64_t base, std::uint64_t bytes) {
         if (bytes && bytes <= largest && base + bytes > base) found_.push_back({base, bytes});
     };
@@ -53,6 +57,7 @@ public:
     {
         wave.reset();
         wave.resource = note;
+        wave.tiledReadsZero = true;
         wave.buffer = oversized(true);
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
         for (unsigned k = 0; k < d.vsUserCount; ++k) wave.s[k] = d.vsUser[k];
@@ -68,6 +73,7 @@ public:
     {
         wave.reset();
         wave.resource = note;
+        wave.tiledReadsZero = true;
         wave.buffer = oversized(false);
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
         for (unsigned k = 0; k < d.psUserCount; ++k) wave.s[k] = d.psUser[k];
@@ -83,12 +89,17 @@ public:
             reg += sizes[bit];
         }
         wave.attribute = [](unsigned, unsigned) { return GCNAttributePlane{}; };
+        wave.scalarLoad = [this](std::uint64_t pc, std::uint64_t address, const std::uint32_t* words, unsigned count) {
+            PM4ScalarLoad load{pc, address, count, {}};
+            std::copy(words, words + count, load.words.begin());
+            scalarLoads_.push_back(load);
+        };
         wave.run(d.ps);
         psError_ = wave.error;
     }
     // Sorted, with overlapping or nearly adjacent (4 KiB) ranges merged.
     wave.resource = {}; // Do not retain the callback to this scan's stack.
-    wave.imageResource = {}; wave.buffer = {};
+    wave.imageResource = {}; wave.buffer = {}; wave.scalarLoad = {};
     std::sort(found_.begin(), found_.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
     for (const auto& r : found_) {
         if (!merged_.empty() && r.base <= merged_.back().base + merged_.back().size + 4096) {
@@ -101,7 +112,7 @@ public:
     // are not written; their resources are also given by stored(). Images
     // the program addresses are captured whatever captureImages.
     const std::vector<PM4Range>& scan(const PM4Dispatch& c) {
-        found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); stored_.clear(); dispatchError_.clear();
+        found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); scalarLoads_.clear(); stored_.clear(); dispatchError_.clear();
         constexpr std::uint64_t largest = 256ull << 20;
         auto& wave = wave_;
         wave.reset();
@@ -136,6 +147,25 @@ public:
     const std::string& dispatchError() const { return dispatchError_; }
     const std::vector<PM4Range>& stored() const { return stored_; }
     const std::vector<std::array<std::uint32_t, 8>>& images() const { return images_; }
+    // The pixel program's scalar loads, in the order the scan ran them.
+    const std::vector<PM4ScalarLoad>& scalarLoads() const { return scalarLoads_; }
+    // The table a draw's pixel program reads them from, for `sites` sorted by
+    // pc: its uniform loads then skip the memory search on every pixel. A load
+    // the scan did not reach keeps address 0, and the program searches. False:
+    // no site was reached.
+    bool scalarTable(const std::vector<GCNScalarSite>& sites, std::size_t words, std::vector<std::uint32_t>& table) const {
+        table.assign(words, 0);
+        bool any = false;
+        for (const auto& load : scalarLoads_) {
+            const auto site = std::lower_bound(sites.begin(), sites.end(), load.pc, [](const GCNScalarSite& s, std::uint64_t pc) { return s.pc < pc; });
+            if (site == sites.end() || site->pc != load.pc || site->count != load.count) continue;
+            table[site->offset] = std::uint32_t(load.address);
+            table[site->offset + 1] = std::uint32_t(load.address >> 32);
+            std::copy(load.words.begin(), load.words.begin() + load.count, table.begin() + site->offset + 2);
+            any = true;
+        }
+        return any;
+    }
     // The S# first sampling each of images() (zeros: read without a sampler).
     const std::vector<std::array<std::uint32_t, 4>>& samplers() const { return samplers_; }
     // The last scanned draw's vertex lane: (target, x, y, z, w) per export.
@@ -155,6 +185,7 @@ private:
     bool vsRan_ = false;
     std::string vsError_, psError_;
     std::vector<std::array<std::uint32_t, 8>> images_;
+    std::vector<PM4ScalarLoad> scalarLoads_;
     bool captureImages_;
     std::vector<std::array<std::uint32_t, 4>> samplers_;
     void image(const std::array<std::uint32_t, 8>& descriptor) {

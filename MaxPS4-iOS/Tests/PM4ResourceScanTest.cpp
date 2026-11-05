@@ -32,6 +32,18 @@ int main(int argc, char** argv) {
     assert(capturing.images().size() == 1);
     for (unsigned k = 0; k < 8; ++k) assert(capturing.images()[0][k] == quadSgprs[k]);
     assert(capturing.scan(lost).empty() && capturing.images().empty());
+    // A tiled T# the CPU cannot read does not hide what the program reads after it.
+    constexpr std::uint64_t afterImagePS = 0x14000;
+    arena.code(afterImagePS, {
+        0xf0800f00, 0x00400402, // image_sample v[4:7], v2, s[0:7], s[8:11] dmask:0xf
+        0xc2080d00,             // s_buffer_load_dword s16, s[12:15], 0x0
+        0xbf810000});
+    PM4Draw tiledDraw = d;
+    tiledDraw.ps = afterImagePS;
+    tiledDraw.psUser[3] = 0x90d0032e;
+    bool constants = false;
+    for (const auto& range : capturing.scan(tiledDraw)) constants |= range.base <= 0x13000 && 0x13000 < range.base + range.size;
+    assert(constants && capturing.images().size() == 1 && capturing.pixelError().empty());
     PM4ResourceScanner reused(arena.memory);
     auto check = [&] {
         const auto& current = reused.scan(d);
@@ -57,6 +69,18 @@ int main(int argc, char** argv) {
     assert(observed); // Re-read resource descriptors and vertex data too.
     arena.put(vertexTable, 0x10e00);
     check();
+    // The pixel program's constant load reaches its table; a site not run stays 0.
+    reused.scan(d);
+    assert(reused.scalarLoads().size() == 1);
+    const auto load = reused.scalarLoads()[0];
+    assert(load.pc == quadPS + 8 && load.count == 1);
+    const std::vector<GCNScalarSite> sites = {{quadPS + 4, 2, 3}, {quadPS + 8, 1, 0}};
+    std::vector<std::uint32_t> table;
+    assert(reused.scalarTable(sites, 7, table));
+    assert(table[0] == std::uint32_t(load.address) && table[1] == std::uint32_t(load.address >> 32) && table[2] == load.words[0]);
+    assert(table[3] == 0 && table[4] == 0);
+    const std::vector<GCNScalarSite> elsewhere = {{quadPS + 4, 2, 0}};
+    assert(!reused.scalarTable(elsewhere, 4, table));
     if (argc > 1 && std::strcmp(argv[1], "--benchmark") == 0) {
         constexpr unsigned rounds = 6, count = 2000;
         volatile std::uint64_t checksum = 0;

@@ -470,6 +470,8 @@ int main() {
         for (const auto& packet : decodePM4Type3(s.words.data(),s.words.size()).packets)
             assert([bridge submit:s.words.data()+packet.headerWord count:packet.payloadCount+1]==0);
         auto readback = [&](id<MTLTexture> source, std::uint8_t* pixels) {
+            // Display copies finish on the bridge's queue: wait as the screen does.
+            while (bridge.displayEvent.signaledValue < bridge.displayEventValue) usleep(100);
             readPixels(device,queue,source,pixels);
         };
         id<MTLTexture> saved = [bridge copyTargetAtAddress:targetB width:width height:height];
@@ -607,7 +609,9 @@ int main() {
         fill(targetB,width*height);
         assert([barrier.report containsString:@"remplissages 2 "]);
         std::uint8_t cleared[width*height*4]{};
-        readPixels(device,queue,[barrier copyTargetAtAddress:targetB width:width height:height],cleared);
+        id<MTLTexture> filledTarget = [barrier copyTargetAtAddress:targetB width:width height:height];
+        while (barrier.displayEvent.signaledValue < barrier.displayEventValue) usleep(100);
+        readPixels(device,queue,filledTarget,cleared);
         for (unsigned n = 0; n < width*height; ++n) { std::uint32_t pixel; std::memcpy(&pixel,cleared+4*n,4); assert(pixel == fillValue); }
         std::puts("PASS fill dispatches reach guest memory and targets without a kernel");
         const uint32_t bad[]={0};

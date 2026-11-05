@@ -105,7 +105,11 @@ GCN_FN bool gcn_locate(GCNMemory M, ulong a, ulong n, ulong& offset) {
     }
     return false;
 }
+GCN_FN bool gcn_locate_hint(GCNMemory M, ulong a, ulong n, ulong& offset, uint&) { return gcn_locate(M, a, n, offset); }
 GCN_FN uint gcn_ld32(GCNMemory M, ulong a) { ulong o; if (!gcn_locate(M, a, 4, o)) return 0; uint v; std::memcpy(&v, M.p + o, 4); return v; }
+GCN_FN uint gcn_ld32_hint(GCNMemory M, ulong a, uint&) { return gcn_ld32(M, a); }
+GCN_FN bool gcn_site_hit(GCNMemory, uint, ulong) { return false; } // No table of scalar values here.
+GCN_FN uint gcn_site_word(GCNMemory, uint, uint) { return 0; }
 GCN_FN uint gcn_ld16(GCNMemory M, ulong a) { ulong o; if (!gcn_locate(M, a, 2, o)) return 0; std::uint16_t v; std::memcpy(&v, M.p + o, 2); return v; }
 GCN_FN uint gcn_ld8(GCNMemory M, ulong a) { ulong o; if (!gcn_locate(M, a, 1, o)) return 0; return M.p[o]; }
 // Offsets below are used only after a complete image span was validated.

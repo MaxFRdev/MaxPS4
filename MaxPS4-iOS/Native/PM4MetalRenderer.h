@@ -24,6 +24,8 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -54,6 +56,10 @@ public:
     double dispatchCopyMs = 0, writebackMs = 0;
     std::uint64_t dispatchCopyBytes = 0, writebackBytes = 0;
     unsigned fillsDone = 0; // Fill dispatches done without their kernel.
+    unsigned fillsRefused = 0; // Recognised fills sent to their kernel, the last with its reason.
+    std::string fillRefusal;
+    unsigned pipelinesReplaced = 0; // Size builds replaced by their default build.
+    void listCostly(std::uint64_t address); // Adds a program's words to programListings, once.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }
     bool writebackGuestWrites();
@@ -62,11 +68,12 @@ public:
     std::string batchDraws, programListings;
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
-    void beginBatch() {
-        endBatch(); batching_ = true; batchDraws.clear();
-        visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
-        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
-        visibilityCount_ = 0;
+    // `details`: also describe its draws and count their samples, which costs
+    // every draw CPU and GPU time.
+    void beginBatch(bool details = true) {
+        endBatch(); batching_ = true; batchDraws.clear(); ++batchSerial_;
+        details_ = details;
+        startVisibility();
     }
     // The samples each draw of the last batch that drew rasterized (Metal
     // visibility results, readable once its commands completed).
@@ -77,9 +84,7 @@ public:
     // a synchronous compute writeback barrier. Existing draw diagnostics stay.
     void resumeBatch() {
         batching_ = true;
-        visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
-        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
-        visibilityCount_ = 0;
+        startVisibility();
     }
     // The texture holding colour target `address`, or nil if never drawn.
     id<MTLTexture> target(std::uint64_t address) const;
@@ -134,14 +139,30 @@ private:
     std::function<std::int32_t(std::uint64_t, const void*, std::size_t, std::uint64_t*)> writeGuest_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
+    // Each pixel program's scalar loads, by program address, sorted by pc.
+    struct ScalarSites { std::vector<GCNScalarSite> list; std::size_t words = 0; };
+    std::map<std::uint64_t, ScalarSites> scalarSites_;
+    std::vector<std::uint32_t> siteTable_;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
     struct AsyncPipelines {
-        struct Pending { std::chrono::steady_clock::time_point since; const char* stage; };
+        struct Pending { std::chrono::steady_clock::time_point since; const char* stage; std::string programs; };
         std::mutex mutex;
         std::map<PipelineKey, Pending> pending;
         std::set<PipelineKey> refused;
         std::map<PipelineKey, id<MTLRenderPipelineState>> ready; // nil: refused
+        // Default builds wait here until no size build is left, then run one at a time.
+        std::deque<std::function<void()>> later;
+        unsigned sizing = 0;
+        bool running = false;
+        void next() {
+            std::function<void()> start;
+            { std::lock_guard<std::mutex> lock(mutex);
+              if (sizing || running || later.empty()) return;
+              start = std::move(later.front()); later.pop_front(); running = true; }
+            start();
+        }
         std::string lastError;
+        double slowest = 0; // Seconds the slowest finished build took.
     };
     std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
     bool deferred_ = false; // the last pipeline() call left its draw to a pending build
@@ -158,7 +179,14 @@ private:
     std::vector<std::uint64_t> listed_;
     id<MTLBuffer> visibility_ = nil;
     unsigned visibilityCount_ = 0;
+    bool details_ = true;
+    void startVisibility() {
+        visibility_ = details_ ? [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared] : nil;
+        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
+        visibilityCount_ = 0;
+    }
     void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount, bool always = false);
+    std::string programWords(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) const;
     bool batching_ = false;
     id<MTLRenderCommandEncoder> encoder_ = nil;
     id<MTLCommandBuffer> commands_ = nil;
@@ -175,6 +203,12 @@ private:
     struct Shared { id<MTLBuffer> buffer; std::uint64_t offset; }; // the range's first byte in `buffer`
     std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
     std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_; // Guest ranges the GPU reads directly.
+    std::set<std::uint64_t> costly_;
+    struct Decoded { id<MTLTexture> texture; std::uint64_t mark, batch; };
+    std::uint64_t batchSerial_ = 0;
+    std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, Decoded> bc7Textures_;
+    id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch);
+    unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
     std::map<std::uint64_t, bool> fillPrograms_;
     std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.
     id<MTLCommandBuffer> sharedOwner_ = nil;
