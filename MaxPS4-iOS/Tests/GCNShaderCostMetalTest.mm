@@ -8,11 +8,14 @@
 #import <Metal/Metal.h>
 #include "../Native/GCNTranslator.hpp"
 #include "GCNTestPrograms.h"
+#include "GCNGamePrograms.h"
 #include <cassert>
 #include <cstdio>
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cstring>
+#include <iterator>
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
@@ -70,6 +73,42 @@ int main() {
         assert(math);
         const auto scalars = translateGCN(arena.memory, scalarPS, psOptions);
         assert(scalars);
+        // Mortal Kombat 1's costliest programs with their descriptor tables as the
+        // words read them; constants all 0.5 (the game's own are not in the report).
+        // PS 1800 samples four images: its fourth table entry can match the first
+        // (all bound) or stand alone (the renderer binds three).
+        constexpr uint64_t ps1800At = 0x34000, ps2000At = 0x35000, table1800 = 0x36000, loneTable1800 = 0x36800, table2000 = 0x37000;
+        for (std::size_t n = 0; n < std::size(mk1PS1800); ++n) arena.put(ps1800At + 4 * n, mk1PS1800[n]);
+        for (std::size_t n = 0; n < std::size(mk1PS2000); ++n) arena.put(ps2000At + 4 * n, mk1PS2000[n]);
+        const uint32_t gameSampler[4] = {0, 0, 0x500000, 0};
+        auto gameImage = [&](uint32_t mark, uint32_t* out) {
+            const uint32_t words[8] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu, (imageW - 1) << 13, mark, 0, 0};
+            std::memcpy(out, words, sizeof words);
+        };
+        auto putWords = [&](uint64_t at, const uint32_t* words, unsigned count) { for (unsigned n = 0; n < count; ++n) arena.put(at + 4 * n, words[n]); };
+        auto putImage = [&](uint64_t at, uint32_t mark) { uint32_t words[8]; gameImage(mark, words); putWords(at, words, 8); };
+        auto putBuffer = [&](uint64_t at, uint64_t constants) {
+            const uint32_t words[4] = {std::uint32_t(constants), 0, 0x400, 0x9000};
+            putWords(at, words, 4);
+        };
+        for (uint64_t table : {table1800, loneTable1800, table2000}) {
+            const uint64_t constants = (table == loneTable1800 ? table1800 : table) + 0x100;
+            for (unsigned n = 0; n < 0x100; ++n) arena.put(constants + 4 * n, bits(0.5f));
+            putImage(table, 1); putImage(table + 0x20, 2);
+            if (table == table2000) {
+                putWords(table + 0x40, gameSampler, 4); putWords(table + 0x50, gameSampler, 4); putBuffer(table + 0x60, constants);
+            } else {
+                putImage(table + 0x40, table == loneTable1800 ? 4 : 1);
+                putWords(table + 0x60, gameSampler, 4); putWords(table + 0x70, gameSampler, 4);
+                for (unsigned n = 0; n < 3; ++n) putBuffer(table + 0x80 + 0x10 * n, constants);
+            }
+        }
+        GCNTranslateOptions gameOptions = psOptions; gameOptions.userCount = 15;
+        const auto game1800 = translateGCN(arena.memory, ps1800At, gameOptions);
+        const auto game2000 = translateGCN(arena.memory, ps2000At, gameOptions);
+        if (!game1800 || !game2000) std::printf("game programs: %s %s\n", game1800.error.c_str(), game2000.error.c_str());
+        assert(game1800 && game2000);
+        std::printf("SHADER SOURCE PS 1800 %zu bytes, PS 2000 %zu bytes\n", game1800.source.size(), game2000.source.size());
         std::uint32_t inputCntl[32] = {};
         const std::string entry = gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", 0x302, inputCntl);
         const std::string scalarEntry = gcnMetalEntryPoints(vs, scalars, "vs_program", "ps_program", 0x302, inputCntl);
@@ -116,6 +155,34 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const std::string nativePrelude = gcnMetalPrelude(true);
         const std::string texelOnly = replaced(nativePrelude, "    if (k < 0) return false;\n    const uint4 sd",
                                                "    if (true) return false;\n    const uint4 sd");
+        // Texture coordinates from the pixel, as the game's full-screen quads give them.
+        auto gameEntry = [&](const auto& program) {
+            return replaced(gcnMetalEntryPoints(vs, program, "vs_program", "ps_program", 0x2, inputCntl, true),
+                            "L.attr[0] = in.p0;", "L.attr[0] = float4(in.position.x / 1920.0f, in.position.y / 1080.0f, 0.0f, 1.0f);");
+        };
+        const std::string entry1800 = gameEntry(game1800), entry2000 = gameEntry(game2000);
+        // No software path: a T# or S# no bound texture matches reads as zero.
+        const std::string noFallback = replaced(nativePrelude, "// One gcn_sample_at for every case, for the reason given there.",
+                                                "if (true) return float4(0.0f, 0.0f, 0.0f, 0.0f);");
+        // No image read at all: what is left is the program's arithmetic and scalar loads.
+        const std::string noImages = replaced(nativePrelude, "if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);",
+                                              "if (true) return float4(u, v, 0.5f, 1.0f);");
+        // Scalar loads read from a small constant table, no search and no pointer
+        // choice: the best a table of values from the CPU scan could do.
+        auto uniformLoads = [&](std::string source, uint64_t table) {
+            std::string data = "GCN_FN bool gcn_uniform_span(ulong n, thread ulong& at, thread uint& hint) { return true; }\nconstant uint gcn_uniform[320] = {";
+            for (unsigned n = 0; n < 320; ++n) {
+                uint32_t word; std::memcpy(&word, arena.bytes.data() + (table - Arena::start) + 4 * n, 4);
+                data += std::to_string(word) + "u,";
+            }
+            data += "};\n";
+            const std::string first = "((a - " + std::to_string(table) + "ul) >> 2)";
+            source = replaced(source, "gcn_ld32_hint(M, a, gcn_hint)", "gcn_uniform[" + first + "]");
+            source = replaced(source, "gcn_locate_hint(M, a, ", "gcn_uniform_span(");
+            source = replaced(source, "gcn_packed32(M, at + 4ul * k)", "gcn_uniform[" + first + " + k]");
+            return data + source;
+        };
+        const std::string uniform1800 = uniformLoads(game1800.source, table1800), uniform2000 = uniformLoads(game2000.source, table2000);
         struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
@@ -136,6 +203,17 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"native: Metal sampler filters", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 1},
             {"native: texel reads (before 50aaa47)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, texelOnly, 1},
             {"native: no T# match (GCN filters)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 0},
+            {"PS 1800: fourth image in software", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4},
+            {"PS 1800: four images bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 5},
+            {"PS 1800: no software path", vs.source + game1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 5},
+            {"PS 1800: no image reads", vs.source + game1800.source + entry1800, "gcn_fragment", true, noImages, 2, 5},
+            {"PS 1800: constant scalar loads", vs.source + uniform1800 + entry1800, "gcn_fragment", true, nativePrelude, 2, 5},
+            {"PS 1800: constant, no software path", vs.source + uniform1800 + entry1800, "gcn_fragment", true, noFallback, 2, 5},
+            {"PS 2000: as bound", vs.source + game2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
+            {"PS 2000: no software path", vs.source + game2000.source + entry2000, "gcn_fragment", true, noFallback, 2, 6},
+            {"PS 2000: no image reads", vs.source + game2000.source + entry2000, "gcn_fragment", true, noImages, 2, 6},
+            {"PS 2000: constant scalar loads", vs.source + uniform2000 + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
+            {"PS 2000: constant, no software path", vs.source + uniform2000 + entry2000, "gcn_fragment", true, noFallback, 2, 6},
             {"math: 32 instructions, precise", vs.source + math.source + mathEntry, "gcn_fragment", true},
             {"math: 32 instructions, fast", vs.source + math.source + mathEntry, "gcn_fragment", true, fastMath},
             {"scalar: 32 loads, variable slot index", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, slotArray, -1, 2},
@@ -176,7 +254,13 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         std::memcpy(state.ps, t, sizeof t);
         // The scalar program's user SGPRs point at its data. Its three tables: a
         // single window; two ranges; sixteen ranges, the one it reads the twelfth.
-        State states[4] = {state, state, state, state};
+        State states[7] = {state, state, state, state, state, state, state};
+        // The game programs' user SGPRs: T#, S#, table pointer, attribute base.
+        for (unsigned k = 4; k < 7; ++k) {
+            uint32_t words[8]; gameImage(3, words);
+            std::memcpy(states[k].ps, words, sizeof words); std::memcpy(states[k].ps + 8, gameSampler, sizeof gameSampler);
+            states[k].ps[12] = std::uint32_t(k == 4 ? loneTable1800 : k == 5 ? table1800 : table2000); states[k].ps[13] = 0; states[k].ps[14] = 0;
+        }
         for (unsigned k = 1; k < 4; ++k) { states[k].ps[0] = std::uint32_t(scalarData); states[k].ps[1] = 0; }
         states[1].count = 0; states[1].base = Arena::start; states[1].size = arena.bytes.size();
         states[3].count = 16;
@@ -216,7 +300,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         samplerDescriptor.sAddressMode = samplerDescriptor.tAddressMode = MTLSamplerAddressModeRepeat;
         samplerDescriptor.supportArgumentBuffers = YES;
         id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:samplerDescriptor];
-        id<MTLBuffer> nativeTables[2];
+        id<MTLBuffer> nativeTables[3];
         for (unsigned enabled = 0; enabled < 2; ++enabled) {
             nativeTables[enabled] = [device newBufferWithLength:nativeArguments.encodedLength options:MTLResourceStorageModeShared];
             [nativeArguments setArgumentBuffer:nativeTables[enabled] offset:0];
@@ -226,6 +310,19 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             *static_cast<uint32_t*>([nativeArguments constantDataAtIndex:1]) = enabled ? 0x11u : 0u;
             std::memcpy([nativeArguments constantDataAtIndex:2], t, 16);
             std::memcpy([nativeArguments constantDataAtIndex:3], t + 4, 16);
+        }
+        // Three bound images, as the renderer binds a game draw's: T#s marked 1 to 3.
+        nativeTables[2] = [device newBufferWithLength:nativeArguments.encodedLength options:MTLResourceStorageModeShared];
+        [nativeArguments setArgumentBuffer:nativeTables[2] offset:0];
+        *static_cast<uint32_t*>([nativeArguments constantDataAtIndex:1]) = 0x77u;
+        for (unsigned k = 0; k < 3; ++k) {
+            static const NSUInteger imageField[3] = {0, 4, 7}, lowField[3] = {2, 5, 8};
+            uint32_t words[8]; gameImage(k + 1, words);
+            [nativeArguments setTexture:linearImage atIndex:imageField[k]];
+            [nativeArguments setSamplerState:sampler atIndex:10 + k];
+            std::memcpy([nativeArguments constantDataAtIndex:13 + k], gameSampler, 16);
+            std::memcpy([nativeArguments constantDataAtIndex:lowField[k]], words, 16);
+            std::memcpy([nativeArguments constantDataAtIndex:lowField[k] + 1], words + 4, 16);
         }
         id<MTLCommandQueue> queue = [device newCommandQueue];
         std::vector<std::vector<double>> samples(variants.size());
