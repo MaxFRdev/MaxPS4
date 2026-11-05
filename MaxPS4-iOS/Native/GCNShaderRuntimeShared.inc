@@ -273,47 +273,50 @@ GCN_FN float4 gcn_sample_at(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float
     bool un = unorm || ((s.d[0] >> 15) & 1u) != 0u;
     bool linear = ((s.d[2] >> 20) & 3u) == 1u || ((s.d[2] >> 22) & 3u) == 1u;
     float x = un ? u : u * w; float y = un ? v : v * h;
-    if (!linear) return gcn_fetch_at(M, t, s, int(gcn_floor(x)), int(gcn_floor(y)), resolved, offset);
-    float fx = x - 0.5f; float fy = y - 0.5f;
+    float fx = linear ? x - 0.5f : x; float fy = linear ? y - 0.5f : y;
     int x0 = int(gcn_floor(fx)); int y0 = int(gcn_floor(fy));
-    float ax = fx - float(x0); float ay = fy - float(y0);
-    // gcn_fetch_at for the four taps, each axis wrapped once rather than per tap.
+    float ax = linear ? fx - float(x0) : 0.0f; float ay = linear ? fy - float(y0) : 0.0f;
+    // Each axis wrapped once rather than per tap.
     int iw = int(w); int ih = int(h); uint mx = s.d[0] & 7u; uint my = (s.d[0] >> 3) & 7u;
     bool bx0 = false; bool bx1 = false; bool by0 = false; bool by1 = false;
     int wx0 = gcn_wrap(x0, iw, mx, bx0); int wx1 = gcn_wrap(x0 + 1, iw, mx, bx1);
     int wy0 = gcn_wrap(y0, ih, my, by0); int wy1 = gcn_wrap(y0 + 1, ih, my, by1);
-    float4 c00 = bx0 || by0 ? gcn_border_color(s) : gcn_texel_at(M, t, wx0, wy0, resolved, offset);
-    float4 c10 = bx1 || by0 ? gcn_border_color(s) : gcn_texel_at(M, t, wx1, wy0, resolved, offset);
-    float4 c01 = bx0 || by1 ? gcn_border_color(s) : gcn_texel_at(M, t, wx0, wy1, resolved, offset);
-    float4 c11 = bx1 || by1 ? gcn_border_color(s) : gcn_texel_at(M, t, wx1, wy1, resolved, offset);
-    float4 r;
-    for (uint n = 0u; n < 4u; ++n)
-        r[n] = (c00[n] * (1.0f - ax) + c10[n] * ax) * (1.0f - ay) + (c01[n] * (1.0f - ax) + c11[n] * ax) * ay;
+    // One gcn_texel_at in a loop the compiler cannot unroll: it decodes every
+    // format, and each inlined copy costs compile time and registers.
+    float4 r = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    uint taps = linear ? 4u : 1u;
+    for (uint n = 0u; n < taps; ++n) {
+        bool right = (n & 1u) != 0u; bool down = (n & 2u) != 0u;
+        float weight = (right ? ax : 1.0f - ax) * (down ? ay : 1.0f - ay);
+        float4 c = (right ? bx1 : bx0) || (down ? by1 : by0) ? gcn_border_color(s) : gcn_texel_at(M, t, right ? wx1 : wx0, down ? wy1 : wy0, resolved, offset);
+        for (uint k = 0u; k < 4u; ++k) r[k] += weight * c[k];
+    }
     return r;
 }
 GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u, float v) {
     float4 filtered;
     if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);
-    // A tiled T# reads only through a native texture (a colour target), else as 0.
-    if (((t.d[3] >> 20) & 0x1fu) != 8u)
-        return gcn_native_texel(M, t, 0, 0, filtered) ? gcn_sample_at(M, t, s, unorm, u, v, false, 0ul) : float4(0.0f, 0.0f, 0.0f, 0.0f);
-    ulong base = (ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8;
-    uint width = (t.d[2] & 0x3fffu) + 1u, height = ((t.d[2] >> 14) & 0x3fffu) + 1u;
-    uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u, dfmt = (t.d[1] >> 20) & 0x3fu;
-    uint bytes = dfmt == 1u ? 1u : (dfmt == 2u || dfmt == 3u || (dfmt >= 16u && dfmt <= 19u)) ? 2u : dfmt == 14u ? 16u : 4u;
+    // One gcn_sample_at for every case, for the reason given there.
+    bool resolved = false;
     ulong offset = 0ul;
-    // Address modes in gcn_fetch_at constrain every texel to [0,width)x[0,height).
-    // Resolve that complete footprint once, not once per tap/channel. Sparse or
-    // truncated resources retain the original checked-load path and zero reads.
-    if (dfmt >= 35u && dfmt <= 39u) {
-        ulong footprint = (ulong((height + 3u) / 4u - 1u) * ((pitch + 3u) / 4u) + (width + 3u) / 4u) * ((dfmt == 35u || dfmt == 38u) ? 8ul : 16ul);
-        if (gcn_locate(M, base, footprint, offset))
-            return gcn_sample_at(M, t, s, unorm, u, v, true, offset);
-        return gcn_sample_at(M, t, s, unorm, u, v, false, 0ul);
+    // A tiled T# reads only through a native texture (a colour target), else as 0.
+    if (((t.d[3] >> 20) & 0x1fu) != 8u) {
+        if (!gcn_native_texel(M, t, 0, 0, filtered)) return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    } else {
+        ulong base = (ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8;
+        uint width = (t.d[2] & 0x3fffu) + 1u, height = ((t.d[2] >> 14) & 0x3fffu) + 1u;
+        uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u, dfmt = (t.d[1] >> 20) & 0x3fu;
+        uint bytes = dfmt == 1u ? 1u : (dfmt == 2u || dfmt == 3u || (dfmt >= 16u && dfmt <= 19u)) ? 2u : dfmt == 14u ? 16u : 4u;
+        // Address modes in gcn_fetch_at constrain every texel to [0,width)x[0,height).
+        // Resolve that complete footprint once, not once per tap/channel. Sparse or
+        // truncated resources retain the original checked-load path and zero reads.
+        ulong footprint = dfmt >= 35u && dfmt <= 39u
+            ? (ulong((height + 3u) / 4u - 1u) * ((pitch + 3u) / 4u) + (width + 3u) / 4u) * ((dfmt == 35u || dfmt == 38u) ? 8ul : 16ul)
+            : ((ulong(height) - 1ul) * pitch + width) * bytes;
+        resolved = gcn_locate(M, base, footprint, offset);
+        if (!resolved) offset = 0ul;
     }
-    if (gcn_locate(M, base, ((ulong(height) - 1ul) * pitch + width) * bytes, offset))
-        return gcn_sample_at(M, t, s, unorm, u, v, true, offset);
-    return gcn_sample_at(M, t, s, unorm, u, v, false, 0ul);
+    return gcn_sample_at(M, t, s, unorm, u, v, resolved, offset);
 }
 // image_store to a linear 2D image (tiling index 8): components in channel
 // order, those outside `dmask` stored as 0. Other formats and tilings: none.

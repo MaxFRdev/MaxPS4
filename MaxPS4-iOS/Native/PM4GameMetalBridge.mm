@@ -52,6 +52,7 @@ struct GameMetalState {
     unsigned barriers = 0, batchBarriers = 0, mostBarriers = 0, batches = 0, slowBatches = 0;
     double barrierMs = 0;
     std::string programCosts; // GPU time per pixel program in the last timed batch.
+    Clock::time_point nextTiming{};
     std::string computeError;
     // The draws of the last batch that had any, and the centre pixel of the
     // last displayed image (its four bytes in texture order).
@@ -240,8 +241,10 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             s.enter(3);
             s.renderer.resumeBatch();
         };
-        // One batch in 120 runs draw by draw: what each pixel program costs the GPU.
-        const bool timing = s.batches % 120 == 60;
+        // One batch every 10 s runs draw by draw: what each pixel program costs the
+        // GPU. It stalls that batch, so it stays rare.
+        const bool timing = Clock::now() >= s.nextTiming;
+        if (timing) s.nextTiming = Clock::now() + std::chrono::seconds(10);
         std::map<std::uint64_t, std::pair<double, unsigned>> drawCosts;
         const auto timeDraw = [&](std::uint64_t program) {
             s.renderer.endBatch();
@@ -253,7 +256,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             segmentEncoded = false;
             s.renderer.resumeBatch();
         };
-        s.renderer.beginBatch();
+        s.renderer.beginBatch(s.batches % 60 == 0);
         s.phaseDraw = 0; s.phasePS = 0;
         s.batchBarriers = 0;
         s.enter(3);

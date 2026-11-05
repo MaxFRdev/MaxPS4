@@ -64,11 +64,12 @@ public:
     std::string batchDraws, programListings;
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
-    void beginBatch() {
+    // `details`: also describe its draws and count their samples, which costs
+    // every draw CPU and GPU time.
+    void beginBatch(bool details = true) {
         endBatch(); batching_ = true; batchDraws.clear(); ++batchSerial_;
-        visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
-        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
-        visibilityCount_ = 0;
+        details_ = details;
+        startVisibility();
     }
     // The samples each draw of the last batch that drew rasterized (Metal
     // visibility results, readable once its commands completed).
@@ -79,9 +80,7 @@ public:
     // a synchronous compute writeback barrier. Existing draw diagnostics stay.
     void resumeBatch() {
         batching_ = true;
-        visibility_ = [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared];
-        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
-        visibilityCount_ = 0;
+        startVisibility();
     }
     // The texture holding colour target `address`, or nil if never drawn.
     id<MTLTexture> target(std::uint64_t address) const;
@@ -161,6 +160,12 @@ private:
     std::vector<std::uint64_t> listed_;
     id<MTLBuffer> visibility_ = nil;
     unsigned visibilityCount_ = 0;
+    bool details_ = true;
+    void startVisibility() {
+        visibility_ = details_ ? [device_ newBufferWithLength:8 * 64 options:MTLResourceStorageModeShared] : nil;
+        if (visibility_) std::memset(visibility_.contents, 0, 8 * 64);
+        visibilityCount_ = 0;
+    }
     void listProgram(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount, bool always = false);
     std::string programWords(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) const;
     bool batching_ = false;

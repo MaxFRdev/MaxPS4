@@ -144,6 +144,8 @@ public:
     std::function<void(const std::array<std::uint32_t, 8>&)> imageResource;
     // During imageResource: the S# of a sampling instruction, zeros otherwise.
     std::array<std::uint32_t, 4> imageSampler{};
+    // Resource scans only: a tiled image reads as zeros instead of ending the run.
+    bool tiledReadsZero = false;
     // Called as `resource` for the resources a store instruction writes.
     std::function<void(std::uint64_t base, std::uint64_t bytes)> stored;
     // Called with every V# access: its extent, stride and the address the
@@ -161,7 +163,7 @@ public:
     void reset() {
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
-        attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr;
+        attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false;
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
 
@@ -913,6 +915,16 @@ private:
                 if (i.opcode >= 32 && i.opcode < 64 && samp <= s.size() - 4) std::copy_n(&s[samp], 4, imageSampler.begin());
                 std::array<std::uint32_t, 8> descriptor{};
                 std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);
+            }
+            // A scan goes on: resources read after this image must still be found.
+            if (tiledReadsZero) {
+                if (i.opcode == 8) return true;
+                const unsigned written = i.opcode >= 64 ? 15 : dmask;
+                for (unsigned lane = 0; lane < lanes_; ++lane) {
+                    if (!active(lane)) continue;
+                    for (unsigned n = 0, out = 0; n < 4; ++n) if ((written >> n) & 1) v(vdata + out++, lane) = 0;
+                }
+                return true;
             }
             return fail("tiled image (tile mode " + std::to_string(t.tiling) + ")");
         }

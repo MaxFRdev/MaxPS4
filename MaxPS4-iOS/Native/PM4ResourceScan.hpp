@@ -6,6 +6,8 @@
 // receives copies of these ranges only (PM4MetalRenderer), never the whole
 // guest address space. A resource used only on a path that representative
 // lane does not take is missed and reads as zero on the GPU, never outside.
+// A tiled image, which the CPU cannot read, gives zeros here: the lane carries
+// on, as constants read after it would otherwise read as zero on the GPU.
 // A V# beyond the copy limit (engines give dynamic buffers an unbounded
 // record count) is copied only where the draw reads it: for the vertex
 // program, the elements of the draw's index range around the one the lane
@@ -53,6 +55,7 @@ public:
     {
         wave.reset();
         wave.resource = note;
+        wave.tiledReadsZero = true;
         wave.buffer = oversized(true);
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
         for (unsigned k = 0; k < d.vsUserCount; ++k) wave.s[k] = d.vsUser[k];
@@ -68,6 +71,7 @@ public:
     {
         wave.reset();
         wave.resource = note;
+        wave.tiledReadsZero = true;
         wave.buffer = oversized(false);
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
         for (unsigned k = 0; k < d.psUserCount; ++k) wave.s[k] = d.psUser[k];
