@@ -100,7 +100,10 @@ int main() {
             } else {
                 putImage(table + 0x40, table == loneTable1800 ? 4 : 1);
                 putWords(table + 0x60, gameSampler, 4); putWords(table + 0x70, gameSampler, 4);
-                for (unsigned n = 0; n < 3; ++n) putBuffer(table + 0x80 + 0x10 * n, constants);
+                for (unsigned n = 0; n < 2; ++n) putBuffer(table + 0x80 + 0x10 * n, constants);
+                // Its first constant selects the path: 2.0 reads all four images, as the scan saw.
+                putBuffer(table + 0xa0, constants + 0x200);
+                arena.put(constants + 0x200, bits(2.0f));
             }
         }
         GCNTranslateOptions gameOptions = psOptions; gameOptions.userCount = 15;
@@ -183,6 +186,23 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             return data + source;
         };
         const std::string uniform1800 = uniformLoads(game1800.source, table1800), uniform2000 = uniformLoads(game2000.source, table2000);
+        // The same table as could ship: each load checks its address against bounds
+        // read from constant memory and keeps the search for any other address.
+        auto guardedLoads = [&](std::string source, uint64_t table) {
+            std::string data = "constant ulong gcn_bounds[2] = {" + std::to_string(table) + "ul, " + std::to_string(table + 0x500) + "ul};\nconstant uint gcn_uniform[320] = {";
+            for (unsigned n = 0; n < 320; ++n) {
+                uint32_t word; std::memcpy(&word, arena.bytes.data() + (table - Arena::start) + 4 * n, 4);
+                data += std::to_string(word) + "u,";
+            }
+            data += "};\n";
+            const std::string first = "((a - gcn_bounds[0]) >> 2)", hit = "a >= gcn_bounds[0] && a < gcn_bounds[1]";
+            source = replaced(source, "gcn_ld32_hint(M, a, gcn_hint)", "((" + hit + ") ? gcn_uniform[" + first + "] : gcn_ld32(M, a))");
+            source = replaced(source, "ulong at = 0ul; if (", "ulong at = 0ul; if (" + hit + ") { for (uint k = 0u; k < sizeof(w) / 4u; ++k) w[k] = gcn_uniform[" + first + " + k]; } else if (");
+            return data + source;
+        };
+        const std::string guarded1800 = guardedLoads(game1800.source, table1800), guarded2000 = guardedLoads(game2000.source, table2000);
+        // The software path as one function the compiler keeps apart from each image_sample.
+        const std::string apart = replaced(nativePrelude, "GCN_FN float4 gcn_sample_at(", "__attribute__((noinline)) float4 gcn_sample_at(");
         struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
@@ -209,11 +229,17 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"PS 1800: no image reads", vs.source + game1800.source + entry1800, "gcn_fragment", true, noImages, 2, 5},
             {"PS 1800: constant scalar loads", vs.source + uniform1800 + entry1800, "gcn_fragment", true, nativePrelude, 2, 5},
             {"PS 1800: constant, no software path", vs.source + uniform1800 + entry1800, "gcn_fragment", true, noFallback, 2, 5},
+            {"PS 1800: guarded table", vs.source + guarded1800 + entry1800, "gcn_fragment", true, nativePrelude, 2, 5},
+            {"PS 1800: guarded, software apart", vs.source + guarded1800 + entry1800, "gcn_fragment", true, apart, 2, 5},
+            {"PS 1800: software apart", vs.source + game1800.source + entry1800, "gcn_fragment", true, apart, 2, 5},
             {"PS 2000: as bound", vs.source + game2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
             {"PS 2000: no software path", vs.source + game2000.source + entry2000, "gcn_fragment", true, noFallback, 2, 6},
             {"PS 2000: no image reads", vs.source + game2000.source + entry2000, "gcn_fragment", true, noImages, 2, 6},
             {"PS 2000: constant scalar loads", vs.source + uniform2000 + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
             {"PS 2000: constant, no software path", vs.source + uniform2000 + entry2000, "gcn_fragment", true, noFallback, 2, 6},
+            {"PS 2000: guarded table", vs.source + guarded2000 + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
+            {"PS 2000: guarded, software apart", vs.source + guarded2000 + entry2000, "gcn_fragment", true, apart, 2, 6},
+            {"PS 2000: software apart", vs.source + game2000.source + entry2000, "gcn_fragment", true, apart, 2, 6},
             {"math: 32 instructions, precise", vs.source + math.source + mathEntry, "gcn_fragment", true},
             {"math: 32 instructions, fast", vs.source + math.source + mathEntry, "gcn_fragment", true, fastMath},
             {"scalar: 32 loads, variable slot index", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, slotArray, -1, 2},
@@ -232,7 +258,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&error];
             std::printf("SHADER COMPILE %-36s %8.1f ms\n", variants[k].name, -[compiling timeIntervalSinceNow] * 1000);
             if (!library) std::printf("%s MSL: %s\n", variants[k].name, error.localizedDescription.UTF8String);
-            assert(library);
+            if (!library) { variants[k].draws = false; continue; }
             MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
             descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
             descriptor.fragmentFunction = [library newFunctionWithName:[NSString stringWithUTF8String:variants[k].fragment]];
