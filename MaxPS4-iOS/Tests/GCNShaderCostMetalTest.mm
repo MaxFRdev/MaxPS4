@@ -213,7 +213,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         auto noCheck = [&](const std::string& source) {
             return "GCN_FN bool gcn_site_always(GCNMemory M, uint at, ulong a) { return true; }\n" + replaced(source, "gcn_site_hit(M, ", "gcn_site_always(M, ");
         };
-        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; const std::vector<std::uint32_t>* sites = nullptr; };
+        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; const std::vector<std::uint32_t>* sites = nullptr; bool size = false; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
             {"trivial Metal fragment", vs.source + ps.source + entry + trivial, "trivial_fragment", true},
@@ -259,6 +259,13 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"PS 1800: direct, no software path", vs.source + direct1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 4, &sites1800},
             {"PS 2000: direct loads", vs.source + direct2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
             {"PS 2000: direct, no software path", vs.source + direct2000.source + entry2000, "gcn_fragment", true, noFallback, 2, 6, &sites2000},
+            // Built for size, as most programs run on the iPhone: default builds wait.
+            {"PS 1800: direct loads, size", vs.source + direct1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800, true},
+            {"PS 1800: direct, no software path, size", vs.source + direct1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 4, &sites1800, true},
+            {"PS 1800: loop, table, size", vs.source + loop1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800, true},
+            {"PS 2000: direct loads, size", vs.source + direct2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000, true},
+            {"PS 2000: direct, no software path, size", vs.source + direct2000.source + entry2000, "gcn_fragment", true, noFallback, 2, 6, &sites2000, true},
+            {"PS 2000: loop, table, size", vs.source + loop2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000, true},
             {"PS 1800: loop, scalar table, four bound", vs.source + loop1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
             {"PS 1800: table, no search", vs.source + noSearch(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
             {"PS 1800: table, no check", vs.source + noCheck(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
@@ -291,13 +298,15 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         }
         MTLCompileOptions* options = [MTLCompileOptions new];
         if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeSafe;
+        MTLCompileOptions* sizeOptions = [options copy];
+        if (@available(macOS 13.0, iOS 16.0, *)) sizeOptions.optimizationLevel = MTLLibraryOptimizationLevelSize;
         std::vector<id<MTLRenderPipelineState>> pipelines(variants.size());
         for (std::size_t k = 0; k < variants.size(); ++k) {
             if (!variants[k].draws) continue;
             NSError* error = nil;
             const std::string source = (variants[k].prelude.empty() ? prelude : variants[k].prelude) + variants[k].source;
             NSDate* compiling = [NSDate date];
-            id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&error];
+            id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:variants[k].size ? sizeOptions : options error:&error];
             std::printf("SHADER COMPILE %-36s %8.1f ms\n", variants[k].name, -[compiling timeIntervalSinceNow] * 1000);
             if (!library) std::printf("%s MSL: %s\n", variants[k].name, error.localizedDescription.UTF8String);
             if (!library) { variants[k].draws = false; continue; }

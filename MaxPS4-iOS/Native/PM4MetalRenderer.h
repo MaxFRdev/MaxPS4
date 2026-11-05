@@ -154,6 +154,9 @@ private:
         std::deque<std::function<void()>> later;
         unsigned sizing = 0;
         bool running = false;
+        std::uint64_t buildingPS = 0; // The default build running, for the report.
+        std::chrono::steady_clock::time_point buildingSince;
+        std::string defaultsDone;
         void next() {
             std::function<void()> start;
             { std::lock_guard<std::mutex> lock(mutex);
