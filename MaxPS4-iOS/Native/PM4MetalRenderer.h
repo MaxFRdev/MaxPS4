@@ -137,6 +137,10 @@ private:
     std::function<std::int32_t(std::uint64_t, const void*, std::size_t, std::uint64_t*)> writeGuest_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
+    // Each pixel program's scalar loads, by program address, sorted by pc.
+    struct ScalarSites { std::vector<GCNScalarSite> list; std::size_t words = 0; };
+    std::map<std::uint64_t, ScalarSites> scalarSites_;
+    std::vector<std::uint32_t> siteTable_;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
     struct AsyncPipelines {
         struct Pending { std::chrono::steady_clock::time_point since; const char* stage; std::string programs; };

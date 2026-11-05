@@ -7,6 +7,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "../Native/GCNTranslator.hpp"
+#include "../Native/PM4ResourceScan.hpp"
 #include "GCNTestPrograms.h"
 #include "GCNGamePrograms.h"
 #include <cassert>
@@ -186,24 +187,8 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             return data + source;
         };
         const std::string uniform1800 = uniformLoads(game1800.source, table1800), uniform2000 = uniformLoads(game2000.source, table2000);
-        // The same table as could ship: each load checks its address against bounds
-        // read from constant memory and keeps the search for any other address.
-        auto guardedLoads = [&](std::string source, uint64_t table) {
-            std::string data = "constant ulong gcn_bounds[2] = {" + std::to_string(table) + "ul, " + std::to_string(table + 0x500) + "ul};\nconstant uint gcn_uniform[320] = {";
-            for (unsigned n = 0; n < 320; ++n) {
-                uint32_t word; std::memcpy(&word, arena.bytes.data() + (table - Arena::start) + 4 * n, 4);
-                data += std::to_string(word) + "u,";
-            }
-            data += "};\n";
-            const std::string first = "((a - gcn_bounds[0]) >> 2)", hit = "a >= gcn_bounds[0] && a < gcn_bounds[1]";
-            source = replaced(source, "gcn_ld32_hint(M, a, gcn_hint)", "((" + hit + ") ? gcn_uniform[" + first + "] : gcn_ld32(M, a))");
-            source = replaced(source, "ulong at = 0ul; if (", "ulong at = 0ul; if (" + hit + ") { for (uint k = 0u; k < sizeof(w) / 4u; ++k) w[k] = gcn_uniform[" + first + " + k]; } else if (");
-            return data + source;
-        };
-        const std::string guarded1800 = guardedLoads(game1800.source, table1800), guarded2000 = guardedLoads(game2000.source, table2000);
-        // The software path as one function the compiler keeps apart from each image_sample.
-        const std::string apart = replaced(nativePrelude, "GCN_FN float4 gcn_sample_at(", "__attribute__((noinline)) float4 gcn_sample_at(");
-        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; };
+        std::vector<std::uint32_t> sites1800, sites2000; // Filled by the scan, below.
+        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; const std::vector<std::uint32_t>* sites = nullptr; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
             {"trivial Metal fragment", vs.source + ps.source + entry + trivial, "trivial_fragment", true},
@@ -223,23 +208,20 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"native: Metal sampler filters", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 1},
             {"native: texel reads (before 50aaa47)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, texelOnly, 1},
             {"native: no T# match (GCN filters)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 0},
-            {"PS 1800: fourth image in software", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4},
-            {"PS 1800: four images bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 5},
+            {"PS 1800: fourth image in software", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 3, 4},
+            {"PS 1800: four images bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4},
+            {"PS 1800: scalar table, three bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 3, 4, &sites1800},
+            {"PS 1800: scalar table, four bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
             {"PS 1800: no software path", vs.source + game1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 5},
             {"PS 1800: no image reads", vs.source + game1800.source + entry1800, "gcn_fragment", true, noImages, 2, 5},
             {"PS 1800: constant scalar loads", vs.source + uniform1800 + entry1800, "gcn_fragment", true, nativePrelude, 2, 5},
             {"PS 1800: constant, no software path", vs.source + uniform1800 + entry1800, "gcn_fragment", true, noFallback, 2, 5},
-            {"PS 1800: guarded table", vs.source + guarded1800 + entry1800, "gcn_fragment", true, nativePrelude, 2, 5},
-            {"PS 1800: guarded, software apart", vs.source + guarded1800 + entry1800, "gcn_fragment", true, apart, 2, 5},
-            {"PS 1800: software apart", vs.source + game1800.source + entry1800, "gcn_fragment", true, apart, 2, 5},
             {"PS 2000: as bound", vs.source + game2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
             {"PS 2000: no software path", vs.source + game2000.source + entry2000, "gcn_fragment", true, noFallback, 2, 6},
             {"PS 2000: no image reads", vs.source + game2000.source + entry2000, "gcn_fragment", true, noImages, 2, 6},
             {"PS 2000: constant scalar loads", vs.source + uniform2000 + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
             {"PS 2000: constant, no software path", vs.source + uniform2000 + entry2000, "gcn_fragment", true, noFallback, 2, 6},
-            {"PS 2000: guarded table", vs.source + guarded2000 + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
-            {"PS 2000: guarded, software apart", vs.source + guarded2000 + entry2000, "gcn_fragment", true, apart, 2, 6},
-            {"PS 2000: software apart", vs.source + game2000.source + entry2000, "gcn_fragment", true, apart, 2, 6},
+            {"PS 2000: scalar table", vs.source + game2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
             {"math: 32 instructions, precise", vs.source + math.source + mathEntry, "gcn_fragment", true},
             {"math: 32 instructions, fast", vs.source + math.source + mathEntry, "gcn_fragment", true, fastMath},
             {"scalar: 32 loads, variable slot index", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, slotArray, -1, 2},
@@ -295,6 +277,23 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             states[3].ranges[3 * k + 1] = 0x10; states[3].ranges[3 * k + 2] = 0;
         }
         states[3].ranges[33] = Arena::start; states[3].ranges[34] = image - Arena::start; states[3].ranges[35] = 0;
+        // The tables the renderer gives these draws, from the same scan.
+        auto scanSites = [&](uint64_t program, const GCNTranslation& translation, const State& gameState, std::vector<std::uint32_t>& table) {
+            PM4ResourceScanner scanner(arena.memory, true);
+            PM4Draw draw{};
+            draw.ps = program; draw.psUserCount = 15; draw.psInputAddr = 2;
+            for (unsigned k = 0; k < 15; ++k) draw.psUser[k] = gameState.ps[k];
+            draw.scissor[2] = screenW; draw.scissor[3] = screenH;
+            scanner.scan(draw);
+            auto sites = translation.sites;
+            std::sort(sites.begin(), sites.end(), [](const GCNScalarSite& a, const GCNScalarSite& b) { return a.pc < b.pc; });
+            const bool any = scanner.scalarTable(sites, translation.siteWords, table);
+            std::printf("SHADER SITES 0x%llx: %zu sites, %u words, %zu loads scanned, %zu images, error '%s'\n", (unsigned long long)program, sites.size(),
+                        translation.siteWords, scanner.scalarLoads().size(), scanner.images().size(), scanner.pixelError().c_str());
+            assert(any);
+        };
+        scanSites(ps1800At, game1800, states[4], sites1800);
+        scanSites(ps2000At, game2000, states[6], sites2000);
         const uint32_t indices[3] = {0, 1, 2};
         auto* targetDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:screenW height:screenH mipmapped:NO];
         targetDescriptor.usage = MTLTextureUsageRenderTarget; targetDescriptor.storageMode = MTLStorageModePrivate;
@@ -310,23 +309,24 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         imageDescriptor.storageMode = MTLStorageModeShared;
         id<MTLTexture> linearImage = [linearBytes newTextureWithDescriptor:imageDescriptor offset:0 bytesPerRow:imageW * 4];
         assert(linearImage);
-        MTLArgumentDescriptor* fields[16];
-        const MTLDataType types[16] = {MTLDataTypeTexture, MTLDataTypeUInt, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture,
+        MTLArgumentDescriptor* fields[21];
+        const MTLDataType types[21] = {MTLDataTypeTexture, MTLDataTypeUInt, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture,
                                        MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeTexture, MTLDataTypeUInt4, MTLDataTypeUInt4,
-                                       MTLDataTypeSampler, MTLDataTypeSampler, MTLDataTypeSampler, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeUInt4};
-        for (unsigned k = 0; k < 16; ++k) {
+                                       MTLDataTypeSampler, MTLDataTypeSampler, MTLDataTypeSampler, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeUInt4,
+                                       MTLDataTypeTexture, MTLDataTypeUInt4, MTLDataTypeUInt4, MTLDataTypeSampler, MTLDataTypeUInt4};
+        for (unsigned k = 0; k < 21; ++k) {
             fields[k] = [MTLArgumentDescriptor argumentDescriptor];
             fields[k].dataType = types[k]; fields[k].index = k;
             if (types[k] == MTLDataTypeTexture) fields[k].textureType = MTLTextureType2D;
         }
-        id<MTLArgumentEncoder> nativeArguments = [device newArgumentEncoderWithArguments:[NSArray arrayWithObjects:fields count:16]];
+        id<MTLArgumentEncoder> nativeArguments = [device newArgumentEncoderWithArguments:[NSArray arrayWithObjects:fields count:21]];
         // The S# (t[8..11]): wrap, bilinear, as PM4MetalRenderer builds its sampler.
         MTLSamplerDescriptor* samplerDescriptor = [MTLSamplerDescriptor new];
         samplerDescriptor.minFilter = samplerDescriptor.magFilter = MTLSamplerMinMagFilterLinear;
         samplerDescriptor.sAddressMode = samplerDescriptor.tAddressMode = MTLSamplerAddressModeRepeat;
         samplerDescriptor.supportArgumentBuffers = YES;
         id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:samplerDescriptor];
-        id<MTLBuffer> nativeTables[3];
+        id<MTLBuffer> nativeTables[4];
         for (unsigned enabled = 0; enabled < 2; ++enabled) {
             nativeTables[enabled] = [device newBufferWithLength:nativeArguments.encodedLength options:MTLResourceStorageModeShared];
             [nativeArguments setArgumentBuffer:nativeTables[enabled] offset:0];
@@ -337,18 +337,21 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             std::memcpy([nativeArguments constantDataAtIndex:2], t, 16);
             std::memcpy([nativeArguments constantDataAtIndex:3], t + 4, 16);
         }
-        // Three bound images, as the renderer binds a game draw's: T#s marked 1 to 3.
-        nativeTables[2] = [device newBufferWithLength:nativeArguments.encodedLength options:MTLResourceStorageModeShared];
-        [nativeArguments setArgumentBuffer:nativeTables[2] offset:0];
-        *static_cast<uint32_t*>([nativeArguments constantDataAtIndex:1]) = 0x77u;
-        for (unsigned k = 0; k < 3; ++k) {
-            static const NSUInteger imageField[3] = {0, 4, 7}, lowField[3] = {2, 5, 8};
-            uint32_t words[8]; gameImage(k + 1, words);
-            [nativeArguments setTexture:linearImage atIndex:imageField[k]];
-            [nativeArguments setSamplerState:sampler atIndex:10 + k];
-            std::memcpy([nativeArguments constantDataAtIndex:13 + k], gameSampler, 16);
-            std::memcpy([nativeArguments constantDataAtIndex:lowField[k]], words, 16);
-            std::memcpy([nativeArguments constantDataAtIndex:lowField[k] + 1], words + 4, 16);
+        // Four bound images, as the renderer binds a game draw's (T#s marked 1 to 4),
+        // or the first three only.
+        for (unsigned table = 2; table < 4; ++table) {
+            nativeTables[table] = [device newBufferWithLength:nativeArguments.encodedLength options:MTLResourceStorageModeShared];
+            [nativeArguments setArgumentBuffer:nativeTables[table] offset:0];
+            *static_cast<uint32_t*>([nativeArguments constantDataAtIndex:1]) = table == 2 ? 0xffu : 0x77u;
+            for (unsigned k = 0; k < 4; ++k) {
+                static const NSUInteger imageField[4] = {0, 4, 7, 16}, lowField[4] = {2, 5, 8, 17}, samplerField[4] = {10, 11, 12, 19}, wordField[4] = {13, 14, 15, 20};
+                uint32_t words[8]; gameImage(k + 1, words);
+                [nativeArguments setTexture:linearImage atIndex:imageField[k]];
+                [nativeArguments setSamplerState:sampler atIndex:samplerField[k]];
+                std::memcpy([nativeArguments constantDataAtIndex:wordField[k]], gameSampler, 16);
+                std::memcpy([nativeArguments constantDataAtIndex:lowField[k]], words, 16);
+                std::memcpy([nativeArguments constantDataAtIndex:lowField[k] + 1], words + 4, 16);
+            }
         }
         id<MTLCommandQueue> queue = [device newCommandQueue];
         std::vector<std::vector<double>> samples(variants.size());
@@ -365,7 +368,12 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                 [encoder setRenderPipelineState:pipelines[k]];
                 [encoder setViewport:MTLViewport{0, 0, double(screenW), double(screenH), 0, 1}];
                 [encoder setVertexBuffer:memory offset:0 atIndex:0]; [encoder setFragmentBuffer:memory offset:0 atIndex:0];
-                [encoder setVertexBytes:&states[variants[k].state] length:sizeof state atIndex:1]; [encoder setFragmentBytes:&states[variants[k].state] length:sizeof state atIndex:1];
+                State drawn = states[variants[k].state];
+                if (variants[k].sites) {
+                    drawn.flags |= 4; // GCN_DRAW_SITES
+                    [encoder setFragmentBytes:variants[k].sites->data() length:variants[k].sites->size() * 4 atIndex:4];
+                }
+                [encoder setVertexBytes:&drawn length:sizeof state atIndex:1]; [encoder setFragmentBytes:&drawn length:sizeof state atIndex:1];
                 [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
                 [encoder setFragmentTexture:metalImage atIndex:0];
                 if (variants[k].native >= 0) {

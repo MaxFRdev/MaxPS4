@@ -24,7 +24,7 @@ static_assert(sizeof(DrawState) == 544, "GCNDrawState layout");
 // Must match GCNDispatchState in gcnMetalComputeEntry().
 struct DispatchState { std::uint64_t base, size; std::uint32_t user[16], userCount, rsrc2, rangeCount, pad; std::uint64_t ranges[48]; };
 static_assert(sizeof(DispatchState) == 480, "GCNDispatchState layout");
-constexpr std::uint32_t rectList = 1, flipY = 2;
+constexpr std::uint32_t rectList = 1, flipY = 2, scalarSites = 4;
 
 // CB_BLEND factor codes to Metal; dual-source factors remain unsupported.
 bool blendFactor(unsigned code, MTLBlendFactor& out) {
@@ -93,6 +93,11 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     compiling = 0;
     if (!vs) { fail("VS translation: " + vs.error); return nil; }
     if (!ps) { fail("PS translation: " + ps.error); return nil; }
+    {
+        ScalarSites& sites = scalarSites_[d.ps];
+        sites.list = ps.sites; sites.words = ps.siteWords;
+        std::sort(sites.list.begin(), sites.list.end(), [](const GCNScalarSite& a, const GCNScalarSite& b) { return a.pc < b.pc; });
+    }
     const std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
                                gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
@@ -885,6 +890,17 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     [encoder setCullMode:MTLCullModeNone];
     for (unsigned k = 0; k < 16; ++k) { drawState.vsUser[k] = d.vsUser[k]; drawState.psUser[k] = d.psUser[k]; }
     drawState.flags = (d.primitive == 0x11 ? rectList : 0) | (ys > 0 ? flipY : 0);
+    // The pixel program's scalar values as this draw's scan read them.
+    id<MTLBuffer> siteBuffer = nil;
+    bool siteBytes = false;
+    const auto sites = scalarSites_.find(d.ps);
+    if ((!guest_ || native_) && sites != scalarSites_.end() && sites->second.words &&
+        scanner_.scalarTable(sites->second.list, sites->second.words, siteTable_)) {
+        const std::size_t length = siteTable_.size() * sizeof(std::uint32_t);
+        if (length <= 4096) siteBytes = true;
+        else if ((siteBuffer = uploadBuffer(length, commands))) std::memcpy(siteBuffer.contents, siteTable_.data(), length);
+        if (siteBytes || siteBuffer) drawState.flags |= scalarSites;
+    }
     [encoder setVertexBuffer:memory offset:0 atIndex:0];
     [encoder setFragmentBuffer:memory offset:0 atIndex:0];
     for (unsigned k = slotsUsed; k < slotCount; ++k) slots[k] = memory;
@@ -893,6 +909,8 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     [encoder setFragmentBuffers:slots offsets:slotOffsets withRange:NSMakeRange(5, slotCount)];
     [encoder setVertexBytes:&drawState length:sizeof drawState atIndex:1];
     [encoder setFragmentBytes:&drawState length:sizeof drawState atIndex:1];
+    if (siteBytes) [encoder setFragmentBytes:siteTable_.data() length:siteTable_.size() * sizeof(std::uint32_t) atIndex:4];
+    else if (siteBuffer) [encoder setFragmentBuffer:siteBuffer offset:0 atIndex:4];
     if (native_) {
         // GCNNativeTexture at buffer(3), always bound: `enabled` 0 means none.
         if (!nativeArguments_) {
@@ -909,17 +927,20 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                                                                           argument(MTLDataTypeUInt4, 8), argument(MTLDataTypeUInt4, 9),
                                                                           argument(MTLDataTypeSampler, 10), argument(MTLDataTypeSampler, 11),
                                                                           argument(MTLDataTypeSampler, 12), argument(MTLDataTypeUInt4, 13),
-                                                                          argument(MTLDataTypeUInt4, 14), argument(MTLDataTypeUInt4, 15)]];
+                                                                          argument(MTLDataTypeUInt4, 14), argument(MTLDataTypeUInt4, 15),
+                                                                          argument(MTLDataTypeTexture, 16), argument(MTLDataTypeUInt4, 17),
+                                                                          argument(MTLDataTypeUInt4, 18), argument(MTLDataTypeSampler, 19),
+                                                                          argument(MTLDataTypeUInt4, 20)]];
         }
-        // Up to three T#s (a video's Y, U and V planes), each at texture
-        // index 0, 4 or 7 with its descriptor's halves after it.
-        id<MTLTexture> images[3] = {};
-        id<MTLSamplerState> samplers[3] = {};
-        std::array<std::uint32_t, 8> descriptors[3] = {};
-        std::array<std::uint32_t, 4> samplerWords[3] = {};
+        // Up to four T#s (a video's Y, U and V planes, Mortal Kombat 1's lighting),
+        // each at texture index 0, 4, 7 or 16 with its descriptor's halves after it.
+        id<MTLTexture> images[4] = {};
+        id<MTLSamplerState> samplers[4] = {};
+        std::array<std::uint32_t, 8> descriptors[4] = {};
+        std::array<std::uint32_t, 4> samplerWords[4] = {};
         unsigned found = 0, sampled = 0;
         if (scanner_.images().empty()) ++nativeMisses[0];
-        for (std::size_t k = 0; k < scanner_.images().size() && found < 3; ++k) {
+        for (std::size_t k = 0; k < scanner_.images().size() && found < 4; ++k) {
             const auto& t = scanner_.images()[k];
             if (!(images[found] = nativeTexture(t, memory, slots, drawState.ranges, drawState.rangeCount, target.texture))) continue;
             samplerWords[found] = scanner_.samplers()[k];
@@ -934,12 +955,12 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         [nativeArguments_ setArgumentBuffer:arguments offset:0];
         *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = ((1u << found) - 1) | sampled;
         nativeBound_ = found; nativeFiltered_ = __builtin_popcount(sampled);
-        static const NSUInteger fields[3] = {0, 4, 7};
-        for (unsigned k = 0; k < 3; ++k) {
+        static const NSUInteger fields[4] = {0, 4, 7, 16}, samplerFields[4] = {10, 11, 12, 19}, wordFields[4] = {13, 14, 15, 20};
+        for (unsigned k = 0; k < 4; ++k) {
             const NSUInteger at = fields[k], low = k ? at + 1 : 2;
             [nativeArguments_ setTexture:images[k] atIndex:at];
-            [nativeArguments_ setSamplerState:samplers[k] atIndex:10 + k];
-            std::memcpy([nativeArguments_ constantDataAtIndex:13 + k], samplerWords[k].data(), 16);
+            [nativeArguments_ setSamplerState:samplers[k] atIndex:samplerFields[k]];
+            std::memcpy([nativeArguments_ constantDataAtIndex:wordFields[k]], samplerWords[k].data(), 16);
             std::memcpy([nativeArguments_ constantDataAtIndex:low], descriptors[k].data(), 16);
             std::memcpy([nativeArguments_ constantDataAtIndex:low + 1], descriptors[k].data() + 4, 16);
             if (images[k]) [encoder useResource:images[k] usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];
@@ -995,7 +1016,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             std::snprintf(text, sizeof text, ", natives %u dont %u filtrees sur %zu", nativeBound_, nativeFiltered_, scanner_.images().size());
             batchDraws += text;
             for (const auto& t : scanner_.images()) {
-                if (shown++ == 3) break;
+                if (shown++ == 4) break;
                 const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
                 std::snprintf(text, sizeof text, ", texture dfmt %u nfmt %u %ux%u tuilage %u 0x%llx%s", (t[1] >> 20) & 63, (t[1] >> 26) & 15,
                               (t[2] & 0x3fff) + 1, ((t[2] >> 14) & 0x3fff) + 1, (t[3] >> 20) & 31, (unsigned long long)base,

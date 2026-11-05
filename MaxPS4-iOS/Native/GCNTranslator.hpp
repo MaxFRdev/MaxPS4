@@ -38,6 +38,10 @@ struct GCNTranslation {
     std::uint8_t colors = 0;     // pixel: MRTs exported
     bool position = false, quad = false, mayKill = false;
     bool stores = false;         // compute: writes guest memory
+    // pixel: the scalar loads, each with `2 + count` words at `offset` of the
+    // draw's table of scalar values (address, then words: gcn_site_hit).
+    std::vector<GCNScalarSite> sites;
+    std::uint32_t siteWords = 0;
     explicit operator bool() const { return error.empty(); }
 };
 
@@ -407,13 +411,24 @@ private:
         // Legacy Kollection's matrix VS), while the same function was correct
         // without rasterization.
         const std::string n = std::to_string(count);
+        // A pixel program's scalar load runs on every pixel, with a search through
+        // the draw's ranges: the value the CPU scan read at this same address comes
+        // from the table instead, a load that costs a fraction of it.
+        std::string hitOne, hitMany;
+        if (options_.stage == GCNStage::pixel) {
+            const std::string at = std::to_string(out_.siteWords) + "u";
+            out_.sites.push_back({4ull * i.word, count, out_.siteWords});
+            out_.siteWords += 2 + count;
+            hitOne = "gcn_site_hit(M, " + at + ", a) ? gcn_site_word(M, " + at + ", 0u) : ";
+            hitMany = "if (gcn_site_hit(M, " + at + ", a)) { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_site_word(M, " + at + ", k); } else ";
+        }
         if (i.opcode >= 8) {
             body_ += "{ ulong o = " + offset + "; ulong a = gcn_u64(" + s(base) + ", " + s(base + 1) + " & 0xfffu) + o; "
                      "uint stride = (" + s(base + 1) + " >> 16) & 0x3fffu; "
                      "ulong lim = stride != 0u ? ulong(" + s(base + 2) + ") * stride : ulong(" + s(base + 2) + "); ";
-            if (count == 1) setScalar(d, "(o + 4ul <= lim) ? gcn_ld32_hint(M, a, gcn_hint) : 0u");
+            if (count == 1) setScalar(d, hitOne + "((o + 4ul <= lim) ? gcn_ld32_hint(M, a, gcn_hint) : 0u)");
             else {
-                body_ += "uint w[" + n + "]; ulong at = 0ul; "
+                body_ += "uint w[" + n + "]; ulong at = 0ul; " + hitMany +
                          "if (o + " + std::to_string(4 * count) + "ul <= lim && gcn_locate_hint(M, a, " + std::to_string(4 * count) + "ul, at, gcn_hint)) "
                          "{ for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_packed32(M, at + 4ul * k); } "
                          "else { for (uint k = 0u; k < " + n + "u; ++k) w[k] = (o + 4ul * k + 4ul <= lim) ? gcn_ld32(M, a + 4ul * k) : 0u; } ";
@@ -422,9 +437,9 @@ private:
             body_ += "}";
         } else {
             body_ += "{ ulong a = (gcn_u64(" + s(base) + ", " + s(base + 1) + ") & 0xfffffffffffful) + " + offset + "; ";
-            if (count == 1) setScalar(d, "gcn_ld32_hint(M, a, gcn_hint)");
+            if (count == 1) setScalar(d, hitOne + "gcn_ld32_hint(M, a, gcn_hint)");
             else {
-                body_ += "uint w[" + n + "]; ulong at = 0ul; "
+                body_ += "uint w[" + n + "]; ulong at = 0ul; " + hitMany +
                          "if (gcn_locate_hint(M, a, " + std::to_string(4 * count) + "ul, at, gcn_hint)) { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_packed32(M, at + 4ul * k); } "
                          "else { for (uint k = 0u; k < " + n + "u; ++k) w[k] = gcn_ld32(M, a + 4ul * k); } ";
                 for (unsigned k = 0; k < count; ++k) setScalar(d + k, "w[" + std::to_string(k) + "]");
@@ -802,7 +817,7 @@ using namespace metal;
 struct GCNRes8 { uint d[8]; };
 struct GCNRes4 { uint d[4]; };
 #if GCN_NATIVE_TEXTURES
-// Up to three of a draw's T#s viewed as Metal textures (a video's Y, U and V
+// Up to four of a draw's T#s viewed as Metal textures (a video's Y, U and V
 // planes); bit k of `enabled` marks texture k valid, bit 4 + k its Metal
 // sampler, built on the CPU from S# `sdesc` (the one the draw samples it with).
 struct GCNNativeTexture {
@@ -822,6 +837,11 @@ struct GCNNativeTexture {
     uint4 sdesc [[id(13)]];
     uint4 sdesc1 [[id(14)]];
     uint4 sdesc2 [[id(15)]];
+    texture2d<float> image3 [[id(16)]];
+    uint4 low3 [[id(17)]];
+    uint4 high3 [[id(18)]];
+    sampler samp3 [[id(19)]];
+    uint4 sdesc3 [[id(20)]];
 };
 #endif
 // Large ranges live in buffers of their own (buffer(5) up), shared by the
@@ -836,6 +856,7 @@ struct GCNMemory { device const uchar* p; ulong base; ulong size; constant ulong
     constant GCNNativeTexture* native;
 #endif
     GCNSlots s;
+    constant uint* u; // The draw's table of scalar values, or null.
 };
 GCN_FN device const uchar* gcn_at(GCNMemory M, ulong o) {
     uint k = uint(o >> 48); o &= 0xfffffffffffful;
@@ -873,6 +894,7 @@ GCN_FN void gcn_lane_init(thread GCNLane& L) {
 struct GCNDrawState { ulong base; ulong size; uint vsUser[16]; uint psUser[17]; uint flags; uint rangeCount; ulong ranges[48]; };
 #define GCN_DRAW_RECT_LIST 1u
 #define GCN_DRAW_FLIP_Y 2u
+#define GCN_DRAW_SITES 4u
 GCN_FN float gf(uint x) { return as_type<float>(x); }
 GCN_FN uint gu(float f) { return as_type<uint>(f); }
 GCN_FN ulong gcn_u64(uint lo, uint hi) { return ulong(lo) | (ulong(hi) << 32); }
@@ -928,6 +950,9 @@ GCN_FN bool gcn_locate_hint(GCNMemory M, ulong a, ulong n, thread ulong& offset,
 }
 GCN_FN uint gcn_ld32(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 4ul, o)) return 0u; return *(device const uint*)gcn_at(M, o); }
 GCN_FN uint gcn_ld32_hint(GCNMemory M, ulong a, thread uint& hint) { ulong o = 0ul; if (!gcn_locate_hint(M, a, 4ul, o, hint)) return 0u; return *(device const uint*)gcn_at(M, o); }
+// The scan read this load at this address: its words are in the table.
+GCN_FN bool gcn_site_hit(GCNMemory M, uint at, ulong a) { return M.u && (ulong(M.u[at]) | ulong(M.u[at + 1u]) << 32) == a; }
+GCN_FN uint gcn_site_word(GCNMemory M, uint at, uint k) { return M.u[at + 2u + k]; }
 GCN_FN uint gcn_ld16(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 2ul, o)) return 0u; return uint(*(device const ushort*)gcn_at(M, o)); }
 GCN_FN uint gcn_ld8(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 1ul, o)) return 0u; return uint(*gcn_at(M, o)); }
 // Only used with an image span already validated by gcn_locate.
@@ -939,7 +964,7 @@ GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_loca
 GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 2ul, o)) *(device ushort*)(M.p + o) = ushort(v); }
 GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 1ul, o)) *(device uchar*)(M.p + o) = uchar(v); }
 #if GCN_NATIVE_TEXTURES
-// Which of the draw's Metal textures (0 to 2) views T# `t`, or -1.
+// Which of the draw's Metal textures (0 to 3) views T# `t`, or -1.
 GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
     const uint dfmt = (t.d[1] >> 20) & 63u;
     if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u && dfmt != 41u)) return -1;
@@ -948,6 +973,7 @@ GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
     if ((enabled & 1u) && all(M.native->low == low) && all(M.native->high == high)) return 0;
     if ((enabled & 2u) && all(M.native->low1 == low) && all(M.native->high1 == high)) return 1;
     if ((enabled & 4u) && all(M.native->low2 == low) && all(M.native->high2 == high)) return 2;
+    if ((enabled & 8u) && all(M.native->low3 == low) && all(M.native->high3 == high)) return 3;
     return -1;
 }
 // 5_6_5 viewed as B5G6R5Unorm: GCN's first component is the low 5 bits, Metal's blue.
@@ -977,7 +1003,8 @@ GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4
     const int k = gcn_native_match(M, t);
     if (k < 0) return false;
     return k == 0 ? gcn_native_read(M.native->image, t, x, y, value) :
-           k == 1 ? gcn_native_read(M.native->image1, t, x, y, value) : gcn_native_read(M.native->image2, t, x, y, value);
+           k == 1 ? gcn_native_read(M.native->image1, t, x, y, value) :
+           k == 2 ? gcn_native_read(M.native->image2, t, x, y, value) : gcn_native_read(M.native->image3, t, x, y, value);
 #else
     return false;
 #endif
@@ -988,10 +1015,11 @@ GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, flo
     if (k < 0) return false;
     const uint4 sd = uint4(s.d[0], s.d[1], s.d[2], s.d[3]);
     const bool usable = ((M.native->enabled >> (4 + k)) & 1u) != 0u &&
-        all(sd == (k == 0 ? M.native->sdesc : k == 1 ? M.native->sdesc1 : M.native->sdesc2));
+        all(sd == (k == 0 ? M.native->sdesc : k == 1 ? M.native->sdesc1 : k == 2 ? M.native->sdesc2 : M.native->sdesc3));
     return k == 0 ? gcn_native_filter(M.native->image, M.native->samp, usable, t, s, unorm, u, v, value) :
            k == 1 ? gcn_native_filter(M.native->image1, M.native->samp1, usable, t, s, unorm, u, v, value) :
-                    gcn_native_filter(M.native->image2, M.native->samp2, usable, t, s, unorm, u, v, value);
+           k == 2 ? gcn_native_filter(M.native->image2, M.native->samp2, usable, t, s, unorm, u, v, value) :
+                    gcn_native_filter(M.native->image3, M.native->samp3, usable, t, s, unorm, u, v, value);
 #else
     return false;
 #endif
@@ -1073,7 +1101,8 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
          "struct GCNFragment { float4 color [[color(0)]]; uint coverage [[sample_mask]]; };\n";
     s += std::string("fragment ")+(ps.mayKill ? "GCNFragment" : "float4")+
          " gcn_fragment(GCNVaryings in [[stage_in]], uint sampleCoverage [[sample_mask]],\n"
-         "    device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]] GCN_SLOT_PARAMS) {\n"
+         "    " + std::string(ps.sites.empty() ? "" : "constant uint* U [[buffer(4)]], ") +
+         "device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]] GCN_SLOT_PARAMS) {\n"
          // Incoming raster coverage is independent of later fragment kills.
          "    const bool covered = sampleCoverage != 0u;\n"
          "    GCNLane L; gcn_lane_init(L);\n";
@@ -1106,8 +1135,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         else if (bit == 14) s += at + "1u;\n";
         reg += sizes[bit];
     }
-    s += "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u }; M.s = GCNSlots GCN_SLOT_ARGS;\n"
-         "    " + psName + "(L, M, Q);\n";
+    s += "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u }; M.s = GCNSlots GCN_SLOT_ARGS;\n";
+    if (!ps.sites.empty()) s += "    if ((D.flags & GCN_DRAW_SITES) != 0u) M.u = U;\n";
+    s += "    " + psName + "(L, M, Q);\n";
     // An ordinary shader's saved-EXEC/WQM/restore sequence cannot kill a
     // covered pixel. Do not ask Metal to suppress helpers again at export.
     s += ps.mayKill ? "    return { L.color[0], L.killed ? 0u : 0xffffffffu };\n}\n"

@@ -69,6 +69,18 @@ int main(int argc, char** argv) {
     assert(observed); // Re-read resource descriptors and vertex data too.
     arena.put(vertexTable, 0x10e00);
     check();
+    // The pixel program's constant load reaches its table; a site not run stays 0.
+    reused.scan(d);
+    assert(reused.scalarLoads().size() == 1);
+    const auto load = reused.scalarLoads()[0];
+    assert(load.pc == quadPS + 8 && load.count == 1);
+    const std::vector<GCNScalarSite> sites = {{quadPS + 4, 2, 3}, {quadPS + 8, 1, 0}};
+    std::vector<std::uint32_t> table;
+    assert(reused.scalarTable(sites, 7, table));
+    assert(table[0] == std::uint32_t(load.address) && table[1] == std::uint32_t(load.address >> 32) && table[2] == load.words[0]);
+    assert(table[3] == 0 && table[4] == 0);
+    const std::vector<GCNScalarSite> elsewhere = {{quadPS + 4, 2, 0}};
+    assert(!reused.scalarTable(elsewhere, 4, table));
     if (argc > 1 && std::strcmp(argv[1], "--benchmark") == 0) {
         constexpr unsigned rounds = 6, count = 2000;
         volatile std::uint64_t checksum = 0;
