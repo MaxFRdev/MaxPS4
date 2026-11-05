@@ -216,6 +216,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"PS 1800: no table code, four bound", vs.source + noSites(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 2, 4},
             {"PS 1800: scalar table, three bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 3, 4, &sites1800},
             {"PS 1800: scalar table, four bound", vs.source + game1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
+            {"PS 1800: table, no software path", vs.source + game1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 4, &sites1800},
             {"PS 1800: no software path", vs.source + game1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 5},
             {"PS 1800: no image reads", vs.source + game1800.source + entry1800, "gcn_fragment", true, noImages, 2, 5},
             {"PS 1800: constant scalar loads", vs.source + uniform1800 + entry1800, "gcn_fragment", true, nativePrelude, 2, 5},
