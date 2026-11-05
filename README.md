@@ -3,7 +3,7 @@
 [![Plateforme](https://img.shields.io/badge/Plateforme-iOS%20ARM64-222222)](https://github.com/MaxFRdev/MaxPS4)
 [![Statut](https://img.shields.io/badge/Statut-exp%C3%A9rimental-orange)](https://github.com/MaxFRdev/MaxPS4/actions)
 [![Licence](https://img.shields.io/badge/Licence-GPL--2.0-blue)](LICENSE)
-[![Premier jeu](https://img.shields.io/badge/Premier%20jeu-Sonic%20Mania%20%C3%A0%2060%20i%2Fs-brightgreen)](#ce-qui-marche-aujourdhui)
+[![Jeux jouables](https://img.shields.io/badge/Jeux%20jouables-Sonic%20Mania%20%C2%B7%20Mortal%20Kombat-brightgreen)](#ce-qui-marche-aujourdhui)
 
 <p align="center">
   <a href="https://discord.gg/G7BaXN4fd">
@@ -17,7 +17,12 @@
 
 ## Ce qui marche aujourd'hui
 
-**Sonic Mania tourne sur iPhone**, testé par l'auteur avec son propre dossier de jeu : 60 images par seconde, son, manette et sauvegardes. C'est pour l'instant le seul jeu essayé ; les autres ne sont pas encore pris en charge (voir [Compatibilité](#compatibilité)).
+**Deux jeux tournent sur iPhone 15 Pro Max**, testés par l'auteur avec ses propres dossiers de jeu :
+
+- **Sonic Mania** : près de 60 images par seconde, son, manette et sauvegardes.
+- **Mortal Kombat: Legacy Kollection** : 60 images par seconde en combat, environ 54 quand le téléphone chauffe, avec le son.
+
+Les autres jeux ne sont pas encore pris en charge ou pas encore testés (voir [Compatibilité](#compatibilité)).
 
 ### Émulation
 
@@ -26,8 +31,8 @@
 | Processeur | Code x86-64 du jeu exécuté par le JIT FEXCore sur iPhone (StikDebug), plusieurs threads du jeu en parallèle, runtime compilé en mode optimisé |
 | Chargement | Dossier de jeu complet : `eboot.bin` (SELF en clair) et modules `sce_module/*.prx`, liés entre eux |
 | Système PS4 | Fichiers, mémoire, threads, mutex, variables de condition, files d'événements, **sémaphores**, **event flags**, horloges et compteurs de temps précis |
-| GPU | Commandes GNM/PM4 décodées et shaders GCN traduits en Metal ; textures natives Metal en option |
-| Affichage | **60 images/s**, calé sur le rafraîchissement de l'écran de l'iPhone ; Ajuster / Remplir / Étirer ; 1080p ou 720p annoncé au jeu |
+| GPU | Commandes GNM/PM4 décodées et shaders GCN traduits en Metal ; textures natives filtrées par le GPU de l'iPhone. Pas encore de test de profondeur ni de culling : les jeux en 3D ne s'affichent pas correctement pour l'instant |
+| Affichage | Jusqu'à **60 images/s**, calé sur le rafraîchissement de l'écran de l'iPhone ; Ajuster / Remplir / Étirer ; 1080p ou 720p annoncé au jeu |
 | Son | Sortie audio du jeu (AudioOut) jouée sur l'iPhone |
 | Manette | Manettes MFi, Xbox, DualShock 4 et DualSense : toutes les touches, sticks et gâchettes analogiques, pavé tactile ; commandes tactiles réglables (taille, opacité, L1/L2/R1/R2), masquées dès qu'une manette est branchée |
 | Sauvegardes | Vraies sauvegardes PS4 (`sceSaveData`) rangées dans **Sur mon iPhone › MaxPS4 › Sauvegardes › <identifiant du jeu>** |
@@ -39,6 +44,7 @@
 - **Accueil épuré :** liste des jeux avec un bouton Jouer, **Reprendre** le dernier jeu lancé.
 - **Fiche de jeu :** image, identifiant, version, place prise par les sauvegardes et accès direct à leur dossier.
 - **Pause :** ouvrir le menu du jeu met le jeu en pause.
+- **Changer de jeu :** quitter un jeu et en relancer un autre sans longue attente.
 - **Réglages par jeu :** affichage, résolution et commandes mémorisés pour chaque jeu.
 - **6 langues :** français, anglais, espagnol, allemand, italien, portugais (Brésil), selon la langue de l'iPhone ou au choix dans les Réglages.
 - **Rapport de compatibilité :** quand un jeu s'arrête, l'app dit pourquoi (fonctions PS4 manquantes, erreur) et enregistre un rapport dans **MaxPS4 › Rapports**, à partager.
@@ -49,6 +55,8 @@
 | Jeu | État |
 | --- | --- |
 | Sonic Mania | ✅ Jouable (testé par l'auteur sur iPhone) |
+| Mortal Kombat: Legacy Kollection | ✅ Jouable (testé par l'auteur sur iPhone) |
+| Crash Bandicoot 4 | ❌ Bloqué : iOS refuse les adresses mémoire fixes dont les jeux Unreal Engine 4 ont besoin |
 | Autres jeux 2D légers et homebrews | ❓ Non testés : à essayer, avec le rapport de compatibilité |
 | Gros jeux 3D (God of War, Assassin's Creed…) | ❌ Hors de portée pour l'instant (processeur, GPU et mémoire) |
 
@@ -91,4 +99,4 @@ Les contributions sont bienvenues via [Issues](https://github.com/MaxFRdev/MaxPS
 - [IPA FEXCore pour SideStore](docs/fexcore-app-sidestore.md)
 
 ---
-*Dernière mise à jour : 28 octobre 2026.*
+*Dernière mise à jour : 5 novembre 2026.*
