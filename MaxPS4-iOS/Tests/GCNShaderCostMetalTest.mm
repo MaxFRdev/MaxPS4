@@ -49,8 +49,21 @@ int main() {
         const auto vs = translateGCN(arena.memory, fetchVS, vsOptions);
         const auto ps = translateGCN(arena.memory, texturedPS, psOptions);
         assert(vs && ps);
+        // 32 scalar loads per pixel, as the game's costliest programs make, each a
+        // gcn_locate: what the search through a draw's ranges costs.
+        constexpr uint64_t scalarPS = 0x30000, scalarData = 0x31000;
+        constexpr unsigned scalarLoads = 32;
+        for (unsigned n = 0; n < scalarLoads; ++n) {
+            arena.put(scalarPS + 8 * n, 0xc0080100u | n);     // s_load_dword s16, s[0:1], n
+            arena.put(scalarPS + 8 * n + 4, 0x06000010u);     // v_add_f32 v0, s16, v0
+            arena.put(scalarData + 4 * n, bits(1.0f / scalarLoads));
+        }
+        arena.code(scalarPS + 8 * scalarLoads, {0xf800180f, 0x00000000, 0xbf810000}); // exp mrt0, v0 x4 done vm
+        const auto scalars = translateGCN(arena.memory, scalarPS, psOptions);
+        assert(scalars);
         std::uint32_t inputCntl[32] = {};
         const std::string entry = gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", 0x302, inputCntl);
+        const std::string scalarEntry = gcnMetalEntryPoints(vs, scalars, "vs_program", "ps_program", 0x302, inputCntl);
         const std::string trivial = R"MSL(
 fragment float4 trivial_fragment(GCNVaryings in [[stage_in]]) { return float4(in.position.x / 1920.0f, in.position.y / 1080.0f, in.p0.x, 1.0f); }
 fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<float> image [[texture(0)]]) {
@@ -73,19 +86,18 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const std::string identitySwizzle = replaced(prelude, "return gcn_texture_swizzle(t, float4(c0, c1, c2, c3));", "return float4(c0, c1, c2, c3);");
         const std::string clampOnly = replaced(prelude, "GCN_FN int gcn_wrap(int x, int size, uint mode, GCN_THREAD bool& border) {",
             "GCN_FN int gcn_wrap(int x, int size, uint mode, GCN_THREAD bool& border) { return x < 0 ? 0 : (x >= size ? size - 1 : x);");
-        const std::string oneTap = replaced(prelude, "if (!linear) return gcn_fetch_at", "if (true) return gcn_fetch_at");
-        const std::string noLookup = replaced(prelude, "if (gcn_locate(M, base, ((ulong(height) - 1ul) * pitch + width) * bytes, offset))",
-            "offset = M.ranges[5]; if (true)");
+        const std::string oneTap = replaced(prelude, "uint taps = linear ? 4u : 1u;", "uint taps = 1u;");
+        const std::string noLookup = replaced(prelude, "resolved = gcn_locate(M, base, footprint, offset);",
+            "offset = M.ranges[5]; resolved = true;");
         // The runtime before per-axis wrapping (same results, measured in the same run).
+        // The translator's text keeps its own line ending: match each line alone.
+        const std::string slotArray = replaced(replaced(prelude, "return (k == 0u ? M.p : k == 1u ? M.s.x[0] : k == 2u ? M.s.x[1] : k == 3u ? M.s.x[2] :", "return k == 0u ? M.p + o : M.s.x[min(k, GCN_SLOTS) - 1u] + o;"),
+            "            k == 4u ? M.s.x[3] : k == 5u ? M.s.x[4] : M.s.x[5]) + o;", "");
         std::string previousWrap = replaced(prelude, "if (x >= 0 && x < size) return x; ", "");
         previousWrap = replaced(previousWrap, "int m = x; if (m < 0 || m >= period) { m = x % period; if (m < 0) m += period; }",
                                 "int m = x % period; if (m < 0) m += period;");
-        const std::pair<const char*, const char*> taps[] = {
-            {"c00 = bx0 || by0 ? gcn_border_color(s) : gcn_texel_at(M, t, wx0, wy0, resolved, offset)", "c00 = gcn_fetch_at(M, t, s, x0, y0, resolved, offset)"},
-            {"c10 = bx1 || by0 ? gcn_border_color(s) : gcn_texel_at(M, t, wx1, wy0, resolved, offset)", "c10 = gcn_fetch_at(M, t, s, x0 + 1, y0, resolved, offset)"},
-            {"c01 = bx0 || by1 ? gcn_border_color(s) : gcn_texel_at(M, t, wx0, wy1, resolved, offset)", "c01 = gcn_fetch_at(M, t, s, x0, y0 + 1, resolved, offset)"},
-            {"c11 = bx1 || by1 ? gcn_border_color(s) : gcn_texel_at(M, t, wx1, wy1, resolved, offset)", "c11 = gcn_fetch_at(M, t, s, x0 + 1, y0 + 1, resolved, offset)"}};
-        for (const auto& [from, to] : taps) previousWrap = replaced(previousWrap, from, to);
+        previousWrap = replaced(previousWrap, "gcn_texel_at(M, t, right ? wx1 : wx0, down ? wy1 : wy0, resolved, offset)",
+                                "gcn_fetch_at(M, t, s, right ? x0 + 1 : x0, down ? y0 + 1 : y0, resolved, offset)");
         // Native textures as the game binds them (GCNNativeTexture at buffer(3)):
         // Metal's sampler filters (50aaa47), the texture is only read per texel
         // (before 50aaa47), or no T# matches and GCN filters with the larger code.
@@ -93,7 +105,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const std::string nativePrelude = gcnMetalPrelude(true);
         const std::string texelOnly = replaced(nativePrelude, "    if (k < 0) return false;\n    const uint4 sd",
                                                "    if (true) return false;\n    const uint4 sd");
-        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; };
+        struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
             {"trivial Metal fragment", vs.source + ps.source + entry + trivial, "trivial_fragment", true},
@@ -113,6 +125,10 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"native: Metal sampler filters", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 1},
             {"native: texel reads (before 50aaa47)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, texelOnly, 1},
             {"native: no T# match (GCN filters)", vs.source + ps.source + nativeEntry, "gcn_fragment", true, nativePrelude, 0},
+            {"scalar: 32 loads, variable slot index", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, slotArray, -1, 2},
+            {"scalar: 32 loads, no range table", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 1},
+            {"scalar: 32 loads, 2 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 2},
+            {"scalar: 32 loads, 16 ranges", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, {}, -1, 3},
         };
         MTLCompileOptions* options = [MTLCompileOptions new];
         if (@available(macOS 15.0, iOS 18.0, *)) options.mathMode = MTLMathModeSafe;
@@ -145,6 +161,17 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const uint32_t t[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
                                 (imageW - 1) << 13, 0, 0, 0, 0, 0, 0x500000, 0};
         std::memcpy(state.ps, t, sizeof t);
+        // The scalar program's user SGPRs point at its data. Its three tables: a
+        // single window; two ranges; sixteen ranges, the one it reads the twelfth.
+        State states[4] = {state, state, state, state};
+        for (unsigned k = 1; k < 4; ++k) { states[k].ps[0] = std::uint32_t(scalarData); states[k].ps[1] = 0; }
+        states[1].count = 0; states[1].base = Arena::start; states[1].size = arena.bytes.size();
+        states[3].count = 16;
+        for (unsigned k = 0; k < 16; ++k) { // Sorted, as the renderer gives them.
+            states[3].ranges[3 * k] = k < 11 ? 0x100ull * k : 0x7000000000ull + (std::uint64_t(k) << 20);
+            states[3].ranges[3 * k + 1] = 0x10; states[3].ranges[3 * k + 2] = 0;
+        }
+        states[3].ranges[33] = Arena::start; states[3].ranges[34] = image - Arena::start; states[3].ranges[35] = 0;
         const uint32_t indices[3] = {0, 1, 2};
         auto* targetDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:screenW height:screenH mipmapped:NO];
         targetDescriptor.usage = MTLTextureUsageRenderTarget; targetDescriptor.storageMode = MTLStorageModePrivate;
@@ -202,7 +229,7 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                 [encoder setRenderPipelineState:pipelines[k]];
                 [encoder setViewport:MTLViewport{0, 0, double(screenW), double(screenH), 0, 1}];
                 [encoder setVertexBuffer:memory offset:0 atIndex:0]; [encoder setFragmentBuffer:memory offset:0 atIndex:0];
-                [encoder setVertexBytes:&state length:sizeof state atIndex:1]; [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
+                [encoder setVertexBytes:&states[variants[k].state] length:sizeof state atIndex:1]; [encoder setFragmentBytes:&states[variants[k].state] length:sizeof state atIndex:1];
                 [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
                 [encoder setFragmentTexture:metalImage atIndex:0];
                 if (variants[k].native >= 0) {

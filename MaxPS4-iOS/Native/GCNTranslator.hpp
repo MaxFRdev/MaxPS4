@@ -838,7 +838,10 @@ struct GCNMemory { device const uchar* p; ulong base; ulong size; constant ulong
 };
 GCN_FN device const uchar* gcn_at(GCNMemory M, ulong o) {
     uint k = uint(o >> 48); o &= 0xfffffffffffful;
-    return k == 0u ? M.p + o : M.s.x[min(k, GCN_SLOTS) - 1u] + o;
+    // Constant indices only: a variable one puts the slot table in thread memory,
+    // which made every load of every pixel slow.
+    return (k == 0u ? M.p : k == 1u ? M.s.x[0] : k == 2u ? M.s.x[1] : k == 3u ? M.s.x[2] :
+            k == 4u ? M.s.x[3] : k == 5u ? M.s.x[4] : M.s.x[5]) + o;
 }
 struct GCNQuad { uint unused; };
 struct GCNLane {
@@ -897,10 +900,16 @@ GCN_FN bool gcn_locate(GCNMemory M, ulong a, ulong n, thread ulong& offset) {
         if (a < M.base || a - M.base > M.size || M.size - (a - M.base) < n) return false;
         offset = a - M.base; return true;
     }
-    for (uint k = 0u; k < M.count; ++k) {
-        ulong start = M.ranges[3u * k]; ulong length = M.ranges[3u * k + 1u];
-        if (a >= start && a - start <= length && length - (a - start) >= n) { offset = M.ranges[3u * k + 2u] + (a - start); return true; }
+    // Ranges are sorted and disjoint (PM4ResourceScan): the last one starting at
+    // or before `a` is the only one that can hold it.
+    uint k = 0u;
+    for (uint left = M.count; left > 1u;) {
+        uint step = left / 2u;
+        if (a >= M.ranges[3u * (k + step)]) k += step;
+        left -= step;
     }
+    ulong start = M.ranges[3u * k]; ulong length = M.ranges[3u * k + 1u];
+    if (a >= start && a - start <= length && length - (a - start) >= n) { offset = M.ranges[3u * k + 2u] + (a - start); return true; }
     return false;
 }
 GCN_FN uint gcn_ld32(GCNMemory M, ulong a) { ulong o = 0ul; if (!gcn_locate(M, a, 4ul, o)) return 0u; return *(device const uint*)gcn_at(M, o); }
@@ -918,7 +927,7 @@ GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locat
 // Which of the draw's Metal textures (0 to 2) views T# `t`, or -1.
 GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
     const uint dfmt = (t.d[1] >> 20) & 63u;
-    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u)) return -1;
+    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u && dfmt != 41u)) return -1;
     const uint4 low = uint4(t.d[0],t.d[1],t.d[2],t.d[3]), high = uint4(t.d[4],t.d[5],t.d[6],t.d[7]);
     const uint enabled = M.native->enabled;
     if ((enabled & 1u) && all(M.native->low == low) && all(M.native->high == high)) return 0;

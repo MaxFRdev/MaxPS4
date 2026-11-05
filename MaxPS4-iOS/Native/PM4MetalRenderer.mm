@@ -2,6 +2,13 @@
 #include "GCNTranslator.hpp"
 #include "PM4ResourceScan.hpp"
 #include "PM4Blend.hpp"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wall"
+#pragma clang diagnostic ignored "-Wextra"
+#define BCDEC_STATIC
+#define BCDEC_IMPLEMENTATION
+#include "bcdec.h"
+#pragma clang diagnostic pop
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -53,8 +60,6 @@ std::string inputKey(const PM4Draw& d) {
 id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format) {
     const PipelineKey key{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
                           (d.blend >> 30) & 1 ? d.blend : 0u, d.mask};
-    const auto found = pipelines_.find(key);
-    if (found != pipelines_.end()) return found->second;
     if (asyncPipelines) {
         std::lock_guard<std::mutex> lock(async_->mutex);
         const auto ready = async_->ready.find(key);
@@ -62,9 +67,18 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
             id<MTLRenderPipelineState> built = ready->second;
             async_->ready.erase(ready);
             // A pipeline Metal refused stays deferred: its draws are skipped.
-            if (built) { ++pipelinesBuilt; pipelines_[key] = built; return built; }
-            async_->refused.insert(key);
+            if (built) {
+                if (pipelines_.count(key)) ++pipelinesReplaced; else ++pipelinesBuilt;
+                pipelines_[key] = built;
+                return built;
+            }
+            if (!pipelines_.count(key)) async_->refused.insert(key);
         }
+    }
+    const auto found = pipelines_.find(key);
+    if (found != pipelines_.end()) return found->second;
+    if (asyncPipelines) {
+        std::lock_guard<std::mutex> lock(async_->mutex);
         if (async_->pending.count(key) || async_->refused.count(key)) { deferred_ = true; return nil; }
     }
     GCNTranslateOptions vsOptions;
@@ -109,28 +123,53 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         // Metal compiles on its own threads: this submission and the next go
         // on without the draws (a new screen's large programs took the iPhone
         // over 10 s each, the game's image frozen meanwhile).
+        std::string programs = programWords("VS", d.vs, d.vsUser, d.vsUserCount);
+        if (d.vsUserCount >= 2) programs += programWords("Fetch", std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32, d.vsUser, 0);
+        programs += programWords("PS", d.ps, d.psUser, d.psUserCount);
+        programs += "\nSource Metal : " + std::to_string(source.size()) + " octets";
         auto async = async_;
         { std::lock_guard<std::mutex> lock(async->mutex);
-          async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation"}; }
-        auto finish = [async, key](id<MTLRenderPipelineState> state, NSError* error) {
+          async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation", std::move(programs)}; }
+        // `fast`: built with default optimisation. A size build shows the draws
+        // first; a fast build replaces it, and is never replaced by one.
+        auto finish = [async, key](id<MTLRenderPipelineState> state, NSError* error, bool fast) {
             std::lock_guard<std::mutex> lock(async->mutex);
+            const auto built = async->pending.find(key);
+            if (built == async->pending.end() && (!state || !fast)) return;
+            if (!fast && !state) return; // The default build may still succeed.
+            if (built != async->pending.end())
+                async->slowest = std::max(async->slowest, std::chrono::duration<double>(std::chrono::steady_clock::now() - built->second.since).count());
             async->pending.erase(key);
             async->ready[key] = state;
             if (!state) async->lastError = error ? error.localizedDescription.UTF8String : "unknown";
         };
         id<MTLDevice> device = device_;
-        [device_ newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:compileOptions()
-                    completionHandler:^(id<MTLLibrary> library, NSError* error) {
-            if (!library) { finish(nil, error); return; }
-            { std::lock_guard<std::mutex> lock(async->mutex);
-              const auto pending = async->pending.find(key);
-              if (pending != async->pending.end()) pending->second.stage = "render pipeline creation"; }
-            descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
-            descriptor.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
-            [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
-                finish(state, failed);
+        NSString* text = [NSString stringWithUTF8String:source.c_str()];
+        auto build = [=](MTLCompileOptions* options, bool fast) {
+            [device newLibraryWithSource:text options:options completionHandler:^(id<MTLLibrary> library, NSError* error) {
+                if (!library) { finish(nil, error, fast); return; }
+                { std::lock_guard<std::mutex> lock(async->mutex);
+                  const auto pending = async->pending.find(key);
+                  if (pending != async->pending.end()) pending->second.stage = "render pipeline creation"; }
+                MTLRenderPipelineDescriptor* own = [descriptor copy];
+                own.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
+                own.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
+                [device newRenderPipelineStateWithDescriptor:own completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
+                    finish(state, failed, fast);
+                }];
             }];
-        }];
+        };
+        build(compileOptions(), true); // Fast math did not finish some programs in minutes either.
+        // Default optimisation did not finish some programs on the iPhone, large or
+        // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
+        // deferred and the screen black. Metal caches whichever build completes.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            { std::lock_guard<std::mutex> lock(async->mutex);
+              if (!async->pending.count(key)) return; }
+            MTLCompileOptions* size = compileOptions();
+            if (@available(macOS 13.0, iOS 16.0, *)) size.optimizationLevel = MTLLibraryOptimizationLevelSize;
+            build(size, false);
+        });
         deferred_ = true;
         return nil;
     }
@@ -147,6 +186,27 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     return state;
 }
 
+// The words of a program, to study a slow pipeline: up to the first
+// word that is no instruction, past s_endpgm for code it branches over.
+std::string PM4MetalRenderer::programWords(const char* stage, std::uint64_t address, const std::uint32_t* user, unsigned userCount) const {
+    std::vector<std::uint32_t> words;
+    unsigned zeros = 0;
+    for (std::uint32_t word = 0; words.size() < 4096 && zeros < 4 && code_.read(address + 4 * words.size(), &word, 4);) { words.push_back(word); zeros = word ? 0 : zeros + 1; }
+    std::size_t end = 0;
+    for (GCNInstruction i; end < words.size() && decodeGCNInstruction(words.data() + end, words.size() - end, end, i) == GCNError::none;) end += i.size;
+    char text[64];
+    std::snprintf(text, sizeof text, "\n%s 0x%llx, %zu mots, SGPR :", stage, (unsigned long long)address, end);
+    std::string out = text;
+    for (unsigned k = 0; k < userCount && k < 16; ++k) { std::snprintf(text, sizeof text, " %x", user[k]); out += text; }
+    out += "\n   ";
+    for (std::size_t k = 0; k < end; ++k) { std::snprintf(text, sizeof text, " %08x", words[k]); out += text; }
+    return out;
+}
+
+void PM4MetalRenderer::listCostly(std::uint64_t address) {
+    if (costly_.insert(address).second) programListings += programWords("PS couteux", address, nullptr, 0);
+}
+
 std::string PM4MetalRenderer::pipelineStatus() const {
     std::lock_guard<std::mutex> lock(async_->mutex);
     if (async_->pending.empty()) return {};
@@ -154,10 +214,11 @@ std::string PM4MetalRenderer::pipelineStatus() const {
         [](const auto& a, const auto& b) { return a.second.since < b.second.since; });
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - oldest->second.since).count();
     char text[192];
-    std::snprintf(text, sizeof text, " · plus ancien : %s %.1f s, VS 0x%llx / PS 0x%llx",
+    std::snprintf(text, sizeof text, " · plus lent construit %.1f s · plus ancien : %s %.1f s, VS 0x%llx / PS 0x%llx", async_->slowest,
                   oldest->second.stage, seconds, (unsigned long long)std::get<0>(oldest->first),
                   (unsigned long long)std::get<1>(oldest->first));
-    return text;
+    // Long enough to be worth rebuilding on a Mac.
+    return seconds < 5 ? std::string(text) : text + oldest->second.programs;
 }
 
 MTLCompileOptions* PM4MetalRenderer::compileOptions() {
@@ -569,6 +630,44 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
     return buffer;
 }
 
+// A BC7 T# in tile mode 13 (Thin_1dThin: blocks in 8x8 micro tiles, Morton
+// order inside) decoded once into a texture: Metal cannot sample it on iPhone.
+id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch) {
+    const std::uint64_t blocksWide = (pitch + 3) / 4, blocksHigh = (height + 3) / 4;
+    const std::uint64_t tilesWide = (blocksWide + 7) / 8, tilesHigh = (blocksHigh + 7) / 8;
+    const std::uint64_t bytes = tilesWide * tilesHigh * 64 * 16;
+    if (!bytes || bytes > (64ull << 20)) return nil;
+    const auto key = std::make_tuple(base, width, height);
+    const auto found = bc7Textures_.find(key);
+    if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
+    // A game fills its atlases as it loads: 16 bytes of every 4 KiB, once a
+    // batch, tell whether any part has changed since it was decoded.
+    std::uint64_t mark = 1469598103934665603ull;
+    for (std::uint64_t at = 0; at < bytes; at += 4096) {
+        std::uint8_t sample[16] = {};
+        copyGuest(base + at, sample, std::min<std::uint64_t>(bytes - at, sizeof sample));
+        for (const std::uint8_t byte : sample) mark = (mark ^ byte) * 1099511628211ull;
+    }
+    if (found != bc7Textures_.end() && found->second.mark == mark) { found->second.batch = batchSerial_; return found->second.texture; }
+    std::vector<std::uint8_t> blocks(bytes);
+    copyGuest(base, blocks.data(), bytes);
+    const std::uint64_t rowBytes = blocksWide * 16;
+    std::vector<std::uint8_t> pixels(rowBytes * blocksHigh * 4);
+    for (std::uint64_t y = 0; y < blocksHigh; ++y) for (std::uint64_t x = 0; x < blocksWide; ++x) {
+        const std::uint64_t morton = (x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3;
+        const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * 16;
+        bcdec_bc7(blocks.data() + at, pixels.data() + y * 4 * rowBytes + x * 16, int(rowBytes));
+    }
+    auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
+    if (!texture) return nil;
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
+    if (bc7Textures_.size() >= 32) bc7Textures_.clear();
+    bc7Textures_[key] = {texture, mark, batchSerial_};
+    return texture;
+}
+
 id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
                                                const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing) {
     // dfmt 8_8_8_8 or 5_6_5 (gcn_texel_at reads both as unorm whatever the nfmt), linear tiling.
@@ -584,6 +683,11 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         nativeLastMiss = text;
         return nil;
     };
+    if (dfmt == 41) {
+        if (((t[3] >> 20) & 31) != 13 || ((t[1] >> 26) & 15) != 0) return miss(1, 0);
+        id<MTLTexture> decoded = bc7Texture(base, width, height, pitch);
+        return decoded ? decoded : miss(4, 0);
+    }
     // A colour target lives only in its Metal texture, never written back to
     // guest memory: an 8_8_8_8 T# at its address reads it there (an emulator
     // renders its console's frame, then draws that frame scaled on screen).
@@ -809,6 +913,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         }
         [nativeArguments_ setArgumentBuffer:arguments offset:0];
         *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = ((1u << found) - 1) | sampled;
+        nativeBound_ = found; nativeFiltered_ = __builtin_popcount(sampled);
         static const NSUInteger fields[3] = {0, 4, 7};
         for (unsigned k = 0; k < 3; ++k) {
             const NSUInteger at = fields[k], low = k ? at + 1 : 2;
@@ -841,7 +946,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     [encoder drawPrimitives:d.primitive == 6 ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
     if (counted) [encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
     if (!batching_) [encoder endEncoding];
-    if (batchDraws.size() < 4000) {
+    if (details_ && batchDraws.size() < 20000) {
         char text[256];
         std::snprintf(text, sizeof text, "\n  - cible 0x%llx %ux%u (swap %u, masque 0x%x, blend 0x%x), %zu sommets, ciseaux %u,%u-%u,%u, PS 0x%llx",
                       (unsigned long long)d.target, d.pitch, d.height, d.swap, d.mask, d.blend, d.indices.size(),
@@ -867,6 +972,8 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             unsigned shown = 0;
             // A pixel lane that stopped before its image instructions names no texture: say why.
             if (!scanner_.pixelError().empty()) batchDraws += ", PS interprété : " + scanner_.pixelError();
+            std::snprintf(text, sizeof text, ", natives %u dont %u filtrees sur %zu", nativeBound_, nativeFiltered_, scanner_.images().size());
+            batchDraws += text;
             for (const auto& t : scanner_.images()) {
                 if (shown++ == 3) break;
                 const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;

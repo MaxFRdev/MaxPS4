@@ -32,6 +32,18 @@ int main(int argc, char** argv) {
     assert(capturing.images().size() == 1);
     for (unsigned k = 0; k < 8; ++k) assert(capturing.images()[0][k] == quadSgprs[k]);
     assert(capturing.scan(lost).empty() && capturing.images().empty());
+    // A tiled T# the CPU cannot read does not hide what the program reads after it.
+    constexpr std::uint64_t afterImagePS = 0x14000;
+    arena.code(afterImagePS, {
+        0xf0800f00, 0x00400402, // image_sample v[4:7], v2, s[0:7], s[8:11] dmask:0xf
+        0xc2080d00,             // s_buffer_load_dword s16, s[12:15], 0x0
+        0xbf810000});
+    PM4Draw tiledDraw = d;
+    tiledDraw.ps = afterImagePS;
+    tiledDraw.psUser[3] = 0x90d0032e;
+    bool constants = false;
+    for (const auto& range : capturing.scan(tiledDraw)) constants |= range.base <= 0x13000 && 0x13000 < range.base + range.size;
+    assert(constants && capturing.images().size() == 1 && capturing.pixelError().empty());
     PM4ResourceScanner reused(arena.memory);
     auto check = [&] {
         const auto& current = reused.scan(d);
