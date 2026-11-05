@@ -159,7 +159,6 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                 }];
             }];
         };
-        };
         build(compileOptions(), true); // Fast math did not finish some programs in minutes either.
         // Default optimisation did not finish some programs on the iPhone, large or
         // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
