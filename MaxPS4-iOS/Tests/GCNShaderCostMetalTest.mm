@@ -196,6 +196,17 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
         const std::string uniform1800 = uniformLoads(game1800.source, table1800), uniform2000 = uniformLoads(game2000.source, table2000);
         std::vector<std::uint32_t> sites1800, sites2000; // Filled by the scan, below.
         auto noSites = [&](const std::string& source) { return replaced(source, "gcn_site_hit(M, ", "false && gcn_site_hit(M, "); };
+        // The table's cost, part by part: its address check kept without the search
+        // behind it, then the check gone too (each load takes the table's words).
+        auto noSearch = [&](std::string source) {
+            source = replaced(source, "gcn_ld32_hint(M, a, gcn_hint)", "0u");
+            source = replaced(source, "gcn_locate_hint(M, a, ", "gcn_no_span(");
+            source = replaced(source, "gcn_packed32(M, at + 4ul * k)", "0u");
+            return "GCN_FN bool gcn_no_span(ulong n, thread ulong& at, thread uint& hint) { return true; }\n" + source;
+        };
+        auto noCheck = [&](const std::string& source) {
+            return "GCN_FN bool gcn_site_always(GCNMemory M, uint at, ulong a) { return true; }\n" + replaced(source, "gcn_site_hit(M, ", "gcn_site_always(M, ");
+        };
         struct Variant { const char* name; std::string source; const char* fragment; bool draws; std::string prelude = {}; int native = -1; unsigned state = 0; const std::vector<std::uint32_t>* sites = nullptr; };
         std::vector<Variant> variants = {
             {"empty pass (clear only)", "", "", false},
@@ -238,6 +249,16 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"PS 1800: loop, constant, no software path", vs.source + uniformLoads(loop1800.source, table1800) + entry1800, "gcn_fragment", true, noFallback, 2, 5},
             {"PS 2000: loop, as bound", vs.source + loop2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
             {"PS 2000: loop, scalar table", vs.source + loop2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
+            {"PS 1800: loop, scalar table, four bound", vs.source + loop1800.source + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
+            {"PS 1800: table, no search", vs.source + noSearch(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
+            {"PS 1800: table, no check", vs.source + noCheck(game1800.source) + entry1800, "gcn_fragment", true, nativePrelude, 2, 4, &sites1800},
+            {"PS 1800: table, no search, no software", vs.source + noSearch(game1800.source) + entry1800, "gcn_fragment", true, noFallback, 2, 4, &sites1800},
+            {"PS 1800: table, no check, no software", vs.source + noCheck(game1800.source) + entry1800, "gcn_fragment", true, noFallback, 2, 4, &sites1800},
+            {"PS 1800: loop, no check, no software", vs.source + noCheck(loop1800.source) + entry1800, "gcn_fragment", true, noFallback, 2, 4, &sites1800},
+            {"PS 2000: table, no check", vs.source + noCheck(game2000.source) + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
+            {"PS 2000: table, no check, no software", vs.source + noCheck(game2000.source) + entry2000, "gcn_fragment", true, noFallback, 2, 6, &sites2000},
+            {"PS 2000: loop, no check", vs.source + noCheck(loop2000.source) + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
+            {"PS 2000: loop, no check, no software", vs.source + noCheck(loop2000.source) + entry2000, "gcn_fragment", true, noFallback, 2, 6, &sites2000},
             {"math: 32 instructions, precise", vs.source + math.source + mathEntry, "gcn_fragment", true},
             {"math: 32 instructions, fast", vs.source + math.source + mathEntry, "gcn_fragment", true, fastMath},
             {"scalar: 32 loads, variable slot index", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, slotArray, -1, 2},
