@@ -904,9 +904,9 @@ GCN_FN bool gcn_locate(GCNMemory M, ulong a, ulong n, thread ulong& offset) {
     // or before `a` is the only one that can hold it.
     uint k = 0u;
     for (uint left = M.count; left > 1u;) {
-        uint half = left / 2u;
-        if (a >= M.ranges[3u * (k + half)]) k += half;
-        left -= half;
+        uint step = left / 2u;
+        if (a >= M.ranges[3u * (k + step)]) k += step;
+        left -= step;
     }
     ulong start = M.ranges[3u * k]; ulong length = M.ranges[3u * k + 1u];
     if (a >= start && a - start <= length && length - (a - start) >= n) { offset = M.ranges[3u * k + 2u] + (a - start); return true; }
