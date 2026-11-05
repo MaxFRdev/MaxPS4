@@ -113,6 +113,12 @@ int main(int argc, char** argv) {
         const auto game2000 = translateGCN(arena.memory, ps2000At, gameOptions);
         if (!game1800 || !game2000) std::printf("game programs: %s %s\n", game1800.error.c_str(), game2000.error.c_str());
         assert(game1800 && game2000);
+        GCNTranslateOptions loopOptions = gameOptions; loopOptions.dispatcher = true;
+        const auto loop1800 = translateGCN(arena.memory, ps1800At, loopOptions);
+        const auto loop2000 = translateGCN(arena.memory, ps2000At, loopOptions);
+        assert(loop1800 && loop2000);
+        std::printf("SHADER FORM PS 1800 %s, PS 2000 %s\n", game1800.source.find("while (running)") == std::string::npos ? "in order" : "loop",
+                    game2000.source.find("while (running)") == std::string::npos ? "in order" : "loop");
         std::printf("SHADER SOURCE PS 1800 %zu bytes, PS 2000 %zu bytes\n", game1800.source.size(), game2000.source.size());
         std::uint32_t inputCntl[32] = {};
         const std::string entry = gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", 0x302, inputCntl);
@@ -227,6 +233,11 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
             {"PS 2000: constant scalar loads", vs.source + uniform2000 + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
             {"PS 2000: constant, no software path", vs.source + uniform2000 + entry2000, "gcn_fragment", true, noFallback, 2, 6},
             {"PS 2000: scalar table", vs.source + game2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
+            {"PS 1800: loop, table, no software path", vs.source + loop1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 4, &sites1800},
+            {"PS 1800: loop, no software path", vs.source + loop1800.source + entry1800, "gcn_fragment", true, noFallback, 2, 5},
+            {"PS 1800: loop, constant, no software path", vs.source + uniformLoads(loop1800.source, table1800) + entry1800, "gcn_fragment", true, noFallback, 2, 5},
+            {"PS 2000: loop, as bound", vs.source + loop2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6},
+            {"PS 2000: loop, scalar table", vs.source + loop2000.source + entry2000, "gcn_fragment", true, nativePrelude, 2, 6, &sites2000},
             {"math: 32 instructions, precise", vs.source + math.source + mathEntry, "gcn_fragment", true},
             {"math: 32 instructions, fast", vs.source + math.source + mathEntry, "gcn_fragment", true, fastMath},
             {"scalar: 32 loads, variable slot index", vs.source + scalars.source + scalarEntry, "gcn_fragment", true, slotArray, -1, 2},

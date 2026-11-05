@@ -3,7 +3,8 @@
 // one portable shader function. The same text compiles as C++ against
 // GCNShaderRuntime.hpp (tests, compared with GCNInterpreter.hpp) and as
 // Metal against gcnMetalPrelude(). Control flow becomes a block dispatcher
-// (a switch in a loop), so any branch structure translates. A fetch shader
+// (a switch in a loop), so any branch structure translates; a pixel program
+// that only branches forward runs its blocks in order instead. A fetch shader
 // reached with s_swappc_b64 through user SGPRs is translated in place; its
 // s_setpc_b64 returns to the calling block.
 //
@@ -29,6 +30,7 @@ struct GCNTranslateOptions {
     unsigned userCount = 0;
     std::size_t maxInstructions = 16384;
     std::string name = "gcn_program";
+    bool dispatcher = false;     // keep the switch in a loop where blocks could run in order
 };
 struct GCNTranslation {
     std::string error;           // empty on success
@@ -137,6 +139,18 @@ private:
         }
         return true;
     }
+    // No branch back and no jump through a register: each block can only lead to
+    // a later one, so the blocks can run in address order without a loop.
+    bool forwardOnly(std::uint64_t entry) const {
+        if (entry != *leaders_.begin()) return false;
+        for (const auto& item : code_) {
+            const GCNInstruction& i = item.second.i;
+            if (i.encoding == GCNEncoding::sop1 && (i.opcode == 32 || i.opcode == 33)) return false;
+            if (i.encoding == GCNEncoding::sopp && (i.opcode == 2 || (i.opcode >= 4 && i.opcode <= 9)) &&
+                branchTarget(item.first, i) <= item.first) return false;
+        }
+        return true;
+    }
     std::size_t index(std::uint64_t address) const { return std::size_t(std::distance(leaders_.begin(), leaders_.find(address))); }
 
     // ---- operands ----
@@ -185,9 +199,13 @@ private:
 
     // ---- emission ----
     void emit(std::uint64_t entry) {
+        // The loop hides from Metal that a block runs at most once: every register
+        // stays live around it. `break` leaves a block in both forms.
+        const bool inOrder = options_.stage == GCNStage::pixel && !options_.dispatcher && forwardOnly(entry);
         std::size_t k = 0;
         for (const auto leader : leaders_) {
-            body_ += "    case " + std::to_string(k++) + "u: {\n";
+            const std::string number = std::to_string(k++);
+            body_ += inOrder ? "    if (pc == " + number + "u) do {\n" : "    case " + number + "u: {\n";
             std::uint64_t pc = leader;
             for (;;) {
                 const auto found = code_.find(pc);
@@ -206,7 +224,7 @@ private:
                 if (leaders_.count(next)) { body_ += "        pc = " + std::to_string(index(next)) + "u; break;\n"; break; }
                 pc = next;
             }
-            body_ += "    }\n";
+            body_ += inOrder ? "    } while (false);\n" : "    }\n";
         }
         std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) {\n"
                            "    uint gcn_hint = 0u; (void)gcn_hint;\n";
@@ -221,9 +239,9 @@ private:
         // Blocks are numbered by address: a fetch shader below the program
         // comes first, so execution starts at the entry's own block.
         head += "    bool scc = false; uint pc = " + std::to_string(index(entry)) + "u; bool running = true;\n"
-                "    (void)scc; (void)M; (void)Q;\n"
-                "    while (running) {\n    switch (pc) {\n";
-        out_.source = head + body_ + "    default: running = false; break;\n    }\n    }\n}\n";
+                "    (void)scc; (void)M; (void)Q; (void)running;\n";
+        if (inOrder) out_.source = head + body_ + "}\n";
+        else out_.source = head + "    while (running) {\n    switch (pc) {\n" + body_ + "    default: running = false; break;\n    }\n    }\n}\n";
     }
 
     bool instruction(const Inst& in, std::uint64_t pc, bool& ended) {

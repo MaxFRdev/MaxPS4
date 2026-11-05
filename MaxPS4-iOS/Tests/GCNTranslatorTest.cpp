@@ -30,6 +30,14 @@ int main(int argc, char** argv) {
     arena.code(coverageProgram,{0xbefe0480,0xf800180f,0,0xbf810000});
     const auto killed=translateGCN(arena.memory,coverageProgram,ps);
     assert(killed && killed.mayKill);
+    // Forward branches only: blocks in order, without the dispatcher's loop.
+    arena.code(coverageProgram,{0xbf840000,0xbf810000});
+    const auto ordered=translateGCN(arena.memory,coverageProgram,ps);
+    assert(ordered && ordered.source.find("while (running)")==std::string::npos && ordered.source.find("if (pc == 1u) do {")!=std::string::npos);
+    GCNTranslateOptions dispatched=ps; dispatched.dispatcher=true;
+    assert(translateGCN(arena.memory,coverageProgram,dispatched).source.find("while (running)")!=std::string::npos);
+    arena.code(coverageProgram,{0xbf84ffff,0xbf810000}); // A branch back to itself.
+    assert(translateGCN(arena.memory,coverageProgram,ps).source.find("while (running)")!=std::string::npos);
     GCNTranslateOptions fetch; fetch.stage = GCNStage::vertex; fetch.name = "vs_fetch";
     fetch.userCount = 4; fetch.userData[0] = std::uint32_t(fetchShader); fetch.userData[2] = std::uint32_t(vertexTable);
     const auto fetched = translateGCN(arena.memory, fetchVS, fetch);
