@@ -890,16 +890,23 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     [encoder setCullMode:MTLCullModeNone];
     for (unsigned k = 0; k < 16; ++k) { drawState.vsUser[k] = d.vsUser[k]; drawState.psUser[k] = d.psUser[k]; }
     drawState.flags = (d.primitive == 0x11 ? rectList : 0) | (ys > 0 ? flipY : 0);
-    // The pixel program's scalar values as this draw's scan read them.
+    // The pixel program's scalar values as this draw's scan read them. Always
+    // bound for a program that declares them, even empty: the compiler may read
+    // a buffer argument before the test that guards it.
     id<MTLBuffer> siteBuffer = nil;
     bool siteBytes = false;
     const auto sites = scalarSites_.find(d.ps);
-    if ((!guest_ || native_) && sites != scalarSites_.end() && sites->second.words &&
-        scanner_.scalarTable(sites->second.list, sites->second.words, siteTable_)) {
+    if (sites != scalarSites_.end() && sites->second.words) {
+        if (guest_ && !native_) siteTable_.assign(sites->second.words, 0); // Not scanned.
+        else scanner_.scalarTable(sites->second.list, sites->second.words, siteTable_);
         const std::size_t length = siteTable_.size() * sizeof(std::uint32_t);
         if (length <= 4096) siteBytes = true;
         else if ((siteBuffer = uploadBuffer(length, commands))) std::memcpy(siteBuffer.contents, siteTable_.data(), length);
-        if (siteBytes || siteBuffer) drawState.flags |= scalarSites;
+        else {
+            if (!batching_) [encoder endEncoding];
+            return fail("scalar value table");
+        }
+        drawState.flags |= scalarSites;
     }
     [encoder setVertexBuffer:memory offset:0 atIndex:0];
     [encoder setFragmentBuffer:memory offset:0 atIndex:0];

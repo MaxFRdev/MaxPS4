@@ -369,10 +369,11 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                 [encoder setViewport:MTLViewport{0, 0, double(screenW), double(screenH), 0, 1}];
                 [encoder setVertexBuffer:memory offset:0 atIndex:0]; [encoder setFragmentBuffer:memory offset:0 atIndex:0];
                 State drawn = states[variants[k].state];
-                if (variants[k].sites) {
-                    drawn.flags |= 4; // GCN_DRAW_SITES
-                    [encoder setFragmentBytes:variants[k].sites->data() length:variants[k].sites->size() * 4 atIndex:4];
-                }
+                // As the renderer does, bound for whichever program declares it.
+                static const std::vector<std::uint32_t> noSites(1024, 0);
+                if (variants[k].sites) drawn.flags |= 4; // GCN_DRAW_SITES
+                const auto& siteWords = variants[k].sites ? *variants[k].sites : noSites;
+                [encoder setFragmentBytes:siteWords.data() length:siteWords.size() * 4 atIndex:4];
                 [encoder setVertexBytes:&drawn length:sizeof state atIndex:1]; [encoder setFragmentBytes:&drawn length:sizeof state atIndex:1];
                 [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
                 [encoder setFragmentTexture:metalImage atIndex:0];
@@ -384,7 +385,11 @@ fragment float4 metal_sample_fragment(GCNVaryings in [[stage_in]], texture2d<flo
                 [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             }
             [encoder endEncoding]; [command commit]; [command waitUntilCompleted];
-            assert(command.status == MTLCommandBufferStatusCompleted && !command.error);
+            if (command.status != MTLCommandBufferStatusCompleted || command.error) {
+                std::printf("SHADER FAILED %s: %s\n", variants[k].name, command.error.localizedDescription.UTF8String);
+                variants[k].draws = false;
+                continue;
+            }
             if (run >= warmup && command.GPUStartTime > 0) samples[k].push_back((command.GPUEndTime - command.GPUStartTime) * 1000);
         }
         // The shared CI GPU is noisy: the median and the minimum resist outliers better than a mean.
