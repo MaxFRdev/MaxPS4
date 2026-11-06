@@ -219,6 +219,9 @@ int main() {
             const auto* words=image.translate(params,32,4);
             uint64_t argv0=0; std::memcpy(&argv0,words+8,8);
             CHECK(words[0]==1 && argv0==params+32 && !std::memcmp(image.translate(argv0,10,4),"eboot.bin",10));
+            // Started in a launcher's place: argv[0] is empty, not a program name.
+            image.start_without_program_name();
+            CHECK(image.write_entry_params()==params && *image.translate(argv0,1,4)==0);
             // Then the thread-return trampoline: MOV RDI,RAX; MOV EAX,thread_exit;
             // SYSCALL (an HLE gate site); HLT, where every child thread ends.
             const uint64_t back=image.thread_return();

@@ -82,6 +82,7 @@ void GuestELF::clear() {
     identity = false;
     stack_address = stack_bytes = heap_address = heap_bytes = entry_params_address = heap_window = 0;
     threads_address = thread_slot_bytes = thread_return_address = 0;
+    program_named = true;
     tls_image.clear();
     thunks.clear();
     hle_data.clear();
@@ -785,7 +786,7 @@ uint64_t GuestELF::write_entry_params() {
     const uint64_t words[4] = {1, entry_params_address + 32, 0, 0};
     std::memset(params, 0, entryParamsBytes);
     std::memcpy(params, words, sizeof(words));
-    std::memcpy(params + 32, program, sizeof(program));
+    if (program_named) std::memcpy(params + 32, program, sizeof(program));
     return entry_params_address;
 }
 bool GuestELF::prepare_thread(size_t slot, uint64_t& stack_top, uint64_t& tp) {

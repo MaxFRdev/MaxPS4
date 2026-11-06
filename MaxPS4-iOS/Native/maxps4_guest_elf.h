@@ -136,6 +136,10 @@ public:
     // address, which is also the initial RSP; 0 for other images.
     static constexpr uint64_t entryParamsBytes = 64;
     uint64_t write_entry_params();
+    // A program a launcher would start by sceSystemServiceLoadExec gets what the
+    // launcher passes, not a program name: an empty argv[0] (Call of Duty's
+    // default.elf decodes argv[0] as base64 and "eboot.bin" runs past the stack).
+    void start_without_program_name() { program_named = false; }
     // General images: the sceKernelMmap window (guest = host addresses);
     // false otherwise. Not part of segments(): translate() ignores it.
     uint64_t spare_address_space() const { return spare_bytes; }
@@ -187,6 +191,7 @@ private:
     uint64_t guest_base = 0, guest_entry = 0, thread_pointer = 0, start_address = 0;
     std::vector<OrbisLinker::Thunk> thunks;
     std::vector<OrbisLinker::DataObject> hle_data;
+    bool program_named = true;
     uint64_t process_param_address = 0;
     std::vector<ModuleRecord> records;
     std::vector<OrbisLinker::TLSBlock> tls_blocks;
