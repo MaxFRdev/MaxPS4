@@ -71,9 +71,11 @@ codesign --force --sign - "$EMBEDDED"
 codesign --verify --strict --verbose=2 "$EMBEDDED"
 # The developer debugging entitlement requested by StikDebug, and extended
 # virtual addressing: without it iOS left the app about 6.75 GiB of address
-# space, and Mortal Kombat: Legacy Kollection ran out of memory in 5 GiB.
+# space, and Mortal Kombat: Legacy Kollection ran out of memory in 5 GiB. The
+# increased memory limit raises how much RAM iOS lets the app keep (Call of
+# Duty can use 4.9 GiB); the session report shows the limit obtained.
 # This ad-hoc signature grants no provisioning rights; SideStore must supply a
-# valid profile permitting both and re-sign BOTH app and framework.
+# valid profile permitting them and re-sign BOTH app and framework.
 codesign --force --sign - --entitlements MaxPS4-iOS/MaxPS4.entitlements build/Payload/MaxPS4.app
 codesign --verify --strict --verbose=2 build/Payload/MaxPS4.app
 codesign -d --entitlements - build/Payload/MaxPS4.app > build/diagnostics/fex-app-entitlements.plist

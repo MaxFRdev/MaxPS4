@@ -6,7 +6,8 @@ import plistlib
 import subprocess
 import sys
 
-KEYS = ('get-task-allow', 'com.apple.security.cs.allow-jit',
+KEYS = ('get-task-allow', 'com.apple.developer.kernel.increased-memory-limit',
+        'com.apple.security.cs.allow-jit',
         'com.apple.security.cs.allow-unsigned-executable-memory',
         'dynamic-codesigning', 'application-identifier',
         'com.apple.developer.team-identifier')
