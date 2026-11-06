@@ -152,6 +152,19 @@ int main() {
     // POSIX semaphores over kernel ones; a UUID; IPv4 text and back.
     assert(call(S::sem_init, 0x11100, 0, 1) == 0);
     assert(call(S::sem_wait, 0x11100) == 0 && call(S::sem_post, 0x11100) == 0 && call(S::sem_wait, 0x11100) == 0);
+    {   // A deadline already past: taken if the count allows, otherwise timed out.
+        const uint8_t past[16] {};
+        uint8_t wrong[16] {};
+        wrong[15] = 0x7f; // Nanoseconds out of range.
+        assert(memory.write(0x11120, past, sizeof(past)) && memory.write(0x11130, wrong, sizeof(wrong)));
+        assert(call(S::sem_timedwait, 0x11100, 0x11120) == kernel_error(timedout));
+        assert(call(S::sem_timedwait, 0x11100, 0x11130) == kernel_error(inval));
+        assert(call(S::sem_timedwait, 0x11100, 0) == kernel_error(inval));
+        assert(call(S::sem_post, 0x11100) == 0 && call(S::sem_timedwait, 0x11100, 0x11120) == 0);
+    }
+    assert(resolve_libkernel("w5IHyvahg-o", "libScePosix", "libkernel", 1) == S::sem_timedwait);
+    assert(resolve_libkernel("JGMio+21L4c", "libScePosix", "libkernel", 1) == S::mkdir);
+    assert(resolve_libkernel("NN01qLRhiqU", "libScePosix", "libkernel", 1) == S::rename);
     assert(call(S::sem_init, 0x11108, 1, 0) == kernel_error(notsup));
     assert(call(S::sem_destroy, 0x11100) == 0 && call(S::sem_post, 0x11100) == kernel_error(srch));
     assert(call(S::uuid_create, 0x11200) == 0);

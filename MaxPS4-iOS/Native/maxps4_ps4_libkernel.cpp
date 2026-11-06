@@ -582,8 +582,10 @@ constexpr Binding bindings[] = {
     {"sceKernelFtruncate", "VW3TVZiM4-E", PS4KernelService::ftruncate},
     {"sceKernelTruncate", "WlyEA-sLDf0", PS4KernelService::truncate},
     {"sceKernelMkdir", "1-LFLmRFxxM", PS4KernelService::mkdir},
+    {"mkdir", "JGMio+21L4c", PS4KernelService::mkdir, "libkernel", true},
     {"sceKernelRmdir", "naInUjYt3so", PS4KernelService::rmdir},
     {"sceKernelRename", "52NcYU9+lEo", PS4KernelService::rename},
+    {"rename", "NN01qLRhiqU", PS4KernelService::rename, "libkernel", true},
     {"sceKernelUnlink", "AUXVxWeJU-A", PS4KernelService::unlink},
     {"sceKernelGetdirentries", "taRWhTJFTgE", PS4KernelService::getdirentries},
     // Thread names are not kept: an empty one (Unreal Engine 4 logs them).
@@ -706,6 +708,7 @@ constexpr Binding bindings[] = {
     {"sem_init", "pDuPEf3m4fI", PS4KernelService::sem_init, "libkernel", true},
     {"sem_destroy", "cDW233RAwWo", PS4KernelService::sem_destroy, "libkernel", true},
     {"sem_wait", "YCV5dGGBcCo", PS4KernelService::sem_wait, "libkernel", true},
+    {"sem_timedwait", "w5IHyvahg-o", PS4KernelService::sem_timedwait, "libkernel", true},
     {"sem_post", "IKP8typ0QUk", PS4KernelService::sem_post, "libkernel", true},
     {"recvmsg", "hI7oVeOluPM", PS4KernelService::net_unavailable, "libkernel", true},
     {"sendmsg", "aNeavPDNKzA", PS4KernelService::net_unavailable, "libkernel", true},
@@ -2189,12 +2192,24 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (c.rsi) return kernel_error(notsup); // Shared between processes.
         if (c.rdx > uint64_t(INT32_MAX)) return kernel_error(inval);
         return kernel_error(threads_.sema_create(c.rdi, 0, signed32(c.rdx), INT32_MAX));
-    case S::sem_destroy: case S::sem_wait: case S::sem_post: {
+    case S::sem_destroy: case S::sem_wait: case S::sem_timedwait: case S::sem_post: {
         uint8_t cell[8];
         if (!c.rdi || !memory_.read(c.rdi, cell, sizeof(cell))) return kernel_error(inval);
         const uint64_t handle = get_le(cell, 8);
         if (service == S::sem_destroy) return kernel_error(threads_.sema_delete(handle));
         if (service == S::sem_post) return kernel_error(threads_.sema_signal(handle, 1));
+        if (service == S::sem_timedwait) {
+            // An absolute CLOCK_REALTIME deadline, at most a year away.
+            uint8_t wire[16];
+            if (!c.rsi || !memory_.read(c.rsi, wire, sizeof(wire))) return kernel_error(inval);
+            const int64_t seconds = int64_t(get_le(wire, 8)), nanoseconds = int64_t(get_le(wire + 8, 8));
+            if (nanoseconds < 0 || nanoseconds >= 1000000000) return kernel_error(inval);
+            timespec now{};
+            ::clock_gettime(CLOCK_REALTIME, &now);
+            const int64_t whole = std::min<int64_t>(seconds - int64_t(now.tv_sec), 31536000);
+            const uint64_t left = uint64_t(std::max<int64_t>(whole * 1000000 + (nanoseconds - int64_t(now.tv_nsec)) / 1000, 0));
+            return kernel_error(threads_.sema_wait(handle, 1, 0, false, &left));
+        }
         return kernel_error(threads_.sema_wait(handle, 1, 0, false));
     }
     // sceKernelUuidCreate(SceKernelUuid*): a random version 4 UUID.

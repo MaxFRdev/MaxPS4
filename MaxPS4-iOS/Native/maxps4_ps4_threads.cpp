@@ -804,7 +804,7 @@ Error PS4Threads::sema_delete(uint64_t handle) {
     changed_.notify_all();
     return ok;
 }
-Error PS4Threads::sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll) {
+Error PS4Threads::sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll, const uint64_t* left) {
     std::unique_lock<std::mutex> lock(guard_);
     auto found = std::find_if(semas_.begin(), semas_.end(), [&](const Sema& s) { return s.token && s.token == handle; });
     if (found == semas_.end()) return srch;
@@ -817,7 +817,8 @@ Error PS4Threads::sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bo
     const uint64_t generation = sema.generation;
     ++sema.waiters;
     auto ready = [&] { return interrupted_ || sema.token != handle || sema.generation != generation || sema.count >= count; };
-    const bool timed_out = wait_timeout(lock, timeout, get_le(wire, 4), ready);
+    const bool timed_out = left ? !changed_.wait_for(lock, std::chrono::microseconds(*left), ready)
+                                : wait_timeout(lock, timeout, get_le(wire, 4), ready);
     if (sema.token == handle) --sema.waiters;
     if (interrupted_) return intr;
     if (sema.token != handle || sema.generation != generation) return canceled;

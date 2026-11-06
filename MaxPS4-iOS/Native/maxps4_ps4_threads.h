@@ -99,7 +99,8 @@ public:
     ps4::Error sema_create(uint64_t output, uint64_t name, int32_t initial, int32_t max);
     ps4::Error sema_delete(uint64_t handle);
     // `poll`: EBUSY instead of waiting.
-    ps4::Error sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll);
+    // `left`: microseconds to wait, for a caller without a guest timeout cell.
+    ps4::Error sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll, const uint64_t* left = nullptr);
     ps4::Error sema_signal(uint64_t handle, int32_t count);
     ps4::Error sema_cancel(uint64_t handle, int32_t count, uint64_t waiters);
     // Wait modes: and 1, or 2, then clear all 0x10 or the waited bits 0x20.
