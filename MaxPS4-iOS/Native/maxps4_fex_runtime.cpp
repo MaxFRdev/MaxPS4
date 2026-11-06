@@ -295,12 +295,16 @@ public:
             r[x86::REG_RAX] = static_cast<uint64_t>(result);
             state.rip += 2;
             // A stop: waits now return at once, so a game loop around one spins
-            // almost only in host code, where stop signals retry. The thread ends
-            // here through its return trampoline, whose own exit call goes on.
+            // almost only in host code, where stop signals retry. FEX resumes after
+            // the SYSCALL whatever State.rip says, and the thunk's next instruction
+            // is RET: the return address becomes the thread's return trampoline,
+            // whose own exit call ends it.
             if (threads && orbis != maxps4::PS4KernelService::thread_exit && orbis != maxps4::PS4KernelService::process_exit &&
                 orbis != maxps4::PS4KernelService::abort_process && guest_thread_ending(*threads)) {
-                state.rip = image->thread_return();
-                stop_exits.fetch_add(1, std::memory_order_relaxed);
+                uint8_t back[8];
+                const uint64_t exit_at = image->thread_return();
+                std::memcpy(back, &exit_at, sizeof back);
+                if (memory->write(rsp, back, sizeof back)) stop_exits.fetch_add(1, std::memory_order_relaxed);
             }
             return static_cast<uint64_t>(result);
         }

@@ -1140,7 +1140,7 @@ int main(int argc, char** argv) {
             char activity[4096]{};
             (void)maxps4_fex_engine_thread_activity(process,activity,sizeof activity);
             std::printf("stop with threads looping on a wait%s: %lld ms\n%.160s\n",busy ? ", main too" : "",(long long)took,std::strstr(activity,"Arr"));
-            CHECK(asked_status==0 && looped==-ECANCELED && took<2000);
+            CHECK(asked_status==0 && looped==-ECANCELED && took<1000);
             maxps4_fex_engine_close(process);
             std::puts("PASS a stop ends threads looping on a wait at their next call");
         }
