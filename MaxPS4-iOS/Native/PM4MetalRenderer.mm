@@ -835,6 +835,20 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     error.clear();
     if (d.colour && d.swap > 1) return fail("colour target component swap " + std::to_string(d.swap));
     if (!d.colour && !d.depthTarget) return fail("draw with neither colour nor depth");
+    // Gnm's embedded full-screen VS has no guest code (address 0). A game clears
+    // depth with it, several times a frame: no draw, the next pass that uses
+    // this buffer clears it on load, so an unused buffer costs nothing.
+    if (!d.vs && !d.colour) {
+        ++embeddedDepthDraws;
+        if (!d.depthClear) return true;
+        Target& cleared = depthTargets_[d.depthTarget];
+        if (cleared.texture && encoder_ && depthAttachment_ == cleared.texture) {
+            [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil;
+        }
+        cleared.fresh = true;
+        depthClearTo_[d.depthTarget] = d.depthClearValue;
+        return true;
+    }
     if ((d.vte & 0x3f) != 0x3f) return fail("viewport without scale and offset");
     const MTLPixelFormat format = !d.colour ? MTLPixelFormatInvalid : d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
     const MTLPixelFormat depthFormat = d.depthTarget ? MTLPixelFormatDepth32Float : MTLPixelFormatInvalid;
@@ -931,7 +945,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         // A new depth buffer starts at the clear value the game set.
         pass.depthAttachment.texture = depth->texture;
         pass.depthAttachment.loadAction = depth->fresh ? MTLLoadActionClear : MTLLoadActionLoad;
-        pass.depthAttachment.clearDepth = d.depthClearValue;
+        const auto clearTo = depthClearTo_.find(d.depthTarget);
+        pass.depthAttachment.clearDepth = clearTo != depthClearTo_.end() ? clearTo->second : d.depthClearValue;
+        if (clearTo != depthClearTo_.end()) depthClearTo_.erase(clearTo);
         pass.depthAttachment.storeAction = MTLStoreActionStore;
     }
     if (batching_) pass.visibilityResultBuffer = visibility_;
@@ -1121,9 +1137,9 @@ id<MTLTexture> PM4MetalRenderer::depthTarget(std::uint64_t address) const {
 }
 
 std::string PM4MetalRenderer::depthReport() const {
-    char text[200];
-    std::snprintf(text, sizeof text, "\nProfondeur Metal : %u dessins avec profondeur, dont %u sans couleur · %u dessins entièrement cullés · %zu tampons, %u redimensionnés",
-                  depthDraws, depthOnlyDraws, culledDraws, depthTargets_.size(), depthResized);
+    char text[240];
+    std::snprintf(text, sizeof text, "\nProfondeur Metal : %u effacements sans programme · %u dessins avec profondeur, dont %u sans couleur · %u dessins entièrement cullés · %zu tampons, %u redimensionnés",
+                  embeddedDepthDraws, depthDraws, depthOnlyDraws, culledDraws, depthTargets_.size(), depthResized);
     return text;
 }
 

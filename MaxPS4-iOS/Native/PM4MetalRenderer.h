@@ -102,6 +102,7 @@ public:
     // Draws given a depth buffer, of which without colour; draws whose faces
     // were all culled (front and back); depth textures resized with a copy.
     unsigned depthDraws = 0, depthOnlyDraws = 0, culledDraws = 0, depthResized = 0;
+    unsigned embeddedDepthDraws = 0; // Colourless draws with Gnm's embedded VS: not drawn.
     std::string depthReport() const;
     // f(address, texture) for every colour target.
     template <class F> void forEachTarget(F&& f) const { for (const auto& [address, t] : targets_) f(address, t.texture); }
@@ -145,6 +146,7 @@ private:
     using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned, unsigned>;
     struct Target { id<MTLTexture> texture; bool fresh; };
     std::map<std::uint64_t, Target> depthTargets_;
+    std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.
     // By compare function (0-7) and write: 16 states at most.
     std::map<unsigned, id<MTLDepthStencilState>> depthStates_;
     id<MTLDepthStencilState> depthState(unsigned function, bool write);
