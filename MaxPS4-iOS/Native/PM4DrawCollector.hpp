@@ -1,11 +1,13 @@
 #pragma once
 // Graphics PM4 register state and the draws it describes. Each draw packet
 // becomes a self-contained PM4Draw: programs and user SGPRs, PS inputs,
-// primitive and resolved indices, viewport, scissor and colour target 0.
+// primitive and resolved indices, viewport, scissor, colour target 0, the
+// depth buffer and face culling.
 // The software renderer (CPU) and the Metal renderer execute the same
 // PM4Draw, so both see one interpretation of the registers. Draws this
 // subset cannot describe are counted as failed with a reason; draws that
-// write no colour (target mask 0 or no target) are counted as skipped.
+// write no colour (target mask 0 or no target) are counted as skipped, unless
+// depthOnlyDraws is set and they write or clear a depth buffer.
 #include "GCNInterpreter.hpp"
 #include "PM4Type3Decoder.hpp"
 #include <algorithm>
@@ -23,8 +25,8 @@ struct PM4DrawStats {
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
     std::string lastSkipped, lastDispatch;
-    // Diagnostics, nothing renders them yet: draws with a depth test, those
-    // writing depth, those with no colour, culled faces, the last depth state.
+    // Diagnostics: draws with a depth test, those writing depth, those with
+    // no colour, culled faces, the last depth state.
     unsigned depthTested = 0, depthWritten = 0, depthOnly = 0, cullFront = 0, cullBack = 0;
     std::string lastDepth;
     std::string depthReport() const {
@@ -51,6 +53,21 @@ struct PM4Draw {
     unsigned swap = 0, mask = 0;                      // CB COMP_SWAP, CB_TARGET_MASK RGBA
     std::uint32_t blend = 0;                          // CB_BLEND0_CONTROL
     float blendConstant[4] = {};                     // CB_BLEND_RED/GREEN/BLUE/ALPHA
+    // False: a depth-only draw (no colour target, or mask 0); target is then 0
+    // and pitch/height are the depth buffer's.
+    bool colour = true;
+    // Depth buffer (DB_Z_INFO, DB_Z_WRITE_BASE, DB_DEPTH_SIZE): 0 when the draw
+    // neither tests nor clears depth. Kept by the renderer as a float texture;
+    // guest memory never receives it, stencil is not emulated.
+    std::uint64_t depthTarget = 0;
+    unsigned depthWidth = 0, depthHeight = 0;         // pixels (8-pixel tiles)
+    bool depthTest = false, depthWrite = false;       // DB_DEPTH_CONTROL Z_ENABLE, Z_WRITE_ENABLE
+    unsigned depthFunc = 7;                           // ZFUNC: never, <, =, <=, >, !=, >=, always
+    // DB_RENDER_CONTROL DEPTH_CLEAR_ENABLE: the draw's pixels get DB_DEPTH_CLEAR.
+    bool depthClear = false;
+    float depthClearValue = 1;
+    unsigned cull = 0;                                // PA_SU_SC_MODE_CNTL: bit 0 front, bit 1 back
+    bool frontClockwise = false;                      // FACE: front faces are clockwise on screen
 };
 
 // A compute dispatch (DISPATCH_DIRECT): program, user SGPRs, COMPUTE_PGM_RSRC2
@@ -137,6 +154,9 @@ public:
     }
     // Registers by offset from their bank base (context 0xa000, shader 0x2c00, uconfig 0xc000).
     std::uint32_t context(unsigned offset) const { return context_[offset & 0x3ff]; }
+    // Also report draws that write no colour but write or clear a depth
+    // buffer (depth pre-passes, shadow maps, depth clears), colour false.
+    bool depthOnlyDraws = false;
 
 private:
     const GCNMemory& memory_;
@@ -169,10 +189,32 @@ private:
                       (unsigned long long)(std::uint64_t(context_[0x05]) << 8), mode);
         stats_.lastDepth = text;
     }
+    // The depth and culling state of the next draw.
+    void depthState(PM4Draw& d) const {
+        const std::uint32_t control = context_[0x200], mode = context_[0x205];
+        d.cull = mode & 3;
+        d.frontClockwise = (mode >> 2) & 1;
+        d.depthTest = control & 2;
+        d.depthWrite = d.depthTest && (control & 4);
+        d.depthFunc = (control >> 4) & 7;
+        d.depthClear = context_[0x00] & 1;
+        d.depthClearValue = std::clamp(f(context_[0x0b]), 0.0f, 1.0f);
+        const std::uint64_t base = std::uint64_t(context_[0x14] ? context_[0x14] : context_[0x12]) << 8;
+        if (!(context_[0x10] & 3) || !base || !(d.depthTest || d.depthClear)) {
+            d.depthTest = d.depthWrite = d.depthClear = false;
+            return;
+        }
+        d.depthTarget = base;
+        d.depthWidth = ((context_[0x16] & 0x7ff) + 1) * 8;
+        d.depthHeight = (((context_[0x16] >> 11) & 0x7ff) + 1) * 8;
+    }
     template <class Draw> void collect(std::uint32_t count, bool indexed, std::uint64_t indexAddress, Draw& draw) {
         ++stats_.draws;
         noteDepth();
-        if (!(context_[0x8e] & 0xf) || !context_[0x318]) {
+        PM4Draw d;
+        depthState(d);
+        d.colour = (context_[0x8e] & 0xf) && context_[0x318];
+        if (!d.colour && !(depthOnlyDraws && (d.depthWrite || d.depthClear))) {
             ++stats_.skipped;
             // CB_TARGET_MASK, CB_COLOR0/1 BASE and INFO format, CB_COLOR_CONTROL,
             // DB_Z_INFO, PS program.
@@ -186,8 +228,7 @@ private:
             return;
         }
         const std::uint32_t info = context_[0x31c];
-        if (((info >> 2) & 0x1f) != 0xa || ((info >> 8) & 7) != 0) { stats_.fail("colour target format"); return; }
-        PM4Draw d;
+        if (d.colour && (((info >> 2) & 0x1f) != 0xa || ((info >> 8) & 7) != 0)) { stats_.fail("colour target format"); return; }
         d.primitive = uconfig_[0x242];
         if (d.primitive != 4 && d.primitive != 5 && d.primitive != 6 && d.primitive != 0x11) {
             stats_.fail("primitive type " + std::to_string(d.primitive)); return;
@@ -247,13 +288,18 @@ private:
         for (unsigned a = 0; a < 32; ++a) d.inputCntl[a] = context_[0x191 + a];
         d.vte = context_[0x206];
         for (unsigned k = 0; k < 6; ++k) d.viewport[k] = f(context_[0x10f + k]);
-        // CB_COLOR0_PITCH in 8-pixel units, CB_COLOR0_SLICE in 64-pixel units.
-        d.target = std::uint64_t(context_[0x318]) << 8;
-        d.pitch = ((context_[0x319] & 0x7ff) + 1) * 8;
-        d.height = unsigned((std::uint64_t((context_[0x31a] & 0x3fffff) + 1) * 64) / d.pitch);
-        d.swap = (info >> 11) & 3;
-        d.mask = context_[0x8e] & 0xf;
-        d.blend = context_[0x1e0];
+        if (d.colour) {
+            // CB_COLOR0_PITCH in 8-pixel units, CB_COLOR0_SLICE in 64-pixel units.
+            d.target = std::uint64_t(context_[0x318]) << 8;
+            d.pitch = ((context_[0x319] & 0x7ff) + 1) * 8;
+            d.height = unsigned((std::uint64_t((context_[0x31a] & 0x3fffff) + 1) * 64) / d.pitch);
+            d.swap = (info >> 11) & 3;
+            d.mask = context_[0x8e] & 0xf;
+            d.blend = context_[0x1e0];
+        } else {
+            d.pitch = d.depthWidth;
+            d.height = d.depthHeight;
+        }
         for (unsigned k = 0; k < 4; ++k) d.blendConstant[k] = f(context_[0x105 + k]);
         d.scissor[0] = std::min(context_[0x0c] & 0xffff, d.pitch);
         d.scissor[1] = std::min(context_[0x0c] >> 16, d.height);

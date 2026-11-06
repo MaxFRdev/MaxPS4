@@ -236,6 +236,170 @@ int main() {
             assert(compare("primitive restart, CPU/GPU", pixels,
                            restartArena.bytes.data() + (pm4_primitive_test::target - Arena::start)));
         }
+        // Depth and culling. Full-screen triangles through the fetch-shader VS,
+        // at clip depth z (w 1, window depth 0.5 z + 0.5), in corner order
+        // (-1,-1), (3,-1), (-1,3): counter-clockwise on screen with the target's
+        // negative Y scale, clockwise with a positive one (Y flipped).
+        {
+            constexpr std::uint64_t redPS = 0x10300, depthTarget = 0x18000, depthBuffer = 0x1c000;
+            enum Order { forward, reversed };
+            struct Scene {
+                Arena arena;
+                Stream st;
+                unsigned triangles = 0;
+                Scene() {
+                    loadFetchVS(arena);
+                    arena.code(greenPS, {0x7e080280, 0x7e0a02f2, 0xf800180f, 0x05040504, 0xbf810000});
+                    arena.code(redPS, {0x7e0802f2, 0x7e0a0280, 0xf800180f, 0x04050504, 0xbf810000});
+                    st.set(0x76, 0x48, {std::uint32_t(fetchVS >> 8), 0, 0, 4u << 1});
+                    st.target(depthTarget);
+                    st.set(0x69, 0x1b3, {0x2, 0x2}); // PERSP_CENTER
+                    st.set(0x79, 0x242, {4});
+                }
+                // DB_Z_INFO Z_32_FLOAT, DB_Z_WRITE_BASE, DB_DEPTH_SIZE 16x8, DB_DEPTH_CLEAR 1.
+                void depthBufferOn() {
+                    st.set(0x69, 0x10, {3});
+                    st.set(0x69, 0x14, {std::uint32_t(depthBuffer >> 8)});
+                    st.set(0x69, 0x16, {(width / 8 - 1) | ((height / 8 - 1) << 11)});
+                    st.set(0x69, 0x0b, {bits(1.0f)});
+                }
+                void ps(std::uint64_t address) { st.set(0x76, 0x08, {std::uint32_t(address >> 8), 0, 0, 0}); }
+                void triangle(float z, Order order) {
+                    const std::uint64_t table = 0x13000 + 16 * triangles, vertices = 0x13400 + 48 * triangles;
+                    ++triangles;
+                    const float corners[3][2] = {{-1, -1}, {3, -1}, {-1, 3}};
+                    for (unsigned n = 0; n < 3; ++n) {
+                        const unsigned c = order == forward ? n : (3 - n) % 3;
+                        const float v[4] = {corners[c][0], corners[c][1], z, 1};
+                        for (unsigned k = 0; k < 4; ++k) arena.put(vertices + 16 * n + 4 * k, bits(v[k]));
+                    }
+                    arena.code(table, {std::uint32_t(vertices), 16u << 16, 3, 0x77fac});
+                    st.set(0x76, 0x4c, {std::uint32_t(fetchShader), 0, std::uint32_t(table), 0});
+                    st.words.insert(st.words.end(), {0xc0012d00U, 3, 2}); // DRAW_INDEX_AUTO, 3 vertices
+                }
+            };
+            // Every pixel of the target must be `bgra`; `draws` reached the GPU.
+            auto check = [&](const char* name, Scene& scene, const std::uint8_t (&bgra)[4], unsigned depthDraws, unsigned depthOnly) {
+                PM4DrawStats stats;
+                PM4DrawCollector sceneCollector(scene.arena.memory, stats);
+                sceneCollector.depthOnlyDraws = true;
+                PM4MetalRenderer renderer(device, scene.arena.memory, nil, 0);
+                id<MTLCommandBuffer> sceneCommands = [queue commandBuffer];
+                renderer.beginBatch();
+                sceneCollector.execute(scene.st.words.data(), scene.st.words.size(), [&](const PM4Draw& d) {
+                    if (renderer.encode(d, sceneCommands)) ++stats.rendered;
+                    else stats.fail(renderer.error);
+                });
+                renderer.endBatch();
+                [sceneCommands commit]; [sceneCommands waitUntilCompleted];
+                if (!stats.error.empty()) std::printf("%s: %s\n", name, stats.error.c_str());
+                assert(sceneCommands.status == MTLCommandBufferStatusCompleted && !sceneCommands.error);
+                assert(stats.failed == 0 && stats.rendered == stats.draws - stats.skipped);
+                if (renderer.depthDraws != depthDraws || renderer.depthOnlyDraws != depthOnly)
+                    std::printf("%s: %u depth draws, %u without colour\n", name, renderer.depthDraws, renderer.depthOnlyDraws);
+                assert(renderer.depthDraws == depthDraws && renderer.depthOnlyDraws == depthOnly);
+                assert(!depthDraws || renderer.depthTarget(depthBuffer).pixelFormat == MTLPixelFormatDepth32Float);
+                std::uint8_t pixels[width * height * 4] = {}, expected[sizeof pixels] = {};
+                for (unsigned n = 0; n < width * height; ++n) std::memcpy(expected + 4 * n, bgra, 4);
+                readPixels(device, queue, renderer.target(depthTarget), pixels);
+                assert(compare(name, pixels, expected));
+            };
+            const std::uint8_t green[4] = {0, 255, 0, 255}, red[4] = {0, 0, 255, 255};
+            {
+                // A near triangle hides a far one drawn after it (LESS, written).
+                Scene scene;
+                scene.depthBufferOn();
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.ps(greenPS); scene.triangle(0.2f, forward);
+                scene.ps(redPS); scene.triangle(0.8f, forward);
+                check("depth: near hides far", scene, green, 2, 0);
+                // Without the depth test, the last triangle wins.
+                Scene flat;
+                flat.ps(greenPS); flat.triangle(0.2f, forward);
+                flat.ps(redPS); flat.triangle(0.8f, forward);
+                check("depth off: last draw wins", flat, red, 0, 0);
+            }
+            {
+                // A depth pre-pass with no colour and no pixel program (PS 0),
+                // then a farther red triangle fails and a nearer green passes.
+                Scene scene;
+                scene.depthBufferOn();
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.st.set(0x69, 0x8e, {0});
+                scene.ps(0); scene.triangle(0.2f, forward);
+                scene.st.set(0x69, 0x8e, {0xf});
+                scene.ps(redPS); scene.triangle(0.8f, forward);
+                scene.ps(greenPS); scene.triangle(0.1f, forward);
+                check("depth-only pre-pass", scene, green, 3, 1);
+            }
+            {
+                // A depth clear (DB_RENDER_CONTROL) back to 1 lets a far triangle
+                // replace a near one.
+                Scene scene;
+                scene.depthBufferOn();
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.ps(greenPS); scene.triangle(0.2f, forward);
+                scene.st.set(0x69, 0x00, {1});
+                scene.st.set(0x69, 0x8e, {0});
+                scene.st.set(0x69, 0x200, {2 | 4 | (7 << 4)});
+                scene.ps(0); scene.triangle(0.5f, forward);
+                scene.st.set(0x69, 0x00, {0});
+                scene.st.set(0x69, 0x8e, {0xf});
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.ps(redPS); scene.triangle(0.8f, forward);
+                check("depth clear", scene, red, 3, 1);
+            }
+            {
+                // The same clear through Gnm's embedded VS (address 0), which
+                // has no code to translate: nothing is drawn, the next pass clears.
+                Scene scene;
+                scene.depthBufferOn();
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.ps(greenPS); scene.triangle(0.2f, forward);
+                scene.st.set(0x69, 0x00, {1});
+                scene.st.set(0x69, 0x8e, {0});
+                scene.st.set(0x69, 0x200, {2 | 4 | (7 << 4)});
+                scene.st.set(0x76, 0x48, {0, 0});
+                scene.ps(0);
+                scene.st.words.insert(scene.st.words.end(), {0xc0012d00U, 3, 2});
+                scene.st.set(0x76, 0x48, {std::uint32_t(fetchVS >> 8), 0});
+                scene.st.set(0x69, 0x00, {0});
+                scene.st.set(0x69, 0x8e, {0xf});
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.ps(redPS); scene.triangle(0.8f, forward);
+                check("embedded VS depth clear", scene, red, 2, 0);
+            }
+            {
+                // Back faces culled, counter-clockwise front (FACE 0): the
+                // reversed (clockwise) red triangle is culled.
+                Scene scene;
+                scene.st.set(0x69, 0x205, {2});
+                scene.ps(greenPS); scene.triangle(0.5f, forward);
+                scene.ps(redPS); scene.triangle(0.5f, reversed);
+                check("cull back, CCW front", scene, green, 0, 0);
+                // Front faces culled instead: the forward green one goes.
+                Scene front;
+                front.st.set(0x69, 0x205, {1});
+                front.ps(redPS); front.triangle(0.5f, reversed);
+                front.ps(greenPS); front.triangle(0.5f, forward);
+                check("cull front, CCW front", front, red, 0, 0);
+                // Positive Y scale (flipped): forward is clockwise on screen,
+                // the front face with FACE 1, so the reversed one is culled.
+                Scene flipped;
+                flipped.st.set(0x69, 0x10f, {bits(8), bits(8), bits(4), bits(4), bits(0.5f), bits(0.5f)});
+                flipped.st.set(0x69, 0x205, {2 | 4});
+                flipped.ps(greenPS); flipped.triangle(0.5f, forward);
+                flipped.ps(redPS); flipped.triangle(0.5f, reversed);
+                check("cull back, CW front, Y flipped", flipped, green, 0, 0);
+                // Both faces culled: nothing after the first draw.
+                Scene both;
+                both.ps(greenPS); both.triangle(0.5f, forward);
+                both.st.set(0x69, 0x205, {3});
+                both.ps(redPS); both.triangle(0.5f, forward);
+                check("cull both faces", both, green, 0, 0);
+            }
+            std::puts("PASS depth test, depth-only pre-pass with no pixel program, depth clear, face culling (both windings, flipped Y)");
+        }
         // Blend the same foreground/background with all supported operations.
         // Compare GPU pixels to fixed expected bytes and the software renderer.
         for (const auto& test : pm4_blend_test::cases) {

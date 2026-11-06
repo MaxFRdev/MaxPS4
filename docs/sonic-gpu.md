@@ -269,3 +269,12 @@ a second run of the same image. Build 1000176 also reports `si_code`, the
 memory fault address, relocation and relative RIP for further device triage.
 This fixes a missing frontend mechanism; another device run is still needed
 to determine whether it resolves the reported game startup fault.
+
+## Depth and culling
+
+The Metal renderer now tests and writes depth, runs depth-only draws and
+depth clears, and culls faces as the game's registers say: see
+[pm4-depth-culling.md](pm4-depth-culling.md). A game that never enables
+`DB_DEPTH_CONTROL.Z_ENABLE` (Sonic Mania, Mortal Kombat: Legacy Kollection)
+renders as before. 3D rendering on the iPhone still has to be checked with a
+real game.

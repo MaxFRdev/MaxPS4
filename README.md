@@ -31,7 +31,7 @@ Les autres jeux ne sont pas encore pris en charge ou pas encore testés (voir [C
 | Processeur | Code x86-64 du jeu exécuté par le JIT FEXCore sur iPhone (StikDebug), plusieurs threads du jeu en parallèle, runtime compilé en mode optimisé |
 | Chargement | Dossier de jeu complet : `eboot.bin` (SELF en clair) et modules `sce_module/*.prx`, liés entre eux |
 | Système PS4 | Fichiers, mémoire, threads, mutex, variables de condition, files d'événements, **sémaphores**, **event flags**, horloges et compteurs de temps précis |
-| GPU | Commandes GNM/PM4 décodées et shaders GCN traduits en Metal ; textures natives filtrées par le GPU de l'iPhone. Pas encore de test de profondeur ni de culling : les jeux en 3D ne s'affichent pas correctement pour l'instant |
+| GPU | Commandes GNM/PM4 décodées et shaders GCN traduits en Metal ; textures natives filtrées par le GPU de l'iPhone ; test de profondeur et culling des faces (testés sur Mac, rendu 3D encore à valider sur iPhone). Pas encore de stencil ni de cibles couleur autres que 8_8_8_8 : la plupart des jeux 3D ne s'affichent pas encore correctement |
 | Affichage | Jusqu'à **60 images/s**, calé sur le rafraîchissement de l'écran de l'iPhone ; Ajuster / Remplir / Étirer ; 1080p ou 720p annoncé au jeu |
 | Son | Sortie audio du jeu (AudioOut) jouée sur l'iPhone |
 | Manette | Manettes MFi, Xbox, DualShock 4 et DualSense : toutes les touches, sticks et gâchettes analogiques, pavé tactile ; commandes tactiles réglables (taille, opacité, L1/L2/R1/R2), masquées dès qu'une manette est branchée |
