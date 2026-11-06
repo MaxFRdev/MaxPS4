@@ -1,3 +1,4 @@
+#include "OrbisFixedLayout.hpp"
 #include "maxps4_guest_elf.h"
 #include "maxps4_guest_range.h"
 #include "maxps4_ps4_guest_memory.h"
@@ -439,6 +440,9 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
                 bytes[entry_at + 6 + b] = uint8_t(params >> (8 * b));
                 bytes[entry_at + 21 + b] = uint8_t(exit_function >> (8 * b));
             }
+            for (auto& module : copy.modules) for (auto& segment : module.image.segments)
+                if ((segment.header.flags & 5) == 5 && !segment.header.address)
+                    orbisRelocateFixedLayout(segment.bytes.data(), size_t(segment.header.fileSize), heap_low, heap_window);
         }
         // Local-exec read through FS must stay inside the blocks or the TCB.
         auto tls_readable = [&](int64_t displacement, uint64_t bytes) {

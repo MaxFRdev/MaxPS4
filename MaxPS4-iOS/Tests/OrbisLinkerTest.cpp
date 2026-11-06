@@ -1,6 +1,7 @@
 #include "../Native/OrbisLinker.hpp"
 #include "../Native/OrbisLinkerBridge.h"
 #include "OrbisLinkerFixture.h"
+#include "../Native/OrbisFixedLayout.hpp"
 #include <iostream>
 #include <cstdlib>
 #include <fstream>
@@ -13,6 +14,29 @@ static uint64_t value(const Linker::Image& image, uint64_t address) {
     uint64_t v = 0; for (size_t i=0;i<8;++i) v |= uint64_t(p[i])<<(i*8); return v;
 }
 int main(int argc, char** argv) {
+    {   // Call of Duty's fixed layout moves into the window, all or nothing.
+        const std::pair<size_t, uint64_t> sites[] = {{0x558ae4,0x1000000000},{0x558b23,0x1080000000},{0x558b69,0x1100000000},
+            {0x558b73,0x1180000000},{0x558bc0,0x1200000000},{0x558c23,0x400000000},{0x558c2d,0x1600200000},
+            {0x558c7a,0x1a00200000},{0x61cafe,0x2000000000}};
+        std::vector<uint8_t> text(0x620000, 0x90);
+        for (const auto& [at, immediate] : sites) { text[at] = 0x48; text[at + 1] = 0xb8; put(text, at + 2, immediate); }
+        const auto read = [&](size_t at) { uint64_t v = 0; std::memcpy(&v, text.data() + at + 2, 8); return v; };
+        const auto untouched = text;
+        constexpr uint64_t window = 0x7014864000, gib = uint64_t{1} << 30;
+        check(!maxps4::orbisRelocateFixedLayout(text.data(), text.size(), window, 16 * gib) && text == untouched, "window too small");
+        check(!maxps4::orbisRelocateFixedLayout(text.data(), 0x558c00, window, 24 * gib) && text == untouched, "short text");
+        text[0x61cb00] ^= 1; // Another build of the game: nothing changes.
+        const auto other = text;
+        check(!maxps4::orbisRelocateFixedLayout(text.data(), text.size(), window, 24 * gib) && text == other, "other build");
+        text = untouched;
+        check(maxps4::orbisRelocateFixedLayout(text.data(), text.size(), window, 24 * gib), "fixed layout moved");
+        const uint64_t start = read(0x558ae4);
+        check(start % gib == 0 && start >= window + gib && start < window + 3 * gib, "layout start");
+        check(read(0x558b23) == start + 2 * gib && read(0x558bc0) == start + 8 * gib && read(0x558c23) == 5 * gib, "regions");
+        check(read(0x558c2d) == start + 13 * gib + 0x200000 && read(0x558c7a) == start + 18 * gib + 0x200000, "large regions");
+        check(!(read(0x558bc0) & 0x200000) && !(read(0x558c7a) & 0x20000000), "bits ORed into the bases stay clear");
+        check(read(0x61cafe) == start + 20 * gib && read(0x61cafe) + 2 * gib <= window + 24 * gib, "allocator inside the window");
+    }
     auto provider = make(true), consumer = make(false);
     if (argc == 2) {
         const std::pair<const char*, const std::vector<uint8_t>*> fixtures[] = {{"provider.prx", &provider}, {"app.elf", &consumer}};
