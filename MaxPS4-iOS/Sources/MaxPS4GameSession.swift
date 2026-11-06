@@ -91,7 +91,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         guard lock.try() else { return current + " (verrou de session pris)" }
         defer { lock.unlock() }
         guard let engine else { return current }
-        var activity = [CChar](repeating: 0, count: 4096)
+        var activity = [CChar](repeating: 0, count: 16384)
         _ = maxps4_fex_engine_thread_activity(engine, &activity, activity.count)
         return current + "\n" + String(cString: activity)
     }
@@ -156,12 +156,12 @@ final class MaxPS4GameSource: @unchecked Sendable {
         guard let started, let engine else { return nil }
         let now = ProcessInfo.processInfo.systemUptime
         let seconds = Int(now - started)
-        var activity = [CChar](repeating: 0, count: 4096)
+        var activity = [CChar](repeating: 0, count: 16384)
         _ = maxps4_fex_engine_thread_activity(engine, &activity, activity.count)
         inputLock.lock(); let sent = vblanksSent; inputLock.unlock()
         let missing = missingImports(engine)
         let compatibility = missing.called.isEmpty ? "" : "Fonctions PS4 manquantes appelées : \(missing.called.count) sur \(missing.total) absentes · "
-            + missing.called.prefix(5).joined(separator: " · ") + "\n"
+            + missing.called.joined(separator: " · ") + "\n"
         let text = compatibility + inputDelays(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
         if let liveReport {
