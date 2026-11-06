@@ -107,6 +107,7 @@ struct GameMetalState {
                        std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>{}), device(device),
           queue([device newCommandQueue]), displayEvent([device newSharedEvent]), nativeTextures(nativeTextures) {
         collector.depthOnlyDraws = true; // Depth pre-passes and clears reach the renderer.
+        collector.otherTargetFormats = true; // 16-bit float and other targets too.
     }
 };
 void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::time_point started,
@@ -355,11 +356,17 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         destinationOrigin:MTLOriginMake(0,0,0)];
     // Small readbacks keep the report useful without reading back an image.
     std::vector<std::pair<uint64_t, id<MTLTexture>>> targets;
-    s.renderer.forEachTarget([&](uint64_t at, id<MTLTexture> t) { if (t && targets.size() < 8) targets.push_back({at, t}); });
+    // Four-byte pixels only: the readback buffer holds one 32-bit pixel each.
+    s.renderer.forEachTarget([&](uint64_t at, id<MTLTexture> t) {
+        if (t && targets.size() < 8 && PM4MetalRenderer::bytesPerPixel(t.pixelFormat) == 4) targets.push_back({at, t});
+    });
+    const bool centreRead = PM4MetalRenderer::bytesPerPixel(source.pixelFormat) == 4;
     id<MTLBuffer> pixel = [s.device newBufferWithLength:4 * (1 + targets.size()) options:MTLResourceStorageModeShared];
     if (pixel) {
-        [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(width / 2, height / 2, 0)
-                   sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
+        if (centreRead)
+            [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(width / 2, height / 2, 0)
+                       sourceSize:MTLSizeMake(1, 1, 1) toBuffer:pixel destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
+        else std::memset(pixel.contents, 0, 4);
         for (size_t k = 0; k < targets.size(); ++k)
             [blit copyFromTexture:targets[k].second sourceSlice:0 sourceLevel:0
                      sourceOrigin:MTLOriginMake(targets[k].second.width / 2, targets[k].second.height / 2, 0)

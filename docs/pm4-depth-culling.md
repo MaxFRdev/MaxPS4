@@ -68,6 +68,28 @@ cible) qui écrit ou efface la profondeur est transmis avec `colour = false`,
 - La profondeur reste dans Metal : un jeu qui lit son tampon de profondeur
   comme une texture (ombres, occlusion ambiante) lit la mémoire PS4, qui ne
   la contient pas.
-- La cible couleur doit toujours être en 8_8_8_8 UNORM linéaire : les jeux 3D
-  qui dessinent dans d'autres formats échouent encore avant la profondeur.
+- Cibles couleur : voir « Formats de cible couleur » ci-dessous ; les cibles
+  tuilées et les formats entiers ne sont pas pris en charge.
 - Le rendu 3D sur iPhone reste à valider avec un vrai jeu.
+
+## Formats de cible couleur
+
+Les jeux 3D dessinent souvent leur scène dans une cible 16 bits flottante
+avant de la ramener à l'écran. Avec `otherTargetFormats` (pont Metal du jeu
+seulement), le collecteur transmet `CB_COLOR0_INFO` FORMAT et NUMBER_TYPE, et
+`PM4MetalRenderer::targetFormat` choisit le format Metal :
+
+| PS4 | Metal |
+| --- | --- |
+| 8_8_8_8 UNORM / SRGB (swap 0 ou 1), SNORM | RGBA8 / BGRA8, `_sRGB`, Snorm |
+| 16_16_16_16, 16_16, 16 FLOAT / UNORM / SNORM | RGBA16, RG16, R16 |
+| 32, 32_32, 32_32_32_32 FLOAT | R32, RG32, RGBA32Float (sans mélange) |
+| 2_10_10_10 UNORM | RGB10A2Unorm |
+| 10_11_11 FLOAT | RG11B10Float |
+| 8_8, 8 UNORM / SNORM | RG8, R8 |
+
+Les autres formats (entiers, 5_6_5, échanges de composantes) échouent avec un
+message qui les nomme. Un T# de même format à l'adresse d'une cible lit sa
+texture Metal (textures natives activées), les calculs copient les cibles
+avec leur vraie taille de pixel, et le rapport ne relit que les pixels de 4
+octets.

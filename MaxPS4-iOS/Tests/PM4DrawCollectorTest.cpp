@@ -82,6 +82,18 @@ int main() {
         assert(f.full.size() == 3 && f.stats.skipped == 2);
     }
     {
+        // 16_16_16_16 FLOAT fails unless otherTargetFormats, then carries its format.
+        Fixture f;
+        f.run({0xc0016900, 0x31c, (0xcu << 2) | (7u << 8), 0xc0012d00, 3, 2});
+        assert(f.stats.failed == 1 && f.stats.error == "colour target format" && f.full.empty());
+        Fixture g;
+        g.collector.otherTargetFormats = true;
+        g.run({0xc0016900, 0x31c, (0xcu << 2) | (7u << 8), 0xc0012d00, 3, 2});
+        assert(g.stats.failed == 0 && g.full.size() == 1 && g.full[0].format == 0xc && g.full[0].number == 7);
+        g.run({0xc0016900, 0x31c, 0xau << 2, 0xc0012d00, 3, 2});
+        assert(g.full.size() == 2 && g.full[1].format == 0xa && g.full[1].number == 0);
+    }
+    {
         // A colour draw whose depth test is off has no depth buffer, whatever
         // the other DB registers hold: Sonic Mania's and Mortal Kombat's draws.
         Fixture f;

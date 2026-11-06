@@ -48,7 +48,11 @@ struct PM4Draw {
     std::uint32_t vte = 0;                            // PA_CL_VTE_CNTL
     float viewport[6] = {};                           // X/Y/Z scale and offset
     unsigned scissor[4] = {};                         // x0, y0, x1, y1 (exclusive), inside the target
-    std::uint64_t target = 0;                         // CB_COLOR0 base: 8_8_8_8 UNORM, linear
+    std::uint64_t target = 0;                         // CB_COLOR0 base, linear
+    // CB_COLOR0_INFO FORMAT (0xa 8_8_8_8, 0xc 16_16_16_16...) and NUMBER_TYPE
+    // (0 UNORM, 1 SNORM, 6 SRGB, 7 FLOAT): 8_8_8_8 UNORM unless
+    // otherTargetFormats lets others through.
+    unsigned format = 0xa, number = 0;
     unsigned pitch = 0, height = 0;                   // pixels
     unsigned swap = 0, mask = 0;                      // CB COMP_SWAP, CB_TARGET_MASK RGBA
     std::uint32_t blend = 0;                          // CB_BLEND0_CONTROL
@@ -157,6 +161,9 @@ public:
     // Also report draws that write no colour but write or clear a depth
     // buffer (depth pre-passes, shadow maps, depth clears), colour false.
     bool depthOnlyDraws = false;
+    // Also report colour targets in formats other than 8_8_8_8 UNORM (the
+    // Metal renderer decides which it can draw; the software one cannot).
+    bool otherTargetFormats = false;
 
 private:
     const GCNMemory& memory_;
@@ -228,7 +235,9 @@ private:
             return;
         }
         const std::uint32_t info = context_[0x31c];
-        if (d.colour && (((info >> 2) & 0x1f) != 0xa || ((info >> 8) & 7) != 0)) { stats_.fail("colour target format"); return; }
+        d.format = (info >> 2) & 0x1f;
+        d.number = (info >> 8) & 7;
+        if (d.colour && !otherTargetFormats && (d.format != 0xa || d.number != 0)) { stats_.fail("colour target format"); return; }
         d.primitive = uconfig_[0x242];
         if (d.primitive != 4 && d.primitive != 5 && d.primitive != 6 && d.primitive != 0x11) {
             stats_.fail("primitive type " + std::to_string(d.primitive)); return;
