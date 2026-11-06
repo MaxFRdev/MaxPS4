@@ -351,6 +351,26 @@ int main() {
                 check("depth clear", scene, red, 3, 1);
             }
             {
+                // The same clear through Gnm's embedded VS (address 0), which
+                // has no code to translate: nothing is drawn, the next pass clears.
+                Scene scene;
+                scene.depthBufferOn();
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.ps(greenPS); scene.triangle(0.2f, forward);
+                scene.st.set(0x69, 0x00, {1});
+                scene.st.set(0x69, 0x8e, {0});
+                scene.st.set(0x69, 0x200, {2 | 4 | (7 << 4)});
+                scene.st.set(0x76, 0x48, {0, 0});
+                scene.ps(0);
+                scene.st.words.insert(scene.st.words.end(), {0xc0012d00U, 3, 2});
+                scene.st.set(0x76, 0x48, {std::uint32_t(fetchVS >> 8), 0});
+                scene.st.set(0x69, 0x00, {0});
+                scene.st.set(0x69, 0x8e, {0xf});
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.ps(redPS); scene.triangle(0.8f, forward);
+                check("embedded VS depth clear", scene, red, 2, 0);
+            }
+            {
                 // Back faces culled, counter-clockwise front (FACE 0): the
                 // reversed (clockwise) red triangle is culled.
                 Scene scene;

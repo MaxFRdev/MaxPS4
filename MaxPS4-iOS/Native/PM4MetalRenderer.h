@@ -102,6 +102,7 @@ public:
     // Draws given a depth buffer, of which without colour; draws whose faces
     // were all culled (front and back); depth textures resized with a copy.
     unsigned depthDraws = 0, depthOnlyDraws = 0, culledDraws = 0, depthResized = 0;
+    unsigned embeddedDepthDraws = 0; // Colourless draws with Gnm's embedded VS: not drawn.
     std::string depthReport() const;
     // The Metal format of a colour target (CB_COLOR0_INFO FORMAT, NUMBER_TYPE,
     // COMP_SWAP), MTLPixelFormatInvalid when unsupported: 8_8_8_8 UNORM/SRGB
@@ -154,6 +155,7 @@ private:
     // `format`: CB FORMAT (also its T# data format) of a colour target.
     struct Target { id<MTLTexture> texture; bool fresh; unsigned format = 0xa; };
     std::map<std::uint64_t, Target> depthTargets_;
+    std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.
     // By compare function (0-7) and write: 16 states at most.
     std::map<unsigned, id<MTLDepthStencilState>> depthStates_;
     id<MTLDepthStencilState> depthState(unsigned function, bool write);
