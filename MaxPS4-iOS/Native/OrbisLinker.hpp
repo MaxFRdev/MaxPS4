@@ -262,9 +262,10 @@ private:
             s.value = read(p + 8, 8); s.size = read(p + 16, 8); s.defined = section != 0; s.local = bind == 0; s.type = type;
             if (!i) { require(read(p, 8) == 0 && s.value == 0 && s.size == 0, "invalid null symbol"); out.symbols.push_back(s); continue; }
             // Local STT_SECTION symbols (ordinary ELF bookkeeping) are kept as locals.
-            // Defined symbols may be hidden or protected (system PRX); imports are default.
+            // Symbols may be hidden or protected (system PRX), imports too: Call of Duty's
+            // default.elf imports _Unwind_Resume as protected.
             require(bind <= 2 && (type == 0 || type == 1 || type == 2 || type == 6 || (type == 3 && bind == 0)) &&
-                    (p[5] & ~3) == 0 && (!p[5] || section != 0) && section < 0xff00,
+                    (p[5] & ~3) == 0 && section < 0xff00,
                     "unsupported symbol binding/type/visibility/section: " + name + " bind=" + std::to_string(bind) +
                     " type=" + std::to_string(type) + " visibility=" + std::to_string(p[5]) +
                     " section=" + std::to_string(section));

@@ -190,9 +190,9 @@ int main(int argc, char** argv) {
     check(!Linker::link(batch(),{{id,0x201000}},hleImage,diagnostic),"HLE/export collision rejected");
     check(!Linker::link(hleBatch,{{id,0x202000}},hleImage,diagnostic),"HLE data target refused");
     id.libraryVersion=2; check(!Linker::link(hleBatch,{{id,0x201000}},hleImage,diagnostic),"HLE version mismatch unresolved");
-    // System PRX exports may be protected (visibility 3); imports may not.
+    // System PRX exports and imports may be protected (visibility 3).
     provider[0x81d]=3; check(Linker::link(batch(),{},hleImage,diagnostic),diagnostic.c_str()); provider[0x81d]=0;
-    consumer[0x81d]=3; check(!Linker::link(batch(),{},hleImage,diagnostic),"import visibility refused"); consumer=original;
+    consumer[0x81d]=3; check(Linker::link(batch(),{},hleImage,diagnostic),diagnostic.c_str()); consumer=original;
     // HLE ignores the module version (games import libkernel 1.1 for the same functions).
     id.libraryVersion=1; id.moduleVersion=0x909;
     check(Linker::link(hleBatch,{{id,0x201000}},hleImage,diagnostic) && value(hleImage,0x102000)==0x201000,
