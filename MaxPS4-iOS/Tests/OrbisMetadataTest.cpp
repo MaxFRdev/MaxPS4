@@ -74,6 +74,9 @@ int main(int argc, char** argv) {
         bad=good; put(bad,type,16,2); put(bad,0x1000,24); assert(m.parse(bad.data(),bad.size()));
     }
     bad=good; put(bad,0xdead,0xc08); assert(m.parse(bad.data(),bad.size()) && !m.relocations[0].supported);
+    // R_RELATIVE with a symbol index it does not use, as in Call of Duty's libc.prx.
+    bad=good; put(bad,(uint64_t{1}<<32)|8,0xc08);
+    assert(m.parse(bad.data(),bad.size()) && m.relocations[0].type==8 && m.relocations[0].symbol==1 && m.relocations[0].supported);
     bad=good; put(bad,UINT64_MAX,0xc00); put(bad,uint64_t{UINT32_MAX}<<32,0xc08);
     assert(m.parse(bad.data(),bad.size()) && m.relocations[0].type==0 && m.relocations[0].supported);
     // Bounded deterministic malformed-header coverage.

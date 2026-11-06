@@ -49,6 +49,13 @@ int main(int argc, char** argv) {
     put(consumer,0x900,0x20fc); reject(batch(),"relocation target"); consumer=original;
     put(consumer,0x908,(uint64_t{1}<<32)|99); reject(batch(),"unsupported x86-64 relocation"); consumer=original;
     put(consumer,0x908,(uint64_t{99}<<32)|7); reject(batch(),"invalid relocation symbol"); consumer=original;
+    {   // R_RELATIVE ignores a symbol index: base + addend.
+        put(consumer,0x908,(uint64_t{1}<<32)|8); put(consumer,0x910,0x1234);
+        Linker::Image relative;
+        check(Linker::link(batch(),{},relative,diagnostic),diagnostic.c_str());
+        check(value(relative,0x102000)==0x101234,"R_RELATIVE with a symbol index");
+        consumer=original;
+    }
     reject(batch(),"memory budget",1023); reject(batch(),"budget exceeds",513*1024*1024);
     put(consumer,64+56+4,4,4); reject(batch(),"relocation target"); consumer=original;
     put(consumer,64+4,7,4); reject(batch(),"writable executable"); consumer=original;
