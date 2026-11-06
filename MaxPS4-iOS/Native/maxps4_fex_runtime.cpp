@@ -112,7 +112,7 @@ public:
     // Per guest thread: the HLE call in progress, or the last one and when it
     // returned, so a stalled game shows where each of its threads waits.
     struct Activity {
-        std::atomic<uint64_t> thread {0}, since {0}, returned {0};
+        std::atomic<uint64_t> thread {0}, since {0}, returned {0}, rsp {0}, rbp {0};
         std::atomic<uint32_t> service {0};
         std::atomic<bool> inside {false};
     };
@@ -225,7 +225,10 @@ public:
                 }
             }
             Activity* slot = activity_slot();
-            if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns(); slot->inside = true; }
+            if (slot) {
+                slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns();
+                slot->rsp = r[x86::REG_RSP]; slot->rbp = r[x86::REG_RBP]; slot->inside = true;
+            }
             const uint32_t stub = static_cast<uint32_t>(orbis) - maxps4::missing_import_token;
             if (static_cast<uint32_t>(orbis) >= maxps4::missing_import_token) {
                 if (missing_imports && stub < missing_imports->size()) {
@@ -2391,13 +2394,34 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         const double seconds = double(now - std::min(now, a.since.load())) / 1e9;
         const auto returned = (unsigned long long)a.returned.load();
         char line[192];
-        if (a.inside.load())
-            std::snprintf(line, sizeof line, "thread %llu : dans %s depuis %.1f s (%llu appels)\n",
-                (unsigned long long)thread, name, seconds, returned);
-        else
+        if (!a.inside.load()) {
             std::snprintf(line, sizeof line, "thread %llu : code du jeu depuis %.1f s, dernier %s (%llu appels)\n",
                 (unsigned long long)thread, seconds, name, returned);
+            out += line;
+            continue;
+        }
+        std::snprintf(line, sizeof line, "thread %llu : dans %s depuis %.1f s (%llu appels)",
+            (unsigned long long)thread, name, seconds, returned);
         out += line;
+        // Where the game called from: the return address, then the frame pointer
+        // chain (the stack stays put while the thread is inside the service).
+        auto relative = [&](uint64_t rip) { return rip >= engine->relocation ? rip - engine->relocation : rip; };
+        uint64_t words[2] {};
+        const char* separator = " depuis";
+        if (engine->system_memory.read(a.rsp.load(), words, 8)) {
+            std::snprintf(line, sizeof line, "%s 0x%llx", separator, (unsigned long long)relative(words[0]));
+            out += line;
+            separator = " <";
+        }
+        uint64_t frame = a.rbp.load();
+        for (int depth = 0; depth < 6 && frame && engine->system_memory.read(frame, words, 16); ++depth) {
+            std::snprintf(line, sizeof line, "%s 0x%llx", separator, (unsigned long long)relative(words[1]));
+            out += line;
+            separator = " <";
+            if (words[0] <= frame) break; // Frames only go up the stack.
+            frame = words[0];
+        }
+        out += "\n";
     }
     const size_t n = std::min(capacity - 1, out.size());
     std::memcpy(text, out.data(), n);
