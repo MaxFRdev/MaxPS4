@@ -5,7 +5,7 @@
 // per-draw copies of the ranges PM4ResourceScan finds; code is read through
 // a GCNMemory when a pipeline is built. Each colour target address owns a
 // Metal texture (BGRA8 or RGBA8 per COMP_SWAP), created cleared and kept
-// across draws. Pipelines are cached by program addresses, the fetch-shader
+// across draws (any format targetFormat() accepts). Pipelines are cached by program addresses, the fetch-shader
 // SGPR pair (s[0:1]), PS inputs, formats and blend. Limits as the software
 // renderer: colour target 0 only, instance 0. Each depth buffer address owns
 // a Depth32Float texture (any DB_Z_INFO format, no stencil), kept across draws
@@ -103,6 +103,14 @@ public:
     // were all culled (front and back); depth textures resized with a copy.
     unsigned depthDraws = 0, depthOnlyDraws = 0, culledDraws = 0, depthResized = 0;
     std::string depthReport() const;
+    // The Metal format of a colour target (CB_COLOR0_INFO FORMAT, NUMBER_TYPE,
+    // COMP_SWAP), MTLPixelFormatInvalid when unsupported: 8_8_8_8 UNORM/SRGB
+    // (swap 0 or 1) or SNORM, 16_16_16_16 and 16_16 and 16 FLOAT/UNORM/SNORM,
+    // 32 32_32 32_32_32_32 FLOAT, 2_10_10_10 UNORM, 10_11_11 FLOAT, 8_8 and
+    // 8 UNORM/SNORM; others swap 0 only.
+    static MTLPixelFormat targetFormat(unsigned format, unsigned number, unsigned swap);
+    // Bytes per pixel of a colour target format (0 for others).
+    static unsigned bytesPerPixel(MTLPixelFormat format);
     // f(address, texture) for every colour target.
     template <class F> void forEachTarget(F&& f) const { for (const auto& [address, t] : targets_) f(address, t.texture); }
     std::string error;
@@ -143,7 +151,8 @@ public:
 private:
     // Programs, fetch SGPRs, PS inputs, colour format, blend, mask, depth format.
     using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned, unsigned>;
-    struct Target { id<MTLTexture> texture; bool fresh; };
+    // `format`: CB FORMAT (also its T# data format) of a colour target.
+    struct Target { id<MTLTexture> texture; bool fresh; unsigned format = 0xa; };
     std::map<std::uint64_t, Target> depthTargets_;
     // By compare function (0-7) and write: 16 states at most.
     std::map<unsigned, id<MTLDepthStencilState>> depthStates_;

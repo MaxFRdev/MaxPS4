@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
+#include <tuple>
 #include <dispatch/dispatch.h>
 #include <unistd.h>
 using namespace maxps4::gpu;
@@ -379,6 +380,51 @@ int main() {
                 check("cull both faces", both, green, 0, 0);
             }
             std::puts("PASS depth test, depth-only pre-pass with no pixel program, depth clear, face culling (both windings, flipped Y)");
+            // Other colour target formats: the green triangle into 16_16_16_16 FLOAT
+            // (8 bytes a pixel, halves 0, 1, 0, 1) and 2_10_10_10 UNORM (G and A all ones).
+            for (const auto& [info, expected, bytes] : {std::tuple<std::uint32_t, std::uint64_t, unsigned>{(0xcu << 2) | (7u << 8), 0x3c0000003c000000ull, 8},
+                                                       {0x9u << 2, 0xc00ffc00ull, 4}}) {
+                Scene scene;
+                scene.st.set(0x69, 0x31c, {info});
+                scene.ps(greenPS); scene.triangle(0.5f, forward);
+                PM4DrawStats stats;
+                PM4DrawCollector formatCollector(scene.arena.memory, stats);
+                PM4MetalRenderer renderer(device, scene.arena.memory, nil, 0);
+                id<MTLCommandBuffer> formatCommands = [queue commandBuffer];
+                // Without otherTargetFormats the collector refuses the format.
+                formatCollector.execute(scene.st.words.data(), scene.st.words.size(), [&](const PM4Draw&) { assert(false); });
+                assert(stats.failed == 1 && stats.error == "colour target format");
+                PM4DrawStats otherStats;
+                PM4DrawCollector otherCollector(scene.arena.memory, otherStats);
+                otherCollector.otherTargetFormats = true;
+                otherCollector.execute(scene.st.words.data(), scene.st.words.size(), [&](const PM4Draw& d) {
+                    if (renderer.encode(d, formatCommands)) ++otherStats.rendered;
+                    else otherStats.fail(renderer.error);
+                });
+                if (!otherStats.error.empty()) std::printf("target format 0x%x: %s\n", info, otherStats.error.c_str());
+                assert(otherStats.failed == 0 && otherStats.rendered == 1);
+                id<MTLTexture> texture = renderer.target(depthTarget);
+                assert(texture && PM4MetalRenderer::bytesPerPixel(texture.pixelFormat) == bytes);
+                id<MTLBuffer> out = [device newBufferWithLength:width * height * bytes options:MTLResourceStorageModeShared];
+                id<MTLBlitCommandEncoder> blit = [formatCommands blitCommandEncoder];
+                [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                           sourceSize:MTLSizeMake(width, height, 1) toBuffer:out destinationOffset:0
+               destinationBytesPerRow:width * bytes destinationBytesPerImage:width * height * bytes];
+                [blit endEncoding];
+                [formatCommands commit]; [formatCommands waitUntilCompleted];
+                assert(formatCommands.status == MTLCommandBufferStatusCompleted && !formatCommands.error);
+                for (unsigned n = 0; n < width * height; ++n) {
+                    std::uint64_t pixel = 0;
+                    std::memcpy(&pixel, static_cast<const std::uint8_t*>(out.contents) + n * bytes, bytes);
+                    if (pixel != expected) std::printf("target format 0x%x pixel %u: 0x%llx\n", info, n, (unsigned long long)pixel);
+                    assert(pixel == expected);
+                }
+            }
+            assert(PM4MetalRenderer::targetFormat(0xa, 0, 1) == MTLPixelFormatBGRA8Unorm);
+            assert(PM4MetalRenderer::targetFormat(0xa, 6, 0) == MTLPixelFormatRGBA8Unorm_sRGB);
+            assert(PM4MetalRenderer::targetFormat(0xc, 7, 1) == MTLPixelFormatInvalid);
+            assert(PM4MetalRenderer::targetFormat(0xa, 4, 0) == MTLPixelFormatInvalid); // UINT
+            std::puts("PASS colour targets in 16_16_16_16 FLOAT and 2_10_10_10 UNORM");
         }
         // Blend the same foreground/background with all supported operations.
         // Compare GPU pixels to fixed expected bytes and the software renderer.

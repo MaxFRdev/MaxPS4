@@ -374,7 +374,7 @@ bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> c
     Target* target = nullptr;
     for (auto& [at, candidate] : targets_) {
         if (!candidate.texture) continue;
-        const std::uint64_t row = candidate.texture.width * 4, length = row * candidate.texture.height;
+        const std::uint64_t row = candidate.texture.width * bytesPerPixel(candidate.texture.pixelFormat), length = row * candidate.texture.height;
         if (!overlaps(at, length)) continue;
         if (target) return refuse("deux cibles", address, bytes);
         if (at != address) return refuse("cible decalee", at, bytes);
@@ -397,7 +397,7 @@ bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> c
         if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
         id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
         if (!blit) return false;
-        const std::uint64_t row = target->texture.width * 4;
+        const std::uint64_t row = target->texture.width * bytesPerPixel(target->texture.pixelFormat);
         [blit copyFromBuffer:fill->second sourceOffset:0 sourceBytesPerRow:row sourceBytesPerImage:bytes
                   sourceSize:MTLSizeMake(target->texture.width, bytes / row, 1)
                    toTexture:target->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
@@ -521,7 +521,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     };
     for (const auto& output : outputs) subtractTexture(output.base, std::uint64_t(output.pitch) * output.height * 4);
     for (const auto& [address, target] : targets_) if (target.texture)
-        subtractTexture(address, std::uint64_t(target.texture.width) * target.texture.height * 4);
+        subtractTexture(address, std::uint64_t(target.texture.width) * target.texture.height * bytesPerPixel(target.texture.pixelFormat));
     std::vector<PendingGuestWrite> pending;
     for (const auto& span : guestWrites) {
         std::uint64_t at = 0;
@@ -535,7 +535,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     if (!blit) return fail("compute blit encoder");
     for (auto& [address, target] : targets_) {
         std::uint64_t at = 0;
-        const std::uint64_t row = target.texture.width * 4, length = row * target.texture.height;
+        const std::uint64_t row = target.texture.width * bytesPerPixel(target.texture.pixelFormat), length = row * target.texture.height;
         if (!target.texture || target.fresh || !locate(address, length, at)) continue;
         [blit copyFromTexture:target.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
                    sourceSize:MTLSizeMake(target.texture.width, target.texture.height, 1)
@@ -564,7 +564,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     if (!blit) return fail("compute blit encoder");
     for (auto& [address, target] : targets_) {
         std::uint64_t at = 0;
-        const std::uint64_t row = target.texture.width * 4, length = row * target.texture.height;
+        const std::uint64_t row = target.texture.width * bytesPerPixel(target.texture.pixelFormat), length = row * target.texture.height;
         if (!target.texture || !stored(address, length) || !locate(address, length, at)) continue;
         [blit copyFromBuffer:memory sourceOffset:at sourceBytesPerRow:row sourceBytesPerImage:length
                   sourceSize:MTLSizeMake(target.texture.width, target.texture.height, 1)
@@ -760,11 +760,11 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         return decoded ? decoded : miss(4, 0);
     }
     // A colour target lives only in its Metal texture, never written back to
-    // guest memory: an 8_8_8_8 T# at its address reads it there (an emulator
-    // renders its console's frame, then draws that frame scaled on screen).
-    if (dfmt == 10) {
-        const auto rendered = targets_.find(base);
-        id<MTLTexture> texture = rendered == targets_.end() ? nil : rendered->second.texture;
+    // guest memory: a T# at its address in its format reads it there (an
+    // emulator renders its console's frame, then draws that frame scaled on
+    // screen; a 3D game samples its 16-bit float scene to tone-map it).
+    if (const auto rendered = targets_.find(base); rendered != targets_.end() && rendered->second.format == dfmt) {
+        id<MTLTexture> texture = rendered->second.texture;
         if (texture && texture != drawing && !rendered->second.fresh && texture.width >= width && texture.height >= height) {
             ++targetReads;
             return texture;
@@ -833,10 +833,16 @@ id<MTLSamplerState> PM4MetalRenderer::nativeSampler(const std::array<std::uint32
 
 bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     error.clear();
-    if (d.colour && d.swap > 1) return fail("colour target component swap " + std::to_string(d.swap));
     if (!d.colour && !d.depthTarget) return fail("draw with neither colour nor depth");
     if ((d.vte & 0x3f) != 0x3f) return fail("viewport without scale and offset");
-    const MTLPixelFormat format = !d.colour ? MTLPixelFormatInvalid : d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
+    const MTLPixelFormat format = d.colour ? targetFormat(d.format, d.number, d.swap) : MTLPixelFormatInvalid;
+    if (d.colour && format == MTLPixelFormatInvalid)
+        return fail(d.format == 0xa && d.number == 0 ? "colour target component swap " + std::to_string(d.swap) :
+                    "colour target format " + std::to_string(d.format) + " number " + std::to_string(d.number) + " swap " + std::to_string(d.swap));
+    // Apple GPUs do not blend 32-bit float targets.
+    if (d.colour && ((d.blend >> 30) & 1) &&
+        (format == MTLPixelFormatR32Float || format == MTLPixelFormatRG32Float || format == MTLPixelFormatRGBA32Float))
+        return fail("blending into a 32-bit float colour target");
     const MTLPixelFormat depthFormat = d.depthTarget ? MTLPixelFormatDepth32Float : MTLPixelFormatInvalid;
     if (d.scissor[2] <= d.scissor[0] || d.scissor[3] <= d.scissor[1]) return true; // nothing visible
     // Front and back faces culled: no triangle is left (rectangles are never culled).
@@ -909,7 +915,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         // These colour targets are rendered, sampled and copied only by the
         // GPU. CPU-visible shared storage is unnecessary for this path.
         descriptor.storageMode = MTLStorageModePrivate;
-        target = {[device_ newTextureWithDescriptor:descriptor], true};
+        target = {[device_ newTextureWithDescriptor:descriptor], true, d.format};
         if (!target.texture) return fail("colour target texture");
     }
     Target* depth = nullptr;
@@ -1113,6 +1119,43 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
 id<MTLTexture> PM4MetalRenderer::target(std::uint64_t address) const {
     const auto found = targets_.find(address);
     return found == targets_.end() ? nil : found->second.texture;
+}
+
+MTLPixelFormat PM4MetalRenderer::targetFormat(unsigned format, unsigned number, unsigned swap) {
+    if (format == 0xa && swap == 1) // 8_8_8_8 with COMP_SWAP ALT: BGRA in memory.
+        return number == 0 ? MTLPixelFormatBGRA8Unorm : number == 6 ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatInvalid;
+    if (swap != 0) return MTLPixelFormatInvalid;
+    switch (format) {
+    case 0xa: return number == 0 ? MTLPixelFormatRGBA8Unorm : number == 1 ? MTLPixelFormatRGBA8Snorm :
+                     number == 6 ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatInvalid;
+    case 0xc: return number == 7 ? MTLPixelFormatRGBA16Float : number == 0 ? MTLPixelFormatRGBA16Unorm :
+                     number == 1 ? MTLPixelFormatRGBA16Snorm : MTLPixelFormatInvalid;
+    case 0x5: return number == 7 ? MTLPixelFormatRG16Float : number == 0 ? MTLPixelFormatRG16Unorm :
+                     number == 1 ? MTLPixelFormatRG16Snorm : MTLPixelFormatInvalid;
+    case 0x2: return number == 7 ? MTLPixelFormatR16Float : number == 0 ? MTLPixelFormatR16Unorm :
+                     number == 1 ? MTLPixelFormatR16Snorm : MTLPixelFormatInvalid;
+    case 0x4: return number == 7 ? MTLPixelFormatR32Float : MTLPixelFormatInvalid;
+    case 0xb: return number == 7 ? MTLPixelFormatRG32Float : MTLPixelFormatInvalid;
+    case 0xe: return number == 7 ? MTLPixelFormatRGBA32Float : MTLPixelFormatInvalid;
+    case 0x9: return number == 0 ? MTLPixelFormatRGB10A2Unorm : MTLPixelFormatInvalid;  // R in the low 10 bits
+    case 0x6: return number == 7 ? MTLPixelFormatRG11B10Float : MTLPixelFormatInvalid;  // R in the low 11 bits
+    case 0x3: return number == 0 ? MTLPixelFormatRG8Unorm : number == 1 ? MTLPixelFormatRG8Snorm : MTLPixelFormatInvalid;
+    case 0x1: return number == 0 ? MTLPixelFormatR8Unorm : number == 1 ? MTLPixelFormatR8Snorm : MTLPixelFormatInvalid;
+    default: return MTLPixelFormatInvalid;
+    }
+}
+
+unsigned PM4MetalRenderer::bytesPerPixel(MTLPixelFormat format) {
+    switch (format) {
+    case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Snorm: return 1;
+    case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Snorm: case MTLPixelFormatR16Float:
+    case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: return 2;
+    case MTLPixelFormatRGBA16Float: case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRGBA16Snorm:
+    case MTLPixelFormatRG32Float: return 8;
+    case MTLPixelFormatRGBA32Float: return 16;
+    case MTLPixelFormatInvalid: return 0;
+    default: return 4; // 8_8_8_8 in any order or number, RG16, R32, RGB10A2, RG11B10.
+    }
 }
 
 id<MTLTexture> PM4MetalRenderer::depthTarget(std::uint64_t address) const {
