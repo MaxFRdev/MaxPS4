@@ -14,6 +14,13 @@
 #include "SelfImage.hpp"
 
 namespace maxps4 {
+// A small eboot.bin that names /app0/default.elf only starts it with
+// sceSystemServiceLoadExec (Call of Duty: Modern Warfare Remastered's is 17 KiB).
+inline bool orbisLauncherOfDefaultElf(const uint8_t* bytes, size_t size) {
+    static const char target[] = "/app0/default.elf";
+    if (size > (size_t{1} << 20)) return false;
+    return std::search(bytes, bytes + size, target, target + sizeof target - 1) != bytes + size;
+}
 class OrbisMetadata {
 public:
     // Files and memory plans up to 512 MiB; tables of sections and dynamic

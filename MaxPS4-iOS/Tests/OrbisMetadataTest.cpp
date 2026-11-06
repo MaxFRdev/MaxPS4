@@ -74,6 +74,14 @@ int main(int argc, char** argv) {
         bad=good; put(bad,type,16,2); put(bad,0x1000,24); assert(m.parse(bad.data(),bad.size()));
     }
     bad=good; put(bad,0xdead,0xc08); assert(m.parse(bad.data(),bad.size()) && !m.relocations[0].supported);
+    {   // A small program naming default.elf is a launcher, a large one is the game.
+        const std::string text = "xx/app0/default.elf";
+        std::vector<uint8_t> launcher(text.begin(), text.end());
+        assert(maxps4::orbisLauncherOfDefaultElf(launcher.data(), launcher.size()));
+        launcher.resize((size_t{1} << 20) + 1);
+        assert(!maxps4::orbisLauncherOfDefaultElf(launcher.data(), launcher.size()));
+        assert(!maxps4::orbisLauncherOfDefaultElf(good.data(), good.size()));
+    }
     // R_RELATIVE with a symbol index it does not use, as in Call of Duty's libc.prx.
     bad=good; put(bad,(uint64_t{1}<<32)|8,0xc08);
     assert(m.parse(bad.data(),bad.size()) && m.relocations[0].type==8 && m.relocations[0].symbol==1 && m.relocations[0].supported);

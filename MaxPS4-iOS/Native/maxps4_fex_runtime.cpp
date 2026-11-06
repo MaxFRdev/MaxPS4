@@ -1872,7 +1872,19 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
                 if (entry.path().extension() == ".prx") prx[entry.path().filename().string()] = entry.path();
         }
         for (const auto& [name, path] : prx) files.push_back(path);
-        files.push_back(!update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin");
+        std::filesystem::path program = !update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin";
+        // No sceSystemServiceLoadExec: a launcher is replaced by what it would start.
+        {
+            std::ifstream in(program, std::ios::binary);
+            const std::vector<uint8_t> launcher{std::istreambuf_iterator<char>(in), {}};
+            if (maxps4::orbisLauncherOfDefaultElf(launcher.data(), launcher.size())) {
+                const auto next = program.parent_path() / "default.elf";
+                if (std::filesystem::exists(next, error)) program = next;
+                else if (std::filesystem::exists(root / "default.elf", error)) program = root / "default.elf";
+            }
+        }
+        const std::string programName = program.filename().string();
+        files.push_back(program);
         // Providers first (the linker wants a module's dependencies before it).
         std::vector<Module> modules(files.size());
         for (size_t i = 0; i < files.size(); ++i) {
@@ -1922,7 +1934,7 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
             bias += ((end + 0xfffff) & ~uint64_t{0xfffff}) + 0x100000;
         }
         const int32_t prepared = maxps4_fex_engine_prepare_orbis_general(engine, table.data(), table.size(),
-                                                                         "eboot.bin", relocation, diagnostic, capacity);
+                                                                         programName.c_str(), relocation, diagnostic, capacity);
         if (prepared) return prepared;
         const int64_t mounted = maxps4_fex_engine_mount_app0(engine, root.string().c_str());
         if (mounted) return int32_t(mounted);
