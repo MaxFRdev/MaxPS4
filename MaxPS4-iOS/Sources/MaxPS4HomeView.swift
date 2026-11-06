@@ -247,6 +247,7 @@ struct MaxPS4HomeView: View {
                 secondaryAction(icon: "bolt.fill", title: "JIT et StikDebug", subtitle: "Activation et état de préparation") {
                     showingJIT = true
                 }
+                MaxPS4EntitlementsCard()
                 VStack(alignment: .leading, spacing: 14) {
                     Label("Stockage", systemImage: "internaldrive").font(.headline)
                     // Game folders (found in Jeux or chosen with Jouer) count too, not only imported files.

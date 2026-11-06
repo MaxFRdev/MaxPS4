@@ -181,3 +181,11 @@
 "Mode développeur désactivé." = "Modalità sviluppatore disattivata.";
 "Contenus additionnels" = "Contenuti aggiuntivi";
 "Afficher les images par seconde" = "Mostra fotogrammi al secondo";
+"Droits de l’application" = "Diritti dell’app";
+"Débogage (JIT)" = "Debug (JIT)";
+"Grand espace d’adresses" = "Ampio spazio di indirizzi";
+"Mémoire augmentée" = "Memoria aumentata";
+"Limite de RAM iOS : %lld Mio" = "Limite RAM iOS: %lld MiB";
+"Actif" = "Attivo";
+"Absent" = "Assente";
+"Inconnu" = "Sconosciuto";

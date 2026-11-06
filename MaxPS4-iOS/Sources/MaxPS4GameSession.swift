@@ -3,7 +3,6 @@ import Combine
 import Metal
 #if MAXPS4_FEX_APP
 import Darwin
-import os
 import AVFoundation
 
 // Game audio: an AVAudioSourceNode pulls the engine's mixed AudioOut ports
@@ -193,17 +192,11 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let spare = maxps4_fex_engine_spare_address_space(engine) >> 20
         return "Mémoire : \(zone) · fenêtre 0x\(String(window, radix: 16)) (\(gib(windowSize)) Gio) · encore libre après elle : \(spare) Mio\n\(memoryLimit())"
     }
-    // What the app uses and how far iOS lets it go: their sum is the limit, which
-    // the increased memory limit entitlement raises when the signature keeps it.
+    // The sum of use and what iOS still allows is the limit, which the increased
+    // memory limit entitlement raises when the signature keeps it.
     private func memoryLimit() -> String {
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<natural_t>.stride)
-        let status = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
-        }
-        guard status == KERN_SUCCESS else { return "RAM : inconnue" }
-        let used = UInt64(info.phys_footprint), left = UInt64(os_proc_available_memory())
-        return "RAM : \(used >> 20) Mio utilisés · limite iOS \((used + left) >> 20) Mio"
+        guard let memory = MaxPS4Entitlements.memory() else { return "RAM : inconnue" }
+        return "RAM : \(memory.used) Mio utilisés · limite iOS \(memory.limit) Mio"
     }
     // What the game printed last (its own error messages), invalid UTF-8 replaced.
     private func console(_ engine: OpaquePointer) -> String {
