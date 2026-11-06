@@ -408,7 +408,7 @@ private:
                 require(kind == 0 || sym < symbols.size() || (sym == 0 && symbols.empty()), "Index RELA hors SYMTAB");
                 bool supported = kind == 0 || kind == 1 || kind == 6 || kind == 7 || kind == 8;
                 Relocation r{read(p,8),sym,addend,kind,supported};
-                if (kind == 8) require(sym == 0, "R_RELATIVE avec symbole");
+                // R_RELATIVE ignores its symbol index (ELF spec); real SCE libc.prx sets it.
                 // PT_SCE_RELRO is written while relocating, then becomes read-only.
                 if (kind != 0 && !covered(r.target,8,2) && !relro(r.target,8)) {
                     std::ostringstream why;

@@ -167,7 +167,7 @@ int PS4DynamicLinker::load(GuestELF& image, const uint8_t* file, size_t length, 
                 if (type == 8) {
                     // Fixed logical-address model: load bias is zero. Negative
                     // addends are not valid guest pointers in this model.
-                    if (index || (a >> 63) || !parsed.translate(a, 1, 4))
+                    if ((a >> 63) || !parsed.translate(a, 1, 4)) // symbol index ignored
                         return fail(-ENOEXEC, "invalid R_RELATIVE");
                     value = a;
                 } else {
