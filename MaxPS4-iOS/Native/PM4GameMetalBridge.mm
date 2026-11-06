@@ -94,7 +94,7 @@ struct GameMetalState {
             computeError.empty() ? "" : " : ", computeError.c_str(), renderer.kernelsBuilt, renderer.targetsSynced,
             renderer.lastDispatchNote().empty() ? "aucun détail" : renderer.lastDispatchNote().c_str(),
             (centre >> (centreBGRA ? 16 : 0)) & 0xff, (centre >> 8) & 0xff, (centre >> (centreBGRA ? 0 : 16)) & 0xff, centre >> 24, targetPixels.c_str(),
-            samples.c_str(), lastDraws.empty() ? " aucun" : lastDraws.c_str(), renderer.programListings.c_str(), (stats.lastSkipped + stats.depthReport()).c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
+            samples.c_str(), lastDraws.empty() ? " aucun" : lastDraws.c_str(), renderer.programListings.c_str(), (stats.lastSkipped + stats.depthReport() + renderer.depthReport()).c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
             encodeMs, gpuText(renderGpuMs), waitMs, copyMs, gpuText(copyGpuMs), native,
             // Why rendering stopped (the draw that failed is in no batch list).
             error.empty() ? @"" : [NSString stringWithFormat:@"\nÉchec Metal : %s", error.c_str()]];
@@ -105,7 +105,9 @@ struct GameMetalState {
           collector(memory, stats), renderer(device, memory, nil, 0, nativeTextures,
               writer ? std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>([writer](uint64_t a, const void* d, size_t n, uint64_t* f) { return int32_t(writer(a,d,n,f)); }) :
                        std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>{}), device(device),
-          queue([device newCommandQueue]), displayEvent([device newSharedEvent]), nativeTextures(nativeTextures) {}
+          queue([device newCommandQueue]), displayEvent([device newSharedEvent]), nativeTextures(nativeTextures) {
+        collector.depthOnlyDraws = true; // Depth pre-passes and clears reach the renderer.
+    }
 };
 void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::time_point started,
                        id<MTLTexture> source, const std::vector<std::pair<uint64_t, id<MTLTexture>>>& targets,

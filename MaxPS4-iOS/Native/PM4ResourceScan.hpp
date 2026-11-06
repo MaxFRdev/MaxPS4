@@ -97,8 +97,9 @@ public:
             std::copy(words, words + count, load.words.begin());
             scalarLoads_.push_back(load);
         };
-        wave.run(d.ps);
-        psError_ = wave.error;
+        // A depth-only draw may have no pixel program.
+        if (d.ps) wave.run(d.ps);
+        psError_ = d.ps ? wave.error : std::string();
     }
     // Sorted, with overlapping or nearly adjacent (4 KiB) ranges merged.
     wave.resource = {}; // Do not retain the callback to this scan's stack.

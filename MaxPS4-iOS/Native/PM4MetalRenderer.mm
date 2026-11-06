@@ -57,9 +57,9 @@ std::string inputKey(const PM4Draw& d) {
 }
 }
 
-id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format) {
+id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format, MTLPixelFormat depth) {
     const PipelineKey key{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
-                          (d.blend >> 30) & 1 ? d.blend : 0u, d.mask};
+                          (d.blend >> 30) & 1 ? d.blend : 0u, d.mask, unsigned(depth)};
     if (asyncPipelines) {
         std::lock_guard<std::mutex> lock(async_->mutex);
         const auto ready = async_->ready.find(key);
@@ -90,7 +90,10 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     for (unsigned k = 0; k < 16; ++k) psOptions.userData[k] = d.psUser[k];
     compiling = 3;
     const auto vs = translateGCN(code_, d.vs, vsOptions);
-    const auto ps = translateGCN(code_, d.ps, psOptions);
+    // A depth-only draw may have no pixel program (Gnm's null PS): an empty one.
+    GCNTranslation ps;
+    if (d.ps || d.colour) ps = translateGCN(code_, d.ps, psOptions);
+    else ps.source = "GCN_FN void ps_program(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) { (void)L; (void)M; (void)Q; }\n";
     compiling = 0;
     if (!vs) { fail("VS translation: " + vs.error); return nil; }
     if (!ps) { fail("PS translation: " + ps.error); return nil; }
@@ -112,11 +115,14 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     }
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
     NSError* failure = nil;
+    descriptor.depthAttachmentPixelFormat = depth;
+    // Without colour, the pixel program only matters when it may discard.
+    const bool fragment = d.colour || ps.mayKill;
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
     color.pixelFormat = format;
     color.writeMask = ((d.mask & 1) ? MTLColorWriteMaskRed : 0) | ((d.mask & 2) ? MTLColorWriteMaskGreen : 0) |
                       ((d.mask & 4) ? MTLColorWriteMaskBlue : 0) | ((d.mask & 8) ? MTLColorWriteMaskAlpha : 0);
-    if ((d.blend >> 30) & 1) {
+    if (d.colour && ((d.blend >> 30) & 1)) {
         const auto blend = decodePM4Blend(d.blend);
         auto alpha = blend.alpha;
         // Saturation has an alpha factor of one, independently of RGB.
@@ -180,7 +186,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                   if (pending != async->pending.end()) pending->second.stage = "render pipeline creation"; }
                 MTLRenderPipelineDescriptor* own = [descriptor copy];
                 own.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
-                own.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
+                own.fragmentFunction = fragment ? [library newFunctionWithName:@"gcn_fragment"] : nil;
                 [device newRenderPipelineStateWithDescriptor:own completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
                     finished(state, failed, fast);
                 }];
@@ -209,7 +215,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     id<MTLLibrary> library = this->library(source);
     if (!library) return nil;
     descriptor.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
-    descriptor.fragmentFunction = [library newFunctionWithName:@"gcn_fragment"];
+    descriptor.fragmentFunction = fragment ? [library newFunctionWithName:@"gcn_fragment"] : nil;
     compiling = 2;
     id<MTLRenderPipelineState> state = [device_ newRenderPipelineStateWithDescriptor:descriptor error:&failure];
     compiling = 0;
@@ -388,7 +394,7 @@ bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> c
         fill = fills_.insert_or_assign(value, buffer).first;
     }
     if (target) {
-        if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; }
+        if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
         id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
         if (!blit) return false;
         const std::uint64_t row = target->texture.width * 4;
@@ -523,7 +529,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
         pending.push_back({span.base, span.size, std::size_t(at), memory});
     }
     if (!pending.empty() && !writeGuest_) return fail("compute guest-memory writeback is unavailable");
-    if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; }
+    if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
     // Colour targets live in their textures: the kernel reads their current contents.
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
     if (!blit) return fail("compute blit encoder");
@@ -627,7 +633,7 @@ void PM4MetalRenderer::endBatch() {
     if (visibility_ && visibilityCount_) { lastVisibility = visibility_; lastVisibilityCount = visibilityCount_; }
     visibility_ = nil; visibilityCount_ = 0;
     [encoder_ endEncoding];
-    encoder_ = nil; commands_ = nil; attachment_ = nil; batching_ = false;
+    encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; batching_ = false;
 }
 
 void PM4MetalRenderer::copyGuest(std::uint64_t address, std::uint8_t* out, std::uint64_t size) const {
@@ -827,12 +833,16 @@ id<MTLSamplerState> PM4MetalRenderer::nativeSampler(const std::array<std::uint32
 
 bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     error.clear();
-    if (d.swap > 1) return fail("colour target component swap " + std::to_string(d.swap));
+    if (d.colour && d.swap > 1) return fail("colour target component swap " + std::to_string(d.swap));
+    if (!d.colour && !d.depthTarget) return fail("draw with neither colour nor depth");
     if ((d.vte & 0x3f) != 0x3f) return fail("viewport without scale and offset");
-    const MTLPixelFormat format = d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
+    const MTLPixelFormat format = !d.colour ? MTLPixelFormatInvalid : d.swap == 1 ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatRGBA8Unorm;
+    const MTLPixelFormat depthFormat = d.depthTarget ? MTLPixelFormatDepth32Float : MTLPixelFormatInvalid;
     if (d.scissor[2] <= d.scissor[0] || d.scissor[3] <= d.scissor[1]) return true; // nothing visible
+    // Front and back faces culled: no triangle is left (rectangles are never culled).
+    if (d.cull == 3 && d.primitive != 0x11 && !d.depthClear) { ++culledDraws; return true; }
     deferred_ = false;
-    id<MTLRenderPipelineState> state = pipeline(d, format);
+    id<MTLRenderPipelineState> state = pipeline(d, format, depthFormat);
     if (!state && deferred_) { ++drawsDeferred; return true; } // its pipeline is still being built
     if (!state) return false;
     DrawState drawState{};
@@ -889,9 +899,10 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         drawState.rangeCount = std::uint32_t(ranges.size());
         lastRanges = drawState.rangeCount;
     }
-    Target& target = targets_[d.target];
-    if (!target.texture || target.texture.width != d.pitch || target.texture.height != d.height ||
-        target.texture.pixelFormat != format) {
+    Target none{nil, false};
+    Target& target = d.colour ? targets_[d.target] : none;
+    if (d.colour && (!target.texture || target.texture.width != d.pitch || target.texture.height != d.height ||
+        target.texture.pixelFormat != format)) {
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
                                                                                               width:d.pitch height:d.height mipmapped:NO];
         descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -901,22 +912,35 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         target = {[device_ newTextureWithDescriptor:descriptor], true};
         if (!target.texture) return fail("colour target texture");
     }
-    if (encoder_ && (commands_ != commands || attachment_ != target.texture)) {
+    Target* depth = nullptr;
+    if (d.depthTarget && !(depth = depthTexture(d, commands))) return false;
+    id<MTLTexture> depthView = depth ? depth->texture : nil;
+    if (encoder_ && (commands_ != commands || attachment_ != target.texture || depthAttachment_ != depthView)) {
         [encoder_ endEncoding]; encoder_ = nil;
     }
     id<MTLRenderCommandEncoder> encoder = encoder_;
     if (!encoder) {
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = target.texture;
-    pass.colorAttachments[0].loadAction = target.fresh ? MTLLoadActionClear : MTLLoadActionLoad;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    if (target.texture) {
+        pass.colorAttachments[0].texture = target.texture;
+        pass.colorAttachments[0].loadAction = target.fresh ? MTLLoadActionClear : MTLLoadActionLoad;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    }
+    if (depth) {
+        // A new depth buffer starts at the clear value the game set.
+        pass.depthAttachment.texture = depth->texture;
+        pass.depthAttachment.loadAction = depth->fresh ? MTLLoadActionClear : MTLLoadActionLoad;
+        pass.depthAttachment.clearDepth = d.depthClearValue;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+    }
     if (batching_) pass.visibilityResultBuffer = visibility_;
     encoder = [commands renderCommandEncoderWithDescriptor:pass];
     if (!encoder) return fail("render encoder");
     target.fresh = false;
+    if (depth) depth->fresh = false;
     ++renderPasses;
-    if (batching_) { encoder_ = encoder; commands_ = commands; attachment_ = target.texture; }
+    if (batching_) { encoder_ = encoder; commands_ = commands; attachment_ = target.texture; depthAttachment_ = depthView; }
     }
     [encoder setRenderPipelineState:state];
     [encoder setBlendColorRed:pm4BlendConstant(d.blendConstant[0]) green:pm4BlendConstant(d.blendConstant[1])
@@ -927,9 +951,18 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     viewport.originX = xo - xs; viewport.width = 2 * xs;
     viewport.originY = yo - std::fabs(ys); viewport.height = 2 * std::fabs(ys);
     viewport.znear = d.viewport[5]; viewport.zfar = d.viewport[5] + d.viewport[4];
+    // A depth clear writes DB_DEPTH_CLEAR wherever the draw covers.
+    if (d.depthClear) viewport.znear = viewport.zfar = d.depthClearValue;
     [encoder setViewport:viewport];
     [encoder setScissorRect:MTLScissorRect{d.scissor[0], d.scissor[1], d.scissor[2] - d.scissor[0], d.scissor[3] - d.scissor[1]}];
-    [encoder setCullMode:MTLCullModeNone];
+    // Encoders are shared by draws: every draw sets its own depth and faces.
+    [encoder setDepthStencilState:d.depthClear ? depthState(7, true) : d.depthTest ? depthState(d.depthFunc, d.depthWrite) : depthState(7, false)];
+    // Screen positions match the PS4's (Y flipped above when needed), so
+    // FACE's winding on screen is Metal's.
+    const bool culls = d.primitive != 0x11 && !d.depthClear && d.cull;
+    [encoder setCullMode:!culls ? MTLCullModeNone : d.cull == 1 ? MTLCullModeFront : MTLCullModeBack];
+    [encoder setFrontFacingWinding:d.frontClockwise ? MTLWindingClockwise : MTLWindingCounterClockwise];
+    if (depth) { ++depthDraws; if (!d.colour) ++depthOnlyDraws; }
     for (unsigned k = 0; k < 16; ++k) { drawState.vsUser[k] = d.vsUser[k]; drawState.psUser[k] = d.psUser[k]; }
     drawState.flags = (d.primitive == 0x11 ? rectList : 0) | (ys > 0 ? flipY : 0);
     // The pixel program's scalar values as this draw's scan read them. Always
@@ -1080,5 +1113,71 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
 id<MTLTexture> PM4MetalRenderer::target(std::uint64_t address) const {
     const auto found = targets_.find(address);
     return found == targets_.end() ? nil : found->second.texture;
+}
+
+id<MTLTexture> PM4MetalRenderer::depthTarget(std::uint64_t address) const {
+    const auto found = depthTargets_.find(address);
+    return found == depthTargets_.end() ? nil : found->second.texture;
+}
+
+std::string PM4MetalRenderer::depthReport() const {
+    char text[200];
+    std::snprintf(text, sizeof text, "\nProfondeur Metal : %u dessins avec profondeur, dont %u sans couleur · %u dessins entièrement cullés · %zu tampons, %u redimensionnés",
+                  depthDraws, depthOnlyDraws, culledDraws, depthTargets_.size(), depthResized);
+    return text;
+}
+
+id<MTLDepthStencilState> PM4MetalRenderer::depthState(unsigned function, bool write) {
+    const unsigned key = (function & 7) | (write ? 8u : 0u);
+    const auto found = depthStates_.find(key);
+    if (found != depthStates_.end()) return found->second;
+    // ZFUNC codes in order: never, less, equal, less or equal, greater, not equal, greater or equal, always.
+    static const MTLCompareFunction functions[8] = {
+        MTLCompareFunctionNever, MTLCompareFunctionLess, MTLCompareFunctionEqual, MTLCompareFunctionLessEqual,
+        MTLCompareFunctionGreater, MTLCompareFunctionNotEqual, MTLCompareFunctionGreaterEqual, MTLCompareFunctionAlways};
+    MTLDepthStencilDescriptor* descriptor = [MTLDepthStencilDescriptor new];
+    descriptor.depthCompareFunction = functions[function & 7];
+    descriptor.depthWriteEnabled = write;
+    id<MTLDepthStencilState> state = [device_ newDepthStencilStateWithDescriptor:descriptor];
+    depthStates_[key] = state;
+    return state;
+}
+
+PM4MetalRenderer::Target* PM4MetalRenderer::depthTexture(const PM4Draw& d, id<MTLCommandBuffer> commands) {
+    Target& depth = depthTargets_[d.depthTarget];
+    if (depth.texture && depth.texture.width == d.pitch && depth.texture.height == d.height) return &depth;
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                          width:d.pitch height:d.height mipmapped:NO];
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
+    if (!texture) { fail("depth texture"); return nullptr; }
+    // Drawn with a target of another size (a depth pre-pass at the depth
+    // buffer's size, then colour at the target's): keep what overlaps.
+    if (depth.texture && !depth.fresh) {
+        if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
+        if (texture.width > depth.texture.width || texture.height > depth.texture.height) {
+            // Pixels the copy does not reach start at the clear value.
+            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.depthAttachment.texture = texture;
+            pass.depthAttachment.loadAction = MTLLoadActionClear;
+            pass.depthAttachment.clearDepth = d.depthClearValue;
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> clear = [commands renderCommandEncoderWithDescriptor:pass];
+            if (!clear) { fail("depth clear encoder"); return nullptr; }
+            [clear endEncoding];
+        }
+        id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+        if (!blit) { fail("depth copy encoder"); return nullptr; }
+        [blit copyFromTexture:depth.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(std::min(depth.texture.width, texture.width), std::min(depth.texture.height, texture.height), 1)
+                    toTexture:texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        ++depthResized;
+        depth = {texture, false};
+        return &depth;
+    }
+    depth = {texture, true};
+    return &depth;
 }
 } // namespace maxps4::gpu

@@ -24,9 +24,11 @@ struct Fixture {
     std::vector<std::vector<std::uint32_t>> draws;
     std::vector<unsigned> primitives;
     std::vector<std::array<float, 4>> blendConstants;
+    std::vector<PM4Draw> full; // Every draw, with its depth and culling state.
     Fixture() { run(targetState); }
     void run(const std::vector<std::uint32_t>& words) {
         collector.execute(words.data(), words.size(), [this](const PM4Draw& draw) {
+            full.push_back(draw);
             draws.push_back(draw.indices); primitives.push_back(draw.primitive);
             blendConstants.push_back({draw.blendConstant[0], draw.blendConstant[1], draw.blendConstant[2], draw.blendConstant[3]});
         });
@@ -46,6 +48,46 @@ int main() {
         assert(f.stats.depthTested == 2 && f.stats.depthOnly == 1 && f.stats.skipped == 1 && f.draws.size() == 1);
         assert(f.stats.lastDepth.find("16x24") != std::string::npos && f.stats.lastDepth.find("0x100000") != std::string::npos);
         assert(f.stats.depthReport().find("2 dessins") != std::string::npos);
+        // The colour draw carries the decoded state: Z_32_FLOAT at 0x100000,
+        // 16x24 pixels, test and write with <=, back faces culled, CCW front.
+        const PM4Draw& d = f.full[0];
+        assert(d.colour && d.depthTarget == 0x100000 && d.depthWidth == 16 && d.depthHeight == 24);
+        assert(d.depthTest && d.depthWrite && d.depthFunc == 3 && !d.depthClear);
+        assert(d.cull == 2 && !d.frontClockwise);
+    }
+    {
+        // With depthOnlyDraws, a draw writing depth and no colour is reported,
+        // sized as its depth buffer; one that only tests depth stays skipped.
+        Fixture f;
+        f.collector.depthOnlyDraws = true;
+        f.run({0xc0016900, 0x10, 3, 0xc0016900, 0x12, 0x2000, 0xc0016900, 0x16, 3 | (1 << 11),
+               0xc0016900, 0x200, 2 | 4 | (1 << 4), 0xc0016900, 0x205, 1 | 4, 0xc0016900, 0x8e, 0,
+               0xc0016900, 0x0c, 0, 0xc0016900, 0x0d, 0x40004000, 0xc0012d00, 3, 2});
+        assert(f.stats.failed == 0 && f.full.size() == 1 && f.stats.skipped == 0);
+        const PM4Draw& d = f.full[0];
+        // DB_Z_READ_BASE stands for a missing write base.
+        assert(!d.colour && d.target == 0 && d.mask == 0 && d.depthTarget == 0x200000);
+        assert(d.pitch == 32 && d.height == 16 && d.scissor[2] == 32 && d.scissor[3] == 16);
+        assert(d.depthFunc == 1 && d.cull == 1 && d.frontClockwise);
+        f.run({0xc0016900, 0x200, 2 | (1 << 4), 0xc0012d00, 3, 2});
+        assert(f.full.size() == 1 && f.stats.skipped == 1);
+        // A depth clear (DB_RENDER_CONTROL bit 0, DB_DEPTH_CLEAR) is reported even
+        // without Z_ENABLE; its value is clamped to [0, 1].
+        f.run({0xc0016900, 0x00, 1, 0xc0016900, 0x0b, gcn_detail::u32(0.25f), 0xc0016900, 0x200, 0, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 2 && f.full[1].depthClear && f.full[1].depthClearValue == 0.25f && !f.full[1].depthTest);
+        f.run({0xc0016900, 0x0b, gcn_detail::u32(2.0f), 0xc0012d00, 3, 2});
+        assert(f.full.size() == 3 && f.full[2].depthClearValue == 1.0f);
+        // Without a depth format (DB_Z_INFO 0), nothing is depth: skipped again.
+        f.run({0xc0016900, 0x10, 0, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 3 && f.stats.skipped == 2);
+    }
+    {
+        // A colour draw whose depth test is off has no depth buffer, whatever
+        // the other DB registers hold: Sonic Mania's and Mortal Kombat's draws.
+        Fixture f;
+        f.run({0xc0016900, 0x10, 3, 0xc0016900, 0x14, 0x1000, 0xc0016900, 0x200, 4, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 1 && f.full[0].colour && f.full[0].depthTarget == 0 && !f.full[0].depthWrite);
+        assert(f.full[0].cull == 0);
     }
     for (const bool allMarkers : {false, true}) {
         Fixture f;

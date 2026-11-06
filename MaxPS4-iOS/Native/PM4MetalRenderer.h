@@ -6,8 +6,14 @@
 // a GCNMemory when a pipeline is built. Each colour target address owns a
 // Metal texture (BGRA8 or RGBA8 per COMP_SWAP), created cleared and kept
 // across draws. Pipelines are cached by program addresses, the fetch-shader
-// SGPR pair (s[0:1]), PS inputs, format and blend. Limits as the software
-// renderer: colour target 0 only, no depth, instance 0.
+// SGPR pair (s[0:1]), PS inputs, formats and blend. Limits as the software
+// renderer: colour target 0 only, instance 0. Each depth buffer address owns
+// a Depth32Float texture (any DB_Z_INFO format, no stencil), kept across draws
+// at the size of the targets it is drawn with; draws test and write it as
+// DB_DEPTH_CONTROL says, depth clears write DB_DEPTH_CLEAR, and faces are
+// culled as PA_SU_SC_MODE_CNTL says (not rect lists). Depth-only draws
+// (colour false) render with no colour attachment. Guest memory never
+// receives depth: a game sampling its depth buffer reads stale memory.
 // Compute dispatches run as Metal kernels on copies of the ranges one
 // interpreted lane addresses; colour targets inside those ranges are copied
 // in from their textures, and back after the kernel. A linear 8_8_8_8 image
@@ -91,6 +97,12 @@ public:
     // The texture holding colour target `address`, or nil if never drawn.
     id<MTLTexture> target(std::uint64_t address) const;
     std::size_t targetCount() const { return targets_.size(); }
+    // The depth texture of depth buffer `address`, or nil if never drawn.
+    id<MTLTexture> depthTarget(std::uint64_t address) const;
+    // Draws given a depth buffer, of which without colour; draws whose faces
+    // were all culled (front and back); depth textures resized with a copy.
+    unsigned depthDraws = 0, depthOnlyDraws = 0, culledDraws = 0, depthResized = 0;
+    std::string depthReport() const;
     // f(address, texture) for every colour target.
     template <class F> void forEachTarget(F&& f) const { for (const auto& [address, t] : targets_) f(address, t.texture); }
     std::string error;
@@ -129,8 +141,17 @@ public:
     static MTLSamplerDescriptor* nativeSamplerDescriptor(const std::array<std::uint32_t, 4>& s);
 
 private:
-    using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned>;
+    // Programs, fetch SGPRs, PS inputs, colour format, blend, mask, depth format.
+    using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned, unsigned>;
     struct Target { id<MTLTexture> texture; bool fresh; };
+    std::map<std::uint64_t, Target> depthTargets_;
+    // By compare function (0-7) and write: 16 states at most.
+    std::map<unsigned, id<MTLDepthStencilState>> depthStates_;
+    id<MTLDepthStencilState> depthState(unsigned function, bool write);
+    // The depth texture for `d` (d.pitch x d.height), copied from a texture of
+    // another size when the buffer was drawn with other targets before.
+    Target* depthTexture(const PM4Draw& d, id<MTLCommandBuffer> commands);
+    id<MTLTexture> depthAttachment_ = nil;
     id<MTLDevice> device_;
     const GCNMemory& code_;
     id<MTLBuffer> guest_;
@@ -220,7 +241,8 @@ private:
     Shared sharedRange(std::uint64_t base, std::uint64_t size, bool texture, id<MTLCommandBuffer> commands);
     // Guest [address, address + size) into `out`; unreadable pages read as zero.
     void copyGuest(std::uint64_t address, std::uint8_t* out, std::uint64_t size) const;
-    id<MTLRenderPipelineState> pipeline(const PM4Draw& draw, MTLPixelFormat format);
+    // `format` MTLPixelFormatInvalid: no colour attachment (a depth-only draw).
+    id<MTLRenderPipelineState> pipeline(const PM4Draw& draw, MTLPixelFormat format, MTLPixelFormat depth);
     // `ranges`: (guest start, length, buffer offset) triples; none for the guest
     // window. An offset's bits 48 and up select slots[n - 1] instead of `memory`.
     id<MTLTexture> nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
