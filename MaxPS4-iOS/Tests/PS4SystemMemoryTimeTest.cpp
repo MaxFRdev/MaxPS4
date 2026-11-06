@@ -111,6 +111,23 @@ int main() {
     assert(memory.read(phys, word, 8) && get_le(word, 8) == 0 && memory.read(size_out, word, 8) && get_le(word, 8) == 0x10000);
     assert(invoke(S::direct_allocate_main, {0x4000, 0, 0, phys}) == 0 && memory.read(phys, word, 8) && get_le(word, 8) == 0);
     assert(invoke(S::direct_available, {0x10000, 0x14000, 0x4000, phys, size_out}) == kernel_error(nomem));
+    {   // A release takes only its range; a mapping may span adjacent allocations.
+        auto mapped = [&](uint64_t bytes, uint64_t offset) {
+            put_le(word, 0, 0, 8); assert(memory.write(where, word, 8));
+            const int64_t result = invoke(S::direct_map, {where, bytes, 3, 0, offset, 0});
+            if (!result) { assert(memory.read(where, word, 8)); assert(invoke(S::flexible_release, {get_le(word, 8), bytes}) == 0); }
+            return result;
+        };
+        assert(invoke(S::direct_allocate, {0x40000000, 1ULL << 31, 0x10000, 0, 0, phys}) == 0);
+        assert(memory.read(phys, word, 8) && get_le(word, 8) == 0x40000000);
+        assert(invoke(S::direct_allocate, {0x40010000, 1ULL << 31, 0x10000, 0, 0, phys}) == 0);
+        assert(mapped(0x20000, 0x40000000) == 0 && mapped(0x24000, 0x40000000) == kernel_error(inval));
+        assert(invoke(S::direct_release, {0x40004000, 0x4000}) == 0);
+        assert(mapped(0x4000, 0x40000000) == 0 && mapped(0x4000, 0x40004000) == kernel_error(inval));
+        assert(mapped(0x8000, 0x40000000) == kernel_error(inval) && mapped(0x18000, 0x40008000) == 0);
+        assert(invoke(S::direct_release, {0x40004000, 0x4000}) == kernel_error(noent));
+        assert(invoke(S::direct_release, {0x40000000, 0x20000}) == 0 && mapped(0x4000, 0x40000000) == kernel_error(inval));
+    }
     // Flexible memory needs a name; POSIX mmap returns the address, or -1.
     const char flexible[] = "heap";
     assert(memory.write(name, flexible, sizeof(flexible)));

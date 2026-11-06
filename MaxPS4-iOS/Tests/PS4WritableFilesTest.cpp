@@ -405,6 +405,7 @@ int main() {
         assert(call(S::gnm_ding_dong, uint64_t(vqid), 9) == 0 && value32(read_pointer) == 5); // Unmapped: ignored.
     }
     assert(call(S::gnm_tessellation_offchip) == 0x800000);
+    assert(call(S::gnm_tessellation_ring) > 0 && call(S::gnm_tessellation_ring) % 0x10000 == 0);
     assert(memory.write(0x11900, "named", 6) && call(S::thread_getname, 1, 0x11900) == 0 && value32(0x11900) == 0);
     assert(call(S::thread_getname, 1, 0) == kernel_error(fault));
     // The game's stdout/stderr text is kept for the session report.

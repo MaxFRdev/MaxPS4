@@ -20,6 +20,8 @@ public:
 // Owner serializes access and resets this object whenever it restages the ELF.
 class PS4VirtualMemory final : public PS4DynamicMemory {
 public:
+    // A general image's mmap window; false for other images.
+    bool window(uint64_t& address, uint64_t& bytes) const { return image_.heap(address, bytes); }
     static constexpr uint64_t page_size = 0x4000;
     // Byte-vector mappings (bounded images) and host pages of a general
     // image's mmap window: games map hundreds of MiB (heap, GPU memory).

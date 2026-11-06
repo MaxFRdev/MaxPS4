@@ -871,7 +871,7 @@ constexpr Binding bindings[] = {
     {"sceGnmGetResourceUserData", "UoBuWAhKk7U", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
     {"sceGnmGetShaderProgramBaseAddress", "nEyFbYUloIM", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
     {"sceGnmGetPhysicalCounterFromVirtualized", "dewXw5roLs0", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
-    {"sceGnmGetTheTessellationFactorRingBufferBaseAddress", "ln33zjBrfjk", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
+    {"sceGnmGetTheTessellationFactorRingBufferBaseAddress", "ln33zjBrfjk", PS4KernelService::gnm_tessellation_ring, "libSceGnmDriver"},
     {"sceGnmLogicalCuIndexToPhysicalCuIndex", "26PM5Mzl8zc", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
     {"sceGnmLogicalCuMaskToPhysicalCuMask", "RU74kek-N0c", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
     {"sceGnmLogicalTcaUnitToPhysical", "Kl0Z3LH07QI", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
@@ -2158,6 +2158,14 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         return write(q.read_pointer, next, 4) ? 0 : kernel_error(fault);
     }
     case S::gnm_tessellation_offchip: return 0x800000;
+    // The ring's address, where the game maps it (MAP_FIXED): the top of the
+    // mmap window, since iOS refuses the PS4's own 0xff0000000.
+    case S::gnm_tessellation_ring: {
+        uint64_t window = 0, bytes = 0;
+        if (dynamic_ && dynamic_->window(window, bytes) && bytes >= 0x200000)
+            return int64_t((window + bytes - 0x100000) & ~uint64_t{0xffff});
+        return 0xff0000000;
+    }
     case S::gnm_ls: return gnm_.ls(c.rdi,uint32_t(c.rsi),c.rdx,uint32_t(c.rcx));
     case S::gnm_hs: case S::gnm_hs_update: return gnm_.hs(c.rdi,uint32_t(c.rsi),c.rdx,uint32_t(c.rcx),service == S::gnm_hs_update);
     case S::gnm_es: return gnm_.es(c.rdi,uint32_t(c.rsi),c.rdx,uint32_t(c.rcx));
@@ -2856,11 +2864,20 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
     }
     // sceKernelReleaseDirectMemory(start, length): whole allocations in the range.
     case S::direct_release: {
-        if (!aligned(c.rdi) || !c.rsi || !aligned(c.rsi)) return kernel_error(inval);
+        if (!aligned(c.rdi) || !c.rsi || !aligned(c.rsi) || c.rsi > UINT64_MAX - c.rdi) return kernel_error(inval);
+        // Only the range: what an allocation keeps on either side stays allocated.
+        const uint64_t end = c.rdi + c.rsi;
         bool released = false;
-        for (auto it = direct_.lower_bound(c.rdi); it != direct_.end() && it->first < c.rdi + c.rsi;) {
-            it = direct_.erase(it);
+        auto it = direct_.upper_bound(c.rdi);
+        if (it != direct_.begin()) --it;
+        while (it != direct_.end() && it->first < end) {
+            const uint64_t at = it->first, past = at + it->second;
+            if (past <= c.rdi) { ++it; continue; }
+            direct_.erase(it);
+            if (at < c.rdi) direct_[at] = c.rdi - at;
+            if (past > end) direct_[end] = past - end;
             released = true;
+            it = direct_.lower_bound(std::min(past, end));
         }
         return released ? 0 : kernel_error(noent);
     }
@@ -2874,9 +2891,13 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
         auto owner = direct_.upper_bound(c.r8);
         if (owner == direct_.begin()) return kernel_error(inval);
         --owner;
-        const uint64_t offset = c.r8 - owner->first;
-        if (offset >= owner->second || c.rsi > owner->second - offset)
-            return kernel_error(inval);
+        // Adjacent allocations form one range: Call of Duty pools them and
+        // maps runs of pages across their boundaries.
+        uint64_t reach = owner->first + owner->second;
+        if (c.r8 >= reach) return kernel_error(inval);
+        for (auto next = std::next(owner); next != direct_.end() && next->first == reach && c.rsi > reach - c.r8; ++next)
+            reach += next->second;
+        if (c.rsi > reach - c.r8) return kernel_error(inval);
         uint64_t mapped = 0;
         const Error e = dynamic_->place(hint, c.rsi, std::max<uint64_t>(c.r9, page), protection, (c.rcx & 0x10) != 0, mapped);
         if (e) return kernel_error(e);

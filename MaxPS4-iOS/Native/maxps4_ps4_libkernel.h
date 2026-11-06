@@ -117,7 +117,7 @@ enum class PS4KernelService : uint32_t {
     sched_priority_max, sched_priority_min, sched_param_get, net_unavailable,
     discmap_no_bitmap, discmap_flags, video_capability,
     gnm_workload_stream, gnm_workload_begin, gnm_workload_end, gnm_submit_workload, gnm_submit_flip_workload,
-    gnm_map_compute, gnm_unmap_compute, gnm_ding_dong, gnm_tessellation_offchip,
+    gnm_map_compute, gnm_unmap_compute, gnm_ding_dong, gnm_tessellation_offchip, gnm_tessellation_ring,
     gnm_ls, gnm_hs, gnm_hs_update, gnm_es, gnm_gs, gnm_push_color_marker, gnm_set_color_marker,
     gnm_ding_dong_marker, gnm_embedded_ps, gnm_compute_wait_address, gnm_compute_wait_semaphore,
     gnm_dispatch_indirect_mec, thread_getname,
