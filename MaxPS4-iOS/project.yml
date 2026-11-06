@@ -46,7 +46,7 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: 'UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight'
         TARGETED_DEVICE_FAMILY: '1,2'
-        MARKETING_VERSION: '0.5.0'
+        MARKETING_VERSION: '0.5.1'
         CURRENT_PROJECT_VERSION: '1000187'
     dependencies:
       - sdk: GameController.framework
@@ -93,7 +93,7 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: 'UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight'
         TARGETED_DEVICE_FAMILY: '1,2'
-        MARKETING_VERSION: '0.5.0'
+        MARKETING_VERSION: '0.5.1'
         CURRENT_PROJECT_VERSION: '2000002'
     dependencies:
       - sdk: GameController.framework
