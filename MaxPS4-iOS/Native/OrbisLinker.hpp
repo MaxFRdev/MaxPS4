@@ -149,7 +149,7 @@ private:
         std::string out; do { out.insert(out.begin(), alphabet[id & 63]); id >>= 6; } while (id); return out;
     }
     struct Descriptor { std::string name; uint16_t version; };
-    struct Symbol { Identity identity; uint64_t value = 0, size = 0; uint8_t type = 0; bool defined = false, local = false; };
+    struct Symbol { Identity identity; uint64_t value = 0, size = 0; uint8_t type = 0; bool defined = false, local = false, offsetTable = false; };
     struct Rela { uint64_t offset, info, addend; };
     struct Dynamic {
         std::vector<Symbol> symbols; std::vector<Rela> relas;
@@ -287,10 +287,13 @@ private:
             // A plain name (module_start, __start__Ztext) is not an NID identity:
             // defined, it binds nothing, like a local; a weak undefined one stays
             // 0, as an unresolved weak symbol does, and so do undefined section
-            // bounds (__start_X/__stop_X both 0: an empty range).
+            // bounds (__start_X/__stop_X both 0: an empty range). An undefined
+            // _GLOBAL_OFFSET_TABLE_ (Call of Duty's libSceAudioLatencyEstimation)
+            // is only declared: a relocation against it is refused, not given 0.
             if (!s.local && name.find('#') == std::string::npos) {
                 const bool bound = name.rfind("__start_", 0) == 0 || name.rfind("__stop_", 0) == 0;
-                require(s.defined || bind == 2 || bound, "undefined non-NID symbol: " + name);
+                s.offsetTable = !s.defined && name == "_GLOBAL_OFFSET_TABLE_";
+                require(s.defined || bind == 2 || bound || s.offsetTable, "undefined non-NID symbol: " + name);
                 s.local = true;
             }
             if (!s.local) {
@@ -688,6 +691,7 @@ private:
                 // An undefined local STT_SECTION symbol in a TLS relocation names this
                 // module's TLS block (local-dynamic model), like symbol 0.
                 const auto& referenced = dynamic[i].symbols[symbol];
+                require(type == 8 || !referenced.offsetTable, "relocation against _GLOBAL_OFFSET_TABLE_");
                 const bool sectionTLS = symbol && tlsRelocation && referenced.local && referenced.type == 3 && !referenced.defined;
                 const bool tlsSymbol = type != 8 && symbol && (referenced.type == 6 || sectionTLS);
                 require(tlsRelocation ? (!symbol || tlsSymbol) : !tlsSymbol, "TLS symbol/relocation kind mismatch: relocation " +

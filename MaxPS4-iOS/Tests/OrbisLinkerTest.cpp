@@ -56,6 +56,17 @@ int main(int argc, char** argv) {
         check(value(relative,0x102000)==0x101234,"R_RELATIVE with a symbol index");
         consumer=original;
     }
+    {   // An undefined _GLOBAL_OFFSET_TABLE_ may be declared, not relocated against.
+        const std::string table = "_GLOBAL_OFFSET_TABLE_";
+        std::copy(table.begin(), table.end(), consumer.begin() + 0x640);
+        setTag(consumer,0x61000037,0x60); put(consumer,0x818,0x40,4); consumer[0x81c]=0x10;
+        reject(batch(),"relocation against _GLOBAL_OFFSET_TABLE_");
+        put(consumer,0x908,8); put(consumer,0x910,0x10);
+        Linker::Image declared;
+        check(Linker::link({input("app.elf",consumer,0x100000,{})},{},declared,diagnostic),diagnostic.c_str());
+        check(value(declared,0x102000)==0x100010,"declared _GLOBAL_OFFSET_TABLE_");
+        consumer=original;
+    }
     reject(batch(),"memory budget",1023); reject(batch(),"budget exceeds",513*1024*1024);
     put(consumer,64+56+4,4,4); reject(batch(),"relocation target"); consumer=original;
     put(consumer,64+4,7,4); reject(batch(),"writable executable"); consumer=original;
