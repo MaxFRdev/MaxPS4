@@ -170,6 +170,10 @@ public:
     static inline thread_local uint64_t guest_thread = 1;
     // Static TLS thread pointer of a child guest thread (0: the image's own).
     static inline thread_local uint64_t guest_tls = 0;
+    // The stop, for the report: when it was asked, when threads were told to
+    // end, and how many ended at a call (the rest stop on a signal).
+    std::atomic<uint64_t> stop_asked_ns {0}, stop_told_ns {0};
+    std::atomic<uint32_t> stop_exits {0};
     uint64_t HandleSyscall(FEXCore::Core::CpuStateFrame* frame, FEXCore::HLE::SyscallArguments*) override {
         namespace x86 = FEXCore::X86State;
         auto& state = frame->State;
@@ -291,11 +295,17 @@ public:
             r[x86::REG_RAX] = static_cast<uint64_t>(result);
             state.rip += 2;
             // A stop: waits now return at once, so a game loop around one spins
-            // almost only in host code, where stop signals retry. The thread ends
-            // here through its return trampoline, whose own exit call goes on.
+            // almost only in host code, where stop signals retry. FEX resumes after
+            // the SYSCALL whatever State.rip says, and the thunk's next instruction
+            // is RET: the return address becomes the thread's return trampoline,
+            // whose own exit call ends it.
             if (threads && orbis != maxps4::PS4KernelService::thread_exit && orbis != maxps4::PS4KernelService::process_exit &&
-                orbis != maxps4::PS4KernelService::abort_process && guest_thread_ending(*threads))
-                state.rip = image->thread_return();
+                orbis != maxps4::PS4KernelService::abort_process && guest_thread_ending(*threads)) {
+                uint8_t back[8];
+                const uint64_t exit_at = image->thread_return();
+                std::memcpy(back, &exit_at, sizeof back);
+                if (memory->write(rsp, back, sizeof back)) stop_exits.fetch_add(1, std::memory_order_relaxed);
+            }
             return static_cast<uint64_t>(result);
         }
         if (!image || !linker || !kernel || !memory || r[x86::REG_RAX] > UINT32_MAX ||
@@ -797,8 +807,10 @@ public:
         changed.notify_all();
         identities.interrupt();
     }
-    // On a child thread once a stop began: its next return to the guest ends it.
-    bool ending() const { return current && ending_.load(std::memory_order_relaxed); }
+    // Once a stop began: a thread's next return to the guest ends it. The main
+    // thread too: it spins on calls like the others, and run_orbis still reports
+    // the stop (expired()).
+    bool ending() const { return ending_.load(std::memory_order_relaxed); }
     bool expired() const {
         std::lock_guard guard(lock);
         return timed_out;
@@ -1137,6 +1149,7 @@ extern "C" int32_t maxps4_fex_engine_set_time_limit(maxps4_fex_engine* engine,
 }
 extern "C" int32_t maxps4_fex_engine_request_stop(maxps4_fex_engine* engine) {
     if (!engine) return -EINVAL;
+    engine->probe.stop_asked_ns = ProbeAddressSpace::now_ns();
     engine->stop_requested=true;
     engine->libkernel.videoout().interrupt(); // Flip waits end at once.
     return 0;
@@ -1311,7 +1324,10 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
                             engine->system_memory, engine->libkernel.threads(), page);
         engine->probe.threads = threads ? &*threads : nullptr;
         GuestFaultGuard guard(engine->context.get(), thread, engine->signals.GetConfig(), engine->time_limit_ms,
-                              true, [&threads] { if (threads) threads->interrupt(); }, &engine->stop_requested,
+                              true, [&threads, engine] {
+                                  engine->probe.stop_told_ns = ProbeAddressSpace::now_ns();
+                                  if (threads) threads->interrupt();
+                              }, &engine->stop_requested,
                               [engine,stack_base,page](uint64_t a,size_t n,uint32_t p) {
                                   if (engine->system_memory.permitted(a,n,p)) return true;
                                   const auto low=reinterpret_cast<uintptr_t>(stack_base);
@@ -2344,6 +2360,14 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();
     const uint64_t now = ProbeAddressSpace::now_ns();
+    if (const uint64_t asked = engine->probe.stop_asked_ns.load()) {
+        const uint64_t told = engine->probe.stop_told_ns.load();
+        char stop[160];
+        std::snprintf(stop, sizeof stop, "Arrêt demandé depuis %.1f s · threads prévenus %s%.1f s · %u terminés à leur appel\n",
+            double(now - std::min(now, asked)) / 1e9, told ? "depuis " : "NON, attente ", double(now - std::min(now, told ? told : asked)) / 1e9,
+            engine->probe.stop_exits.load());
+        out += stop;
+    }
     for (const auto& a : engine->probe.activity) {
         const uint64_t thread = a.thread.load();
         if (!thread) continue;
