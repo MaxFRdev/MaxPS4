@@ -6,7 +6,7 @@ import os
 // What the installed app really holds: entitlements come from the signature
 // SideStore wrote, not from the IPA, and iOS ignores those its profile refuses.
 @_silgen_name("csops")
-private func csops(_ pid: pid_t, _ operation: UInt32, _ address: UnsafeMutableRawPointer?, _ size: Int) -> Int32
+private func csops(_ pid: Int32, _ operation: Int32, _ buffer: UnsafeMutableRawPointer?, _ size: Int32) -> Int32
 
 enum MaxPS4Entitlements {
     enum State { case active, missing, unknown }
@@ -19,7 +19,7 @@ enum MaxPS4Entitlements {
     // magic and length, then the XML property list.
     private static func signature() -> [String: Any]? {
         var blob = [UInt8](repeating: 0, count: 1 << 18)
-        guard csops(getpid(), 7, &blob, blob.count) == 0 else { return nil }
+        guard csops(getpid(), 7, &blob, Int32(blob.count)) == 0 else { return nil }
         let length = blob[4..<8].reduce(0) { $0 << 8 | Int($1) }
         guard length > 8, length <= blob.count else { return nil }
         return (try? PropertyListSerialization.propertyList(from: Data(blob[8..<length]), format: nil)) as? [String: Any]
