@@ -849,6 +849,47 @@ public:
             thread.used = false;
         }
     }
+    // For reports: where a child thread making no HLE call runs, as the
+    // distinct guest addresses of 8 reads 1 ms apart (a spinning loop shows as
+    // a few). Empty when it is not in JIT code or cannot be read.
+    std::vector<uint64_t> sample(uint64_t id) {
+        std::vector<uint64_t> rips;
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+        std::lock_guard held(lock); // Keeps the thread's guard alive.
+        const auto at = std::find_if(threads.begin(), threads.end(),
+            [&](const Thread& t) { return t.used && !t.finished && t.id == id && t.guard; });
+        if (at == threads.end()) return rips;
+        GuestFaultGuard* const fault = at->guard;
+        const thread_act_t port = ::pthread_mach_thread_np(fault->host);
+        uint64_t pcs[8] {};
+        size_t count = 0;
+        rips.reserve(8);
+        // Nothing that may lock runs while the thread is suspended.
+        for (int k = 0; k < 8; ++k) {
+            if (k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            arm_thread_state64_t state {};
+            mach_msg_type_number_t words = ARM_THREAD_STATE64_COUNT;
+            if (::thread_suspend(port) != KERN_SUCCESS) break;
+            const bool read = ::thread_get_state(port, ARM_THREAD_STATE64,
+                reinterpret_cast<thread_state_t>(&state), &words) == KERN_SUCCESS;
+            ::thread_resume(port);
+            if (!read) continue;
+            uint64_t pc = arm_thread_state64_get_pc(state);
+#if __has_feature(ptrauth_calls)
+            pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
+#endif
+            pcs[count++] = pc;
+        }
+        for (size_t k = 0; k < count; ++k) {
+            if (!fault->in_jit(pcs[k])) continue;
+            const uint64_t rip = fault->guest_rip(pcs[k]);
+            if (std::find(rips.begin(), rips.end(), rip) == rips.end()) rips.push_back(rip);
+        }
+#else
+        (void)id;
+#endif
+        return rips;
+    }
     bool faulted(maxps4_fex_guest_fault& out) const {
         std::lock_guard guard(lock);
         out = first_fault;
@@ -858,6 +899,7 @@ private:
     struct Thread {
         bool used = false, joining = false, finished = false, ends_process = false, detached = false;
         uint64_t id = 0, entry = 0, arg = 0, rsp = 0, fs = 0, value = 0;
+        GuestFaultGuard* guard = nullptr; // While it runs guest code (under `lock`).
         std::thread host;
     };
     // Gives back the slots of detached threads that have ended. Never while
@@ -888,7 +930,9 @@ private:
                     fex->CurrentFrame->State.gregs[FEXCore::X86State::REG_RDI] = thread.arg;
                     GuestFaultGuard guard(context, fex, config, 0, false, {}, nullptr,
                         [this](uint64_t a,size_t n,uint32_t p) { return memory.permitted(a,n,p); });
+                    { std::lock_guard held(lock); thread.guard = &guard; }
                     context->ExecuteThread(fex);
+                    { std::lock_guard held(lock); thread.guard = nullptr; }
                     const int signal = guard.signal.load();
                     // SIGURG only comes from finish(): a stop, not a fault.
                     if (signal && signal != SIGURG)
@@ -1364,7 +1408,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
         if (main_exit) threads->wait();
         maxps4_fex_guest_fault child {};
         if (threads) threads->finish();
-        engine->probe.threads = nullptr;
+        { std::lock_guard sampling(engine->sample_lock); engine->probe.threads = nullptr; }
         if (main_exit && threads->expired() && !engine->probe.exited) signal = SIGURG;
         // A child's exit function stops the main thread with SIGURG: not a timeout.
         if (signal == SIGURG && engine->probe.exited) signal = 0;
@@ -2399,9 +2443,23 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         const auto returned = (unsigned long long)a.returned.load();
         char line[192];
         if (!a.inside.load()) {
-            std::snprintf(line, sizeof line, "thread %llu : code du jeu depuis %.1f s, dernier %s (%llu appels)\n",
+            std::snprintf(line, sizeof line, "thread %llu : code du jeu depuis %.1f s, dernier %s (%llu appels)",
                 (unsigned long long)thread, seconds, name, returned);
             out += line;
+            // Over a second without a call: where it spins.
+            if (seconds > 1 && thread != 1) {
+                std::lock_guard sampling(engine->sample_lock);
+                if (engine->probe.threads) {
+                    const char* separator = " · tourne en";
+                    for (const uint64_t rip : engine->probe.threads->sample(thread)) {
+                        std::snprintf(line, sizeof line, "%s 0x%llx", separator,
+                            (unsigned long long)(rip >= engine->relocation ? rip - engine->relocation : rip));
+                        out += line;
+                        separator = ",";
+                    }
+                }
+            }
+            out += "\n";
             continue;
         }
         std::snprintf(line, sizeof line, "thread %llu : dans %s depuis %.1f s (%llu appels)",
