@@ -937,6 +937,12 @@ public:
         out = first_fault;
         return first_fault.signal != 0;
     }
+    // The thread that faulted first and its guest registers at the fault.
+    bool fault_thread(uint64_t& id, std::array<uint64_t, 16>& gprs) const {
+        std::lock_guard guard(lock);
+        id = first_fault_thread; gprs = first_fault_gprs;
+        return first_fault.signal != 0;
+    }
 private:
     struct Thread {
         bool used = false, joining = false, finished = false, ends_process = false, detached = false;
@@ -985,7 +991,7 @@ private:
                     std::copy_n(std::begin(fex->CurrentFrame->State.gregs), 16, ended_gprs.begin());
                     // SIGURG only comes from finish(): a stop, not a fault.
                     if (signal && signal != SIGURG)
-                        fault = {signal, guard.code, guard.address, fex->CurrentFrame->State.rip};
+                        fault = {signal, guard.code, guard.address, ended_rip};
                 }
                 context->DestroyThread(fex);
             }
@@ -994,7 +1000,10 @@ private:
         bool stop_main = false;
         {
             std::lock_guard guard(lock);
-            if (fault.signal && !first_fault.signal) { first_fault = fault; stop_main = stopping = true; }
+            if (fault.signal && !first_fault.signal) {
+                first_fault = fault; first_fault_thread = thread.id; first_fault_gprs = ended_gprs;
+                stop_main = stopping = true;
+            }
             if (thread.ends_process) stop_main = stopping = true;
             ended[ended_next++ % ended.size()] = {thread.id, ended_rip, ProbeAddressSpace::now_ns(), ended_address, ended_signal, ended_code, ended_gprs};
             thread.finished = true; // `thread` may be reused from here on.
@@ -1028,6 +1037,8 @@ private:
     size_t ended_next = 0;
     bool stopping = false, main_done = false, main_exited = false, timed_out = false;
     maxps4_fex_guest_fault first_fault {};
+    uint64_t first_fault_thread = 0;
+    std::array<uint64_t, 16> first_fault_gprs {};
     static inline thread_local Thread* current = nullptr;
     std::atomic<bool> ending_ {false};
 };
@@ -1103,6 +1114,9 @@ struct maxps4_fex_engine {
     bool orbis_admitted = false;
     maxps4_fex_cpu_report cpu_report{};
     maxps4_fex_guest_fault last_fault{};
+    // The faulting child thread, its exact instruction, registers and target
+    // memory, for the final report (the threads are gone by then).
+    std::string last_fault_detail;
     uint32_t time_limit_ms = 0; // 0: no limit.
     std::atomic<bool> stop_requested{false};
     // The running main thread's guard, for sampling; guarded by sample_lock.
@@ -1305,6 +1319,8 @@ extern "C" int32_t maxps4_fex_engine_probe(maxps4_fex_engine *engine,
     return maxps4_fex_engine_run_elf(engine, file.data(), file.size(), 3, result, backend, &entry);
 }
 
+static std::string fault_registers(maxps4_fex_engine* engine, const std::array<uint64_t, 16>& gprs);
+static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address);
 namespace {
 struct PM4Request {
     uint64_t address;
@@ -1470,7 +1486,24 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
         // A child's exit function stops the main thread with SIGURG: not a timeout.
         if (signal == SIGURG && engine->probe.exited) signal = 0;
         // RIP is the guest position FEX last stored (block granularity).
-        if (threads && threads->faulted(child)) { engine->last_fault = child; signal = child.signal; }
+        if (threads && threads->faulted(child)) {
+            engine->last_fault = child; signal = child.signal;
+            uint64_t id = 0;
+            std::array<uint64_t, 16> gprs {};
+            threads->fault_thread(id, gprs);
+            char line[256];
+            const uint64_t rip = child.rip >= engine->relocation ? child.rip - engine->relocation : child.rip;
+            std::snprintf(line, sizeof line, "Plantage : thread %llu, signal %d code %d adresse 0x%llx, instruction exacte 0x%llx, octets",
+                (unsigned long long)id, child.signal, child.code, (unsigned long long)child.address, (unsigned long long)rip);
+            std::string detail = line;
+            uint8_t bytes[8] {};
+            if (engine->system_memory.read(child.rip, bytes, sizeof bytes))
+                for (const uint8_t b : bytes) { std::snprintf(line, sizeof line, " %02x", b); detail += line; }
+            else detail += " illisibles";
+            detail += fault_memory(engine, child.address);
+            detail += fault_registers(engine, gprs);
+            engine->last_fault_detail = detail + "\n";
+        }
         else if (signal) engine->last_fault = {signal, guard.code, guard.address, state.rip};
         if (signal) {
             engine->frame_code_cached = false;
@@ -2582,6 +2615,7 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
     out += engine->libkernel.graphics().submit_activity();
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();
+    out += engine->last_fault_detail;
     {
         std::array<maxps4::PS4Libkernel::SaveCall, maxps4::PS4Libkernel::save_call_limit> calls {};
         size_t count = 0;
