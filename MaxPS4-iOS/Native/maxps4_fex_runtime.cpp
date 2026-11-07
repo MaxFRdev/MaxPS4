@@ -462,7 +462,7 @@ public:
     GuestFaultGuard& operator=(const GuestFaultGuard&) = delete;
     std::atomic<int> signal {0};
     int32_t code = 0;
-    uint64_t address = 0;
+    uint64_t address = 0, fault_rip = 0;
     // maxps4_fex_engine_sample_main_thread: the next SIGURG seen while
     // `sample_request` is set records where the guarded thread is, then
     // lets it run on. `where`: 1 JIT code, 2 FEX dispatcher, 3 other host code.
@@ -597,6 +597,8 @@ private:
             if (stop) {
                 guard->code = number == SIGURG ? 0 : info->si_code;
                 guard->address = number == SIGURG ? 0 : reinterpret_cast<uintptr_t>(info->si_addr);
+                // The exact guest instruction (FEX's stored RIP is only its block).
+                guard->fault_rip = in_jit ? guard->context->RestoreRIPFromHostPC(guard->thread, pc) : 0;
                 guard->signal.store(number);
                 sp = guard->thread->CurrentFrame->ReturningStackLocation;
                 pc = stop;
@@ -917,11 +919,11 @@ public:
         return out;
     }
     // How a thread that is no longer running ended (false: unknown).
-    bool ending_of(uint64_t id, uint64_t& rip, uint64_t& ns, int& signal) const {
+    bool ending_of(uint64_t id, uint64_t& rip, uint64_t& ns, int& signal, int& code, uint64_t& address) const {
         std::lock_guard held(lock);
         for (size_t k = 0; k < ended.size(); ++k) {
             const Ended& e = ended[(ended_next + ended.size() - 1 - k) % ended.size()];
-            if (e.id == id && e.ns) { rip = e.rip; ns = e.ns; signal = e.signal; return true; }
+            if (e.id == id && e.ns) { rip = e.rip; ns = e.ns; signal = e.signal; code = e.code; address = e.address; return true; }
         }
         return false;
     }
@@ -956,8 +958,8 @@ private:
         ProbeAddressSpace::guest_tls = thread.fs;
         current = &thread;
         maxps4_fex_guest_fault fault {};
-        uint64_t ended_rip = 0;
-        int ended_signal = 0;
+        uint64_t ended_rip = 0, ended_address = 0;
+        int ended_signal = 0, ended_code = 0;
         bool skip = false;
         { std::lock_guard guard(lock); skip = stopping; }
         if (!skip) {
@@ -971,7 +973,8 @@ private:
                     context->ExecuteThread(fex);
                     { std::lock_guard held(lock); thread.guard = nullptr; }
                     const int signal = guard.signal.load();
-                    ended_rip = fex->CurrentFrame->State.rip; ended_signal = signal;
+                    ended_rip = guard.fault_rip ? guard.fault_rip : fex->CurrentFrame->State.rip; ended_signal = signal;
+                    ended_code = guard.code; ended_address = guard.address;
                     // SIGURG only comes from finish(): a stop, not a fault.
                     if (signal && signal != SIGURG)
                         fault = {signal, guard.code, guard.address, fex->CurrentFrame->State.rip};
@@ -985,7 +988,7 @@ private:
             std::lock_guard guard(lock);
             if (fault.signal && !first_fault.signal) { first_fault = fault; stop_main = stopping = true; }
             if (thread.ends_process) stop_main = stopping = true;
-            ended[ended_next++ % ended.size()] = {thread.id, ended_rip, ProbeAddressSpace::now_ns(), ended_signal};
+            ended[ended_next++ % ended.size()] = {thread.id, ended_rip, ProbeAddressSpace::now_ns(), ended_address, ended_signal, ended_code};
             thread.finished = true; // `thread` may be reused from here on.
         }
         changed.notify_all();
@@ -1009,7 +1012,7 @@ private:
     std::condition_variable changed;
     std::array<Thread, maxps4::GuestELF::generalThreads> threads {};
     // The last threads that ended, for reports: where FEX stopped them.
-    struct Ended { uint64_t id = 0, rip = 0, ns = 0; int signal = 0; };
+    struct Ended { uint64_t id = 0, rip = 0, ns = 0, address = 0; int signal = 0, code = 0; };
     std::array<Ended, 32> ended {};
     size_t ended_next = 0;
     bool stopping = false, main_done = false, main_exited = false, timed_out = false;
@@ -2494,12 +2497,13 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                 std::lock_guard sampling(engine->sample_lock);
                 if (engine->probe.threads) {
                     out += engine->probe.threads->sample(thread, engine->relocation);
-                    uint64_t rip = 0, ended_ns = 0;
-                    int signal = 0;
-                    if (engine->probe.threads->ending_of(thread, rip, ended_ns, signal)) {
-                        std::snprintf(line, sizeof line, " · terminé il y a %.1f s en 0x%llx (signal %d), octets",
+                    uint64_t rip = 0, ended_ns = 0, address = 0;
+                    int signal = 0, code = 0;
+                    if (engine->probe.threads->ending_of(thread, rip, ended_ns, signal, code, address)) {
+                        std::snprintf(line, sizeof line, " · terminé il y a %.1f s en 0x%llx (signal %d code %d adresse 0x%llx), octets",
                             double(now - std::min(now, ended_ns)) / 1e9,
-                            (unsigned long long)(rip >= engine->relocation ? rip - engine->relocation : rip), signal);
+                            (unsigned long long)(rip >= engine->relocation ? rip - engine->relocation : rip), signal, code,
+                            (unsigned long long)address);
                         out += line;
                         uint8_t code[8] {};
                         if (engine->system_memory.read(rip, code, sizeof code))
