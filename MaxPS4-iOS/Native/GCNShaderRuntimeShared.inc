@@ -179,18 +179,27 @@ GCN_FN float4 gcn_texture_swizzle(GCNRes8 t, float4 value) {
     return float4(gf(gcn_sel(t.d[3] & 7u, c, 0x3f800000u)), gf(gcn_sel((t.d[3] >> 3) & 7u, c, 0x3f800000u)),
                   gf(gcn_sel((t.d[3] >> 6) & 7u, c, 0x3f800000u)), gf(gcn_sel((t.d[3] >> 9) & 7u, c, 0x3f800000u)));
 }
-// Linear 2D images (T# tiling index 8). Other tilings read as 0.
+// Byte offset of element (x, y): linear rows (T# tiling index 8), or thin
+// micro tiling (index 13, Thin_1dThin): 8x8 elements per tile, tiles row by
+// row, elements in Morton order (x0 y0 x1 y1 x2 y2). BC formats count blocks.
+GCN_FN ulong gcn_element_offset(uint x, uint y, uint pitch, uint bytes, uint tiling) {
+    if (tiling != 13u) return (ulong(y) * pitch + x) * bytes;
+    uint inner = (x & 1u) | ((y & 1u) << 1) | ((x & 2u) << 1) | ((y & 2u) << 2) | ((x & 4u) << 2) | ((y & 4u) << 3);
+    return (ulong(y >> 3) * ((pitch + 7u) >> 3) + (x >> 3)) * 64ul * bytes + ulong(inner) * bytes;
+}
+// Linear (tiling 8) and thin micro-tiled (13) 2D images. Other tilings read as 0.
 GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, ulong offset) {
     float4 native;
     if (gcn_native_texel(M, t, x, y, native)) return gcn_texture_swizzle(t, native);
     ulong base = (ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8;
     uint dfmt = (t.d[1] >> 20) & 0x3fu; uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u;
+    uint tiling = (t.d[3] >> 20) & 0x1fu;
     if (dfmt >= 35u && dfmt <= 39u) {
         uint number = (t.d[1] >> 26) & 15u;
         if ((number != 0u && !(dfmt >= 38u && number == 1u)) || pitch < (t.d[2] & 0x3fffu) + 1u)
             return float4(0.0f, 0.0f, 0.0f, 0.0f);
         uint blockBytes = (dfmt == 35u || dfmt == 38u) ? 8u : 16u;
-        ulong relative = (ulong(uint(y) / 4u) * ((pitch + 3u) / 4u) + uint(x) / 4u) * blockBytes;
+        ulong relative = gcn_element_offset(uint(x) / 4u, uint(y) / 4u, (pitch + 3u) / 4u, blockBytes, tiling);
         if (dfmt >= 38u) {
             uint pixel = (uint(y) & 3u) * 4u + (uint(x) & 3u);
             float4 colour = float4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -219,7 +228,7 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
     uint bytes = 4u;
     if (dfmt == 1u) bytes = 1u; else if (dfmt == 2u || dfmt == 3u || (dfmt >= 16u && dfmt <= 19u)) bytes = 2u;
     else if (dfmt == 14u) bytes = 16u;
-    ulong relative = (ulong(uint(y)) * pitch + uint(x)) * bytes;
+    ulong relative = gcn_element_offset(uint(x), uint(y), pitch, bytes, tiling);
     ulong at = base + relative;
     ulong packed = offset + relative;
     uint raw = resolved ? (bytes == 1u ? gcn_packed8(M, packed) : bytes == 2u ? gcn_packed16(M, packed) : gcn_packed32(M, packed))
@@ -299,8 +308,9 @@ GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u,
     // One gcn_sample_at for every case, for the reason given there.
     bool resolved = false;
     ulong offset = 0ul;
-    // A tiled T# reads only through a native texture (a colour target), else as 0.
-    if (((t.d[3] >> 20) & 0x1fu) != 8u) {
+    // Other tilings read only through a native texture (a colour target), else as 0.
+    uint tiling = (t.d[3] >> 20) & 0x1fu;
+    if (tiling != 8u && tiling != 13u) {
         if (!gcn_native_texel(M, t, 0, 0, filtered)) return float4(0.0f, 0.0f, 0.0f, 0.0f);
     } else {
         ulong base = (ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8;
@@ -310,9 +320,16 @@ GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u,
         // Address modes in gcn_fetch_at constrain every texel to [0,width)x[0,height).
         // Resolve that complete footprint once, not once per tap/channel. Sparse or
         // truncated resources retain the original checked-load path and zero reads.
-        ulong footprint = dfmt >= 35u && dfmt <= 39u
+        bool block = dfmt >= 35u && dfmt <= 39u;
+        ulong footprint = block
             ? (ulong((height + 3u) / 4u - 1u) * ((pitch + 3u) / 4u) + (width + 3u) / 4u) * ((dfmt == 35u || dfmt == 38u) ? 8ul : 16ul)
             : ((ulong(height) - 1ul) * pitch + width) * bytes;
+        // Micro-tiled: whole 8x8 tiles of elements (blocks for BC formats).
+        if (tiling == 13u) {
+            uint rows = block ? (height + 3u) / 4u : height, columns = block ? (pitch + 3u) / 4u : pitch;
+            footprint = ulong((rows + 7u) / 8u) * ((columns + 7u) / 8u) * 64ul *
+                        (block ? ((dfmt == 35u || dfmt == 38u) ? 8ul : 16ul) : ulong(bytes));
+        }
         resolved = gcn_locate(M, base, footprint, offset);
         if (!resolved) offset = 0ul;
     }

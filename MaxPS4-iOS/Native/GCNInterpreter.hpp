@@ -777,16 +777,25 @@ private:
         }
     }
     static std::uint64_t imageSize(const Image& t, unsigned bytes) {
-        return (t.dfmt >= 35 && t.dfmt <= 39) ? std::uint64_t((t.pitch + 3) / 4) * ((t.height + 3) / 4) * bytes :
-                              std::uint64_t(t.pitch) * t.height * bytes;
+        const bool block = t.dfmt >= 35 && t.dfmt <= 39;
+        const std::uint64_t columns = block ? (t.pitch + 3) / 4 : t.pitch, rows = block ? (t.height + 3) / 4 : t.height;
+        // Thin micro tiling (index 13): whole 8x8 tiles of elements.
+        if (t.tiling == 13) return ((rows + 7) / 8) * ((columns + 7) / 8) * 64 * bytes;
+        return columns * rows * bytes;
+    }
+    // As gcn_element_offset: linear rows, or Morton order inside 8x8 tiles (index 13).
+    static std::uint64_t elementOffset(std::uint32_t x, std::uint32_t y, std::uint32_t pitch, unsigned bytes, unsigned tiling) {
+        if (tiling != 13) return (std::uint64_t(y) * pitch + x) * bytes;
+        const std::uint32_t inner = (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
+        return (std::uint64_t(y >> 3) * ((pitch + 7) >> 3) + (x >> 3)) * 64 * bytes + std::uint64_t(inner) * bytes;
     }
     bool texel(const Image& t, int x, int y, float out[4]) {
         unsigned bytes = 0;
         imageBytes(t.dfmt, bytes);
         std::uint8_t data[16] = {};
         const std::uint64_t offset = (t.dfmt >= 35 && t.dfmt <= 39) ?
-            (std::uint64_t(std::uint32_t(y) / 4) * ((t.pitch + 3) / 4) + std::uint32_t(x) / 4) * bytes :
-            (std::uint64_t(std::uint32_t(y)) * t.pitch + std::uint32_t(x)) * bytes;
+            elementOffset(std::uint32_t(x) / 4, std::uint32_t(y) / 4, (t.pitch + 3) / 4, bytes, t.tiling) :
+            elementOffset(std::uint32_t(x), std::uint32_t(y), t.pitch, bytes, t.tiling);
         const std::vector<std::uint8_t>* surface = nullptr;
         if (images) {
             // Whole level 0 read once per cache lifetime (one draw).
@@ -917,7 +926,9 @@ private:
         // be interpreted by this CPU-side resource scan. The renderer uses
         // this to refuse unsupported writes instead of silently dropping them.
         if (i.opcode == 8 && stored) stored(t.base, 1);
-        if (t.tiling != 8) {
+        // Reads of thin micro-tiled images (index 13) go the linear way with
+        // tiled addresses; stores to them stay unsupported.
+        if (t.tiling != 8 && !(t.tiling == 13 && i.opcode != 8)) {
             // Still named to imageResource: a tiled T# is often a colour target
             // the Metal renderer holds as a texture.
             if (imageResource) {

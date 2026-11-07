@@ -118,14 +118,14 @@ int main() {
         assert(wave.exports[1].value[0][0] == 0x38003c00 && wave.exports[1].value[1][0] == 0x3c000000);
         assert(wave.exports[1].value[0][1] == 0x3c000000 && wave.exports[1].value[1][1] == 0x3c000000);
         assert(gcn_detail::f16(0x3800) == 0.5f && gcn_detail::f16Rtz(0.5f) == 0x3800 && gcn_detail::f16Rtz(1e6f) == 0x7bff);
-        // A tiled texture is refused, not read as linear.
+        // A 2D-tiled texture (index 14) is refused, not read as linear.
         arena.put(0x12000 - 0x2000, 0); // unrelated write keeps the arena in use
         GCNWave tiled(arena.memory, 4);
         for (unsigned n = 0; n < 8; ++n) tiled.s[n] = tsharp[n];
         for (unsigned n = 0; n < 4; ++n) { tiled.s[8 + n] = ssharp[n]; tiled.s[12 + n] = vsharp[n]; }
-        tiled.s[3] = 0x90d0032e;
+        tiled.s[3] = 0x90e0032e;
         tiled.attribute = wave.attribute;
-        assert(!tiled.run(0x10000) && tiled.error.find("tiled image (tile mode 13)") == 0);
+        assert(!tiled.run(0x10000) && tiled.error.find("tiled image (tile mode 14)") == 0);
     }
     // 3. A VS calling a fetch shader (s_swappc/s_setpc), a scalar loop and VOP3.
     {
