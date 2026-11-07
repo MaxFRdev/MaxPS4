@@ -2048,7 +2048,36 @@ int64_t PS4Libkernel::invoke(PS4KernelService service, const PS4KernelCall& c, u
     bool handled = false;
     int64_t result = extended(service, c, thread, handled);
     if (!handled) result = invoke_service(service, c, thread);
+    record_save_call(service, c, result);
     return posix ? posix_result(result, thread) : result;
+}
+void PS4Libkernel::record_save_call(PS4KernelService service, const PS4KernelCall& c, int64_t result) {
+    using S = PS4KernelService;
+    const auto at = [](S s) { return uint32_t(s); };
+    const bool save = (at(service) >= at(S::save_init) && at(service) <= at(S::save_memory_set2)) ||
+                      (at(service) >= at(S::save_dialog_init) && at(service) <= at(S::save_dialog_term));
+    const bool by_path = service == S::open || service == S::stat || service == S::mkdir || service == S::rmdir ||
+                         service == S::unlink || service == S::rename || service == S::truncate;
+    const bool by_fd = service == S::read || service == S::write || service == S::pread || service == S::pwrite ||
+                       service == S::close || service == S::fsync || service == S::ftruncate || service == S::fstat ||
+                       service == S::lseek || service == S::getdirentries;
+    if (!save && !by_path && !by_fd) return;
+    SaveCall entry{service, c, result, {}};
+    if (by_path) {
+        if (!memory_.read_cstring(c.rdi, entry.path, sizeof(entry.path)) || std::strncmp(entry.path, "/savedata", 9)) return;
+    }
+    std::lock_guard<std::mutex> guard(save_call_lock_);
+    if (by_fd) {
+        const auto it = std::find(save_fds_.begin(), save_fds_.end(), int64_t(int32_t(c.rdi)));
+        if (it == save_fds_.end()) return;
+        // Reads and writes that went through are counted, not listed.
+        if ((service == S::read || service == S::write || service == S::pread || service == S::pwrite ||
+             service == S::lseek || service == S::fstat) && result >= 0) return;
+        if (service == S::close) save_fds_.erase(it);
+    }
+    if (service == S::open && result >= 0 && save_fds_.size() < 64) save_fds_.push_back(result);
+    if (save) { std::lock_guard<std::mutex> state(lock_); save_root_seen_ = save_root_; }
+    save_calls_[save_calls_total_++ % save_call_limit] = entry;
 }
 int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c, uint64_t thread, bool& handled) {
     handled = true;

@@ -2583,6 +2583,26 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();
     {
+        std::array<maxps4::PS4Libkernel::SaveCall, maxps4::PS4Libkernel::save_call_limit> calls {};
+        size_t count = 0;
+        std::string root;
+        const size_t total = engine->libkernel.save_calls(calls, count, root);
+        if (total) {
+            char line[256];
+            std::snprintf(line, sizeof line, "Sauvegarde : dossier %s · %zu appels, récents d'abord :\n",
+                root.empty() ? "AUCUN" : root.c_str(), total);
+            out += line;
+            for (size_t i = 0; i < std::min<size_t>(count, 12); ++i) {
+                const auto& c = calls[i];
+                std::snprintf(line, sizeof line, "  %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx%s%s\n",
+                    service_name(c.service), (unsigned long long)c.call.rdi, (unsigned long long)c.call.rsi,
+                    (unsigned long long)c.call.rdx, (unsigned long long)c.call.rcx, (unsigned long long)c.result,
+                    c.path[0] ? " " : "", c.path);
+                out += line;
+            }
+        }
+    }
+    {
         const auto ajm = engine->libkernel.ajm().stats();
         if (ajm.batches || ajm.instances) {
             char line[200];

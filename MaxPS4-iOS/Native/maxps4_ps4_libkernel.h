@@ -248,7 +248,24 @@ public:
             out[i] = memory_failures_[(memory_failures_total_ - 1 - i) % memory_failure_limit];
         return memory_failures_total_;
     }
+    // Save data calls and file calls on /savedata paths or descriptors,
+    // newest first, with what the game passed and got.
+    struct SaveCall { PS4KernelService service{}; PS4KernelCall call{}; int64_t result = 0; char path[56] = {}; };
+    static constexpr size_t save_call_limit = 24;
+    size_t save_calls(std::array<SaveCall, save_call_limit>& out, size_t& count, std::string& root) const {
+        std::lock_guard<std::mutex> guard(save_call_lock_);
+        count = std::min(save_calls_total_, save_call_limit);
+        for (size_t i = 0; i < count; ++i) out[i] = save_calls_[(save_calls_total_ - 1 - i) % save_call_limit];
+        root = save_root_seen_;
+        return save_calls_total_;
+    }
 private:
+    mutable std::mutex save_call_lock_;
+    std::array<SaveCall, save_call_limit> save_calls_ {};
+    size_t save_calls_total_ = 0;
+    std::string save_root_seen_;
+    std::vector<int64_t> save_fds_;
+    void record_save_call(PS4KernelService service, const PS4KernelCall& call, int64_t result);
     mutable std::mutex memory_failure_lock_;
     std::array<MemoryFailure, memory_failure_limit> memory_failures_ {};
     size_t memory_failures_total_ = 0;
