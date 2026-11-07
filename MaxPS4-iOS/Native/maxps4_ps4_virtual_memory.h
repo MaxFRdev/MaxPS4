@@ -65,10 +65,14 @@ public:
     // Recent map/unmap/protect calls, for the report of a thread that faulted
     // on game memory. `kind`: 'm' placed, 'f' fixed, 'u' unmapped, 'p' protected.
     struct Operation { uint64_t address = 0, size = 0, ns = 0, result = 0; uint32_t protection = 0; int error = 0; char kind = 0; };
-    static constexpr size_t operation_limit = 4096;
-    // The last calls (oldest first) whose span (or result span) holds
-    // `address`; returns how many there were among the kept ones.
-    size_t operations_at(uint64_t address, std::array<Operation, 6>& out, size_t& count) const;
+    static constexpr size_t operation_limit = 16384;
+    // The last calls (oldest first) whose span (or result span) comes within
+    // `radius` bytes of `address` (0: holds it); returns how many there were
+    // among the kept ones. `total`: calls recorded since the start.
+    size_t operations_at(uint64_t address, uint64_t radius, std::array<Operation, 6>& out, size_t& count, size_t& total) const;
+    // The mapped spans nearest below and above `address` (0, 0 when none).
+    // Unsynchronized, like translate(): for reports.
+    void neighbours(uint64_t address, uint64_t& below_start, uint64_t& below_end, uint64_t& above_start, uint64_t& above_end) const;
     static uint64_t clock_ns();
     // The mapping holding `address` (or, with `next`, the first at or after it):
     // its span of pages with the same permissions and their PS4 protection

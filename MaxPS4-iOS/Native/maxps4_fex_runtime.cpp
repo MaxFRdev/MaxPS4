@@ -130,6 +130,20 @@ public:
     // recent calls are often all audio output by the time a game stops.
     std::array<RecentCall, 64> failed {};
     uint64_t failed_next = 0;
+    // The last memory calls that returned an error (same lock): other
+    // failures (missing imports) soon push them out of `failed`.
+    std::array<RecentCall, 16> memory_failed {};
+    uint64_t memory_failed_next = 0;
+    static bool memory_service(maxps4::PS4KernelService s) {
+        using S = maxps4::PS4KernelService;
+        switch (s) {
+        case S::direct_allocate: case S::direct_allocate_main: case S::direct_map: case S::direct_release:
+        case S::flexible_map: case S::flexible_map_unnamed: case S::flexible_release: case S::posix_mmap:
+        case S::reserve_range: case S::mtype_protect: case S::pool_reserve: case S::pool_commit:
+        case S::pool_decommit: case S::mprotect: case S::munmap: case S::mmap: return true;
+        default: return false;
+        }
+    }
     // The last files the game did open (same lock): where its data really is.
     std::array<RecentCall, 32> opened {};
     uint64_t opened_next = 0;
@@ -284,6 +298,7 @@ public:
                 std::lock_guard<std::mutex> guard(recent_lock);
                 recent[recent_next++ % recent.size()] = entry;
                 if (error_result(result)) failed[failed_next++ % failed.size()] = entry;
+                if (error_result(result) && memory_service(orbis)) memory_failed[memory_failed_next++ % memory_failed.size()] = entry;
                 else if (orbis == maxps4::PS4KernelService::open) opened[opened_next++ % opened.size()] = entry;
             }
             ++calls;
@@ -2484,24 +2499,51 @@ static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address) {
         (info.max_protection & VM_PROT_WRITE) ? 'w' : '-', (info.max_protection & VM_PROT_EXECUTE) ? 'x' : '-');
     out += line;
 #endif
-    std::array<maxps4::PS4VirtualMemory::Operation, 6> operations {};
-    size_t shown = 0;
-    const size_t found = engine->dynamic_ps4.operations_at(address, operations, shown);
-    const uint64_t now = maxps4::PS4VirtualMemory::clock_ns();
-    std::snprintf(line, sizeof line, " · %zu appels mémoire sur cette page", found);
+    uint64_t below_start = 0, below_end = 0, above_start = 0, above_end = 0;
+    engine->dynamic_ps4.neighbours(address, below_start, below_end, above_start, above_end);
+    std::snprintf(line, sizeof line, " · mappé avant : 0x%llx-0x%llx, après : 0x%llx-0x%llx",
+        (unsigned long long)below_start, (unsigned long long)below_end,
+        (unsigned long long)above_start, (unsigned long long)above_end);
     out += line;
-    for (size_t i = 0; i < shown; ++i) {
-        const auto& o = operations[i];
-        const char* kind = o.kind == 'u' ? "unmap" : o.kind == 'p' ? "protect" : o.kind == 'f' ? "map fixe" : "map";
-        std::snprintf(line, sizeof line, "%s il y a %.2f s %s 0x%llx +0x%llx prot 0x%x%s",
-            i ? " ;" : " :", double(now - std::min(now, o.ns)) / 1e9, kind,
-            (unsigned long long)o.address, (unsigned long long)o.size, o.protection, o.error ? " REFUSÉ" : "");
+    const uint64_t now = maxps4::PS4VirtualMemory::clock_ns();
+    for (const uint64_t radius : {uint64_t(0), uint64_t(32) << 20}) {
+        std::array<maxps4::PS4VirtualMemory::Operation, 6> operations {};
+        size_t shown = 0, total = 0;
+        const size_t found = engine->dynamic_ps4.operations_at(address, radius, operations, shown, total);
+        std::snprintf(line, sizeof line, radius ? " · %zu appels mémoire à moins de 32 Mio (sur %zu)" :
+            " · %zu appels mémoire sur cette page (sur %zu)", found, total);
         out += line;
-        if (o.result && o.result != o.address) {
-            std::snprintf(line, sizeof line, " -> 0x%llx", (unsigned long long)o.result);
+        for (size_t i = 0; i < shown; ++i) {
+            const auto& o = operations[i];
+            const char* kind = o.kind == 'u' ? "unmap" : o.kind == 'p' ? "protect" : o.kind == 'f' ? "map fixe" : "map";
+            std::snprintf(line, sizeof line, "%s il y a %.2f s %s 0x%llx +0x%llx prot 0x%x%s",
+                i ? " ;" : " :", double(now - std::min(now, o.ns)) / 1e9, kind,
+                (unsigned long long)o.address, (unsigned long long)o.size, o.protection, o.error ? " REFUSÉ" : "");
             out += line;
+            if (o.result && o.result != o.address) {
+                std::snprintf(line, sizeof line, " -> 0x%llx", (unsigned long long)o.result);
+                out += line;
+            }
         }
     }
+    // Memory calls libkernel refused before reaching the mappings (they are
+    // not in the history above).
+    using S = maxps4::PS4KernelService;
+    std::lock_guard<std::mutex> calls(engine->probe.recent_lock);
+    const auto& failed = engine->probe.memory_failed;
+    const uint64_t next = engine->probe.memory_failed_next, kept = std::min<uint64_t>(next, failed.size());
+    size_t listed = 0;
+    for (uint64_t i = next; i > next - kept && listed < 6; --i) {
+        const auto& c = failed[(i - 1) % failed.size()];
+        std::snprintf(line, sizeof line, "%s %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx",
+            listed ? " ;" : " · appels mémoire refusés (récents d'abord) :", service_name(static_cast<S>(c.service)),
+            (unsigned long long)c.a0, (unsigned long long)c.a1, (unsigned long long)c.a2,
+            (unsigned long long)c.a3, (unsigned long long)c.result);
+        out += line;
+        ++listed;
+    }
+    if (!listed) out += " · aucun appel mémoire refusé";
+    else { std::snprintf(line, sizeof line, " (%llu en tout)", (unsigned long long)next); out += line; }
     return out;
 }
 extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, char* text, size_t capacity) {
@@ -2556,7 +2598,7 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                         if (engine->system_memory.read(rip, code, sizeof code))
                             for (const uint8_t byte : code) { std::snprintf(line, sizeof line, " %02x", byte); out += line; }
                         else out += " illisibles";
-                        if (address) out += fault_memory(engine, address);
+                        if (address && signal != SIGILL) out += fault_memory(engine, address);
                     }
                 }
                 else out += " · threads inconnus";

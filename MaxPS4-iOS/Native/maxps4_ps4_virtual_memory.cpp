@@ -176,12 +176,17 @@ void PS4VirtualMemory::record(char kind, uint64_t address, uint64_t size, uint32
     std::lock_guard guard(moved_lock_);
     operations_[operations_total_++ % operation_limit] = {address, size, clock_ns(), result, protection, int(error), kind};
 }
-size_t PS4VirtualMemory::operations_at(uint64_t address, std::array<Operation, 6>& out, size_t& count) const {
+size_t PS4VirtualMemory::operations_at(uint64_t address, uint64_t radius, std::array<Operation, 6>& out, size_t& count, size_t& total) const {
     std::lock_guard guard(moved_lock_);
     const size_t kept = std::min(operations_total_, operation_limit);
     size_t found = 0;
     count = 0;
-    auto holds = [address](uint64_t start, uint64_t size) { return start && address >= start && address - start < size; };
+    total = operations_total_;
+    const uint64_t low = address > radius ? address - radius : 0;
+    const uint64_t high = address > UINT64_MAX - radius ? UINT64_MAX : address + radius;
+    auto holds = [low, high](uint64_t start, uint64_t size) {
+        return start && start <= high && (size > UINT64_MAX - start ? UINT64_MAX : start + size) > low;
+    };
     // Newest first, then reversed to oldest first.
     for (size_t i = 0; i < kept; ++i) {
         const Operation& o = operations_[(operations_total_ - 1 - i) % operation_limit];
@@ -384,6 +389,22 @@ Error PS4VirtualMemory::protect_unrecorded(uint64_t address, uint64_t length, ui
     const size_t first = size_t((address - region->address) / page_size);
     std::fill_n(region->pages.begin() + long(first), size_t(size / page_size), permission);
     return ok;
+}
+void PS4VirtualMemory::neighbours(uint64_t address, uint64_t& below_start, uint64_t& below_end,
+                                  uint64_t& above_start, uint64_t& above_end) const {
+    below_start = below_end = above_start = above_end = 0;
+    for (const auto& region : regions_) {
+        // Runs of mapped pages, merged across touching regions by the caller's eye.
+        for (size_t i = 0; i < region.pages.size(); ) {
+            if (region.pages[i] == 0xff) { ++i; continue; }
+            size_t j = i;
+            while (j < region.pages.size() && region.pages[j] != 0xff) ++j;
+            const uint64_t start = region.address + i * page_size, end = region.address + j * page_size;
+            if (end <= address && end > below_end) { below_start = start; below_end = end; }
+            if (start > address && (!above_start || start < above_start)) { above_start = start; above_end = end; }
+            i = j;
+        }
+    }
 }
 void PS4VirtualMemory::reset() {
     // Host pages go back to PROT_NONE (and zero) only while they still lie in
