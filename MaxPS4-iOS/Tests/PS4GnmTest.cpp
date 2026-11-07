@@ -114,6 +114,10 @@ int main() {
     words=load(256); assert(words[0]==0xc0017602 && words[1]==0x216 && gpu::decodePM4Type3(words.data(),256));
     assert(gnm.init_context_state(out,0x20,0x20)==0x20 && gnm.init_context_state(out,0x21,0x20)==0);
     words=load(0x20); assert(words[0]==0xc01e1000 && gpu::decodePM4Type3(words.data(),0x20));
+    // A store that fails writes nothing and returns 0 dwords, never -1: the
+    // caller adds the count to its command pointer.
+    assert(gnm.init_default_state350(out+2,300)==0 && gnm.dispatch_init_default_state(out+2,256)==0 &&
+           gnm.init_context_state(out+2,0x20,0x20)==0);
     assert(gnm.reset_vgt(out,3)==0); words=load(3); assert(words[0]==0xc0016900 && words[1]==0x2aa && words[2]==0xff);
     assert(gnm.ps(out,40,0)==0); words=load(40);
     assert(words[0]==0xc0027600 && words[4]==0xc0016900 && words[5]==0x203 && gpu::decodePM4Type3(words.data(),40));

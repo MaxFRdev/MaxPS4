@@ -3,6 +3,7 @@
 #include "maxps4_ps4_abi.h"
 #include <array>
 #include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 namespace maxps4 {
@@ -17,7 +18,9 @@ public:
 // dereferences the returned pointer directly; otherwise they are logical
 // buffers from `base`. x86 executable bytes remain host DATA (FEX does not
 // run them yet); this is not an iOS executable-code allocator.
-// Owner serializes access and resets this object whenever it restages the ELF.
+// Owner resets this object whenever it restages the ELF. Guest threads read
+// the mappings (translate) while others change them: regions_lock_ orders
+// them, as regions_ moves when it grows.
 class PS4VirtualMemory final : public PS4DynamicMemory {
 public:
     // A general image's mmap window; false for other images.
@@ -91,7 +94,9 @@ private:
         bool outside = false;
     };
     const GuestELF& image_;
+    mutable std::shared_mutex regions_lock_;
     std::vector<Region> regions_;
+    size_t contiguous_unlocked(uint64_t address, size_t limit, uint32_t permissions) const;
     size_t used_ = 0;
     // Read by the session report while the game maps memory.
     mutable std::mutex moved_lock_;

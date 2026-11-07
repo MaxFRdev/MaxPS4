@@ -1002,6 +1002,9 @@ private:
         changed.notify_all();
         if (!stop_main) return;
         // A faulting or exiting thread ends the process: stop the main thread too.
+        // Its next HLE call ends it (a game loop around waits that now return
+        // at once otherwise spins forever).
+        ending_.store(true, std::memory_order_relaxed);
         identities.interrupt();
         std::unique_lock guard(lock);
         while (!main_done) {
