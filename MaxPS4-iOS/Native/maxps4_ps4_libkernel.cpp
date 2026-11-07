@@ -2745,6 +2745,19 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
     }
 }
 int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCall& c) {
+    const int64_t result = memory_service_unrecorded(service, c);
+    if (result < 0) {
+        using S = PS4KernelService;
+        uint64_t hint = 0;
+        uint8_t wire[8];
+        if ((service == S::direct_map || service == S::flexible_map || service == S::flexible_map_unnamed ||
+             service == S::reserve_range) && c.rdi && memory_.read(c.rdi, wire, 8)) hint = get_le(wire, 8);
+        std::lock_guard<std::mutex> guard(memory_failure_lock_);
+        memory_failures_[memory_failures_total_++ % memory_failure_limit] = {service, c, hint, result};
+    }
+    return result;
+}
+int64_t PS4Libkernel::memory_service_unrecorded(PS4KernelService service, const PS4KernelCall& c) {
     using S = PS4KernelService;
     // The PS4's direct memory: 5056 MiB of physical address space.
     constexpr uint64_t direct_total = uint64_t(5056) * 1024 * 1024, page = PS4VirtualMemory::page_size;

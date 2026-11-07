@@ -130,20 +130,6 @@ public:
     // recent calls are often all audio output by the time a game stops.
     std::array<RecentCall, 64> failed {};
     uint64_t failed_next = 0;
-    // The last memory calls that returned an error (same lock): other
-    // failures (missing imports) soon push them out of `failed`.
-    std::array<RecentCall, 16> memory_failed {};
-    uint64_t memory_failed_next = 0;
-    static bool memory_service(maxps4::PS4KernelService s) {
-        using S = maxps4::PS4KernelService;
-        switch (s) {
-        case S::direct_allocate: case S::direct_allocate_main: case S::direct_map: case S::direct_release:
-        case S::flexible_map: case S::flexible_map_unnamed: case S::flexible_release: case S::posix_mmap:
-        case S::reserve_range: case S::mtype_protect: case S::pool_reserve: case S::pool_commit:
-        case S::pool_decommit: case S::mprotect: case S::munmap: case S::mmap: return true;
-        default: return false;
-        }
-    }
     // The last files the game did open (same lock): where its data really is.
     std::array<RecentCall, 32> opened {};
     uint64_t opened_next = 0;
@@ -298,7 +284,6 @@ public:
                 std::lock_guard<std::mutex> guard(recent_lock);
                 recent[recent_next++ % recent.size()] = entry;
                 if (error_result(result)) failed[failed_next++ % failed.size()] = entry;
-                if (error_result(result) && memory_service(orbis)) memory_failed[memory_failed_next++ % memory_failed.size()] = entry;
                 else if (orbis == maxps4::PS4KernelService::open) opened[opened_next++ % opened.size()] = entry;
             }
             ++calls;
@@ -2477,7 +2462,7 @@ extern "C" int32_t maxps4_fex_set_tso_emulation(uint32_t enabled) {
 // calls that covered it.
 static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address) {
     std::string out;
-    char line[192];
+    char line[320];
     std::snprintf(line, sizeof line, " · page du jeu : lecture %s, écriture %s",
         engine->system_memory.permitted(address, 1, 4) ? "oui" : "non",
         engine->system_memory.permitted(address, 1, 2) ? "oui" : "non");
@@ -2526,24 +2511,24 @@ static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address) {
             }
         }
     }
-    // Memory calls libkernel refused before reaching the mappings (they are
-    // not in the history above).
-    using S = maxps4::PS4KernelService;
-    std::lock_guard<std::mutex> calls(engine->probe.recent_lock);
-    const auto& failed = engine->probe.memory_failed;
-    const uint64_t next = engine->probe.memory_failed_next, kept = std::min<uint64_t>(next, failed.size());
+    // Memory calls libkernel refused (BatchMap entries included), some before
+    // reaching the mappings above.
+    std::array<maxps4::PS4Libkernel::MemoryFailure, maxps4::PS4Libkernel::memory_failure_limit> failures {};
     size_t listed = 0;
-    for (uint64_t i = next; i > next - kept && listed < 6; --i) {
-        const auto& c = failed[(i - 1) % failed.size()];
-        std::snprintf(line, sizeof line, "%s %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx",
-            listed ? " ;" : " · appels mémoire refusés (récents d'abord) :", service_name(static_cast<S>(c.service)),
-            (unsigned long long)c.a0, (unsigned long long)c.a1, (unsigned long long)c.a2,
-            (unsigned long long)c.a3, (unsigned long long)c.result);
+    const size_t refused = engine->libkernel.memory_failures(failures, listed);
+    if (!refused) out += " · aucun appel mémoire refusé";
+    else {
+        std::snprintf(line, sizeof line, " · %zu appels mémoire refusés, récents d'abord :", refused);
         out += line;
-        ++listed;
     }
-    if (!listed) out += " · aucun appel mémoire refusé";
-    else { std::snprintf(line, sizeof line, " (%llu en tout)", (unsigned long long)next); out += line; }
+    for (size_t i = 0; i < std::min<size_t>(listed, 6); ++i) {
+        const auto& f = failures[i];
+        std::snprintf(line, sizeof line, "%s %s(0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx) adresse 0x%llx = 0x%llx",
+            i ? " ;" : "", service_name(f.service), (unsigned long long)f.call.rdi, (unsigned long long)f.call.rsi,
+            (unsigned long long)f.call.rdx, (unsigned long long)f.call.rcx, (unsigned long long)f.call.r8,
+            (unsigned long long)f.hint, (unsigned long long)f.result);
+        out += line;
+    }
     return out;
 }
 extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, char* text, size_t capacity) {

@@ -8,6 +8,7 @@
 #include "maxps4_ps4_audio_out.h"
 #include "maxps4_ps4_gnm.h"
 #include "maxps4_ps4_gnm_queue.h"
+#include <algorithm>
 #include <array>
 #include <map>
 #include <string>
@@ -229,7 +230,23 @@ public:
     std::string console() { std::lock_guard<std::mutex> guard(lock_); return std::string(console_.begin(), console_.end()); }
     static constexpr size_t console_limit = 4096;
     static constexpr int32_t abort_status = 134; // As a process killed by SIGABRT.
+    // Memory services that returned an error, BatchMap entries included:
+    // `hint` is what *rdi held for the calls that take a void** address.
+    struct MemoryFailure { PS4KernelService service{}; PS4KernelCall call{}; uint64_t hint = 0; int64_t result = 0; };
+    static constexpr size_t memory_failure_limit = 16;
+    // The last failures, newest first; returns how many there were in all.
+    size_t memory_failures(std::array<MemoryFailure, memory_failure_limit>& out, size_t& count) const {
+        std::lock_guard<std::mutex> guard(memory_failure_lock_);
+        count = std::min(memory_failures_total_, memory_failure_limit);
+        for (size_t i = 0; i < count; ++i)
+            out[i] = memory_failures_[(memory_failures_total_ - 1 - i) % memory_failure_limit];
+        return memory_failures_total_;
+    }
 private:
+    mutable std::mutex memory_failure_lock_;
+    std::array<MemoryFailure, memory_failure_limit> memory_failures_ {};
+    size_t memory_failures_total_ = 0;
+    int64_t memory_service_unrecorded(PS4KernelService service, const PS4KernelCall& call);
     PS4GuestMemory& memory_;
     PS4VirtualMemory* dynamic_;
     std::mutex load_exec_lock_;
