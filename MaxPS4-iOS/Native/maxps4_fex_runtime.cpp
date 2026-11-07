@@ -1321,6 +1321,22 @@ extern "C" int32_t maxps4_fex_engine_probe(maxps4_fex_engine *engine,
 
 static std::string fault_registers(maxps4_fex_engine* engine, const std::array<uint64_t, 16>& gprs);
 static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address);
+// The first faulting child thread, its exact instruction, registers and target memory.
+static std::string fault_detail(maxps4_fex_engine* engine, const maxps4_fex_guest_fault& fault, uint64_t id,
+                                const std::array<uint64_t, 16>& gprs) {
+    char line[256];
+    const uint64_t rip = fault.rip >= engine->relocation ? fault.rip - engine->relocation : fault.rip;
+    std::snprintf(line, sizeof line, "Plantage : thread %llu, signal %d code %d adresse 0x%llx, instruction exacte 0x%llx, octets",
+        (unsigned long long)id, fault.signal, fault.code, (unsigned long long)fault.address, (unsigned long long)rip);
+    std::string detail = line;
+    uint8_t bytes[8] {};
+    if (engine->system_memory.read(fault.rip, bytes, sizeof bytes))
+        for (const uint8_t b : bytes) { std::snprintf(line, sizeof line, " %02x", b); detail += line; }
+    else detail += " illisibles";
+    detail += fault_memory(engine, fault.address);
+    detail += fault_registers(engine, gprs);
+    return detail + "\n";
+}
 namespace {
 struct PM4Request {
     uint64_t address;
@@ -1491,18 +1507,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
             uint64_t id = 0;
             std::array<uint64_t, 16> gprs {};
             threads->fault_thread(id, gprs);
-            char line[256];
-            const uint64_t rip = child.rip >= engine->relocation ? child.rip - engine->relocation : child.rip;
-            std::snprintf(line, sizeof line, "Plantage : thread %llu, signal %d code %d adresse 0x%llx, instruction exacte 0x%llx, octets",
-                (unsigned long long)id, child.signal, child.code, (unsigned long long)child.address, (unsigned long long)rip);
-            std::string detail = line;
-            uint8_t bytes[8] {};
-            if (engine->system_memory.read(child.rip, bytes, sizeof bytes))
-                for (const uint8_t b : bytes) { std::snprintf(line, sizeof line, " %02x", b); detail += line; }
-            else detail += " illisibles";
-            detail += fault_memory(engine, child.address);
-            detail += fault_registers(engine, gprs);
-            engine->last_fault_detail = detail + "\n";
+            engine->last_fault_detail = fault_detail(engine, child, id, gprs);
         }
         else if (signal) engine->last_fault = {signal, guard.code, guard.address, state.rip};
         if (signal) {
@@ -2616,6 +2621,16 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();
     out += engine->last_fault_detail;
+    if (engine->last_fault_detail.empty()) {
+        // While the run stops, before the threads are gone: the live report
+        // keeps it even if the app itself dies on the way.
+        std::lock_guard sampling(engine->sample_lock);
+        maxps4_fex_guest_fault fault {};
+        uint64_t id = 0;
+        std::array<uint64_t, 16> gprs {};
+        if (engine->probe.threads && engine->probe.threads->faulted(fault) && engine->probe.threads->fault_thread(id, gprs))
+            out += fault_detail(engine, fault, id, gprs);
+    }
     {
         std::array<maxps4::PS4Libkernel::SaveCall, maxps4::PS4Libkernel::save_call_limit> calls {};
         size_t count = 0;
