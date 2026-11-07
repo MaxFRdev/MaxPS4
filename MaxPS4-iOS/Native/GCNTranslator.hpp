@@ -1017,7 +1017,7 @@ GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locat
 // Which of the draw's Metal textures (0 to 3) views T# `t`, or -1.
 GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
     const uint dfmt = (t.d[1] >> 20) & 63u;
-    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u && dfmt != 41u)) return -1;
+    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u && dfmt != 41u && (dfmt < 35u || dfmt > 37u))) return -1;
     const uint4 low = uint4(t.d[0],t.d[1],t.d[2],t.d[3]), high = uint4(t.d[4],t.d[5],t.d[6],t.d[7]);
     const uint enabled = M.native->enabled;
     if ((enabled & 1u) && all(M.native->low == low) && all(M.native->high == high)) return 0;
