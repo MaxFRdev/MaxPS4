@@ -2064,7 +2064,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         // pending. Skip this image rather than fail: the game ignores the error
         // and spins forever on the prepareFlip label (Sonic Mania after its
         // first flip on the iPhone).
-        if (shown == PS4VideoOut::error(0x12)) videoout_.count_dropped();
+        if (shown == PS4VideoOut::error(0x12)) videoout_.count_dropped(get_le(stack + 16, 8));
         else if (shown) return shown;
         // The work is already retired: what prepareFlip asks for happens at
         // the flip's vblank.

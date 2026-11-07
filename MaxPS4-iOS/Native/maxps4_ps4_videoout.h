@@ -117,7 +117,8 @@ public:
         try {
             std::vector<uint8_t> pixels(copy ? attr.bytes() : 0);
             if (copy && !memory_.read(buffer.address, pixels.data(), pixels.size())) return error(0x13);
-            if (frame_.ticket) { ++dropped_; ++replaced_; }
+            // The replaced flip still owes its event, before this one's.
+            if (frame_.ticket) { ++dropped_; ++replaced_; owed_before_.push_back(frame_.flip_argument); }
             frame_ = {next_frame_++, port_, argument, attr.width, attr.height, attr.pitch, attr.format, uint32_t(index), attr.tiled ? 1U : 0U, attr.bytes()};
             pixels_.swap(pixels); taken_ = false;
         } catch (const std::bad_alloc&) { return error(0x100c); }
@@ -213,7 +214,13 @@ public:
     }
     // A flip refused because another is still pending (error 0x12) and skipped
     // by sceGnmSubmitAndFlipCommandBuffers instead of failing the submission.
-    void count_dropped() { std::lock_guard<std::mutex> lock(guard_); ++dropped_; }
+    // A skipped flip still gets its flip event, after the pending one's: on
+    // the hardware every flip is shown, and Call of Duty counts the frame
+    // buffers it may reuse by these events (one lost each froze it for good).
+    void count_dropped(uint64_t argument) {
+        std::lock_guard<std::mutex> lock(guard_); ++dropped_;
+        if (owed_after_.size() < 64) owed_after_.push_back(argument);
+    }
     uint64_t dropped() { std::lock_guard<std::mutex> lock(guard_); return dropped_; }
     // Flips the game asked for: accepted (tickets issued) plus skipped.
     uint64_t requested() { std::lock_guard<std::mutex> lock(guard_); return next_frame_ - 1 + dropped_ - replaced_; }
@@ -237,9 +244,16 @@ public:
         std::lock_guard<std::mutex> lock(guard_);
         if (!ticket || ticket != frame_.ticket) return error(1);
         if (presented) {
-            ++flip_count_; last_argument_ = frame_.flip_argument; current_buffer_ = int32_t(frame_.buffer_index);
-            flip_time_ = now(); events_.video_event_notify(port_, 6, last_argument_, flip_time_);
+            current_buffer_ = int32_t(frame_.buffer_index); flip_time_ = now();
+            auto flipped = [&](uint64_t argument) {
+                ++flip_count_; last_argument_ = argument;
+                events_.video_event_notify(port_, 6, argument, flip_time_);
+            };
+            for (const uint64_t argument : owed_before_) flipped(argument);
+            flipped(frame_.flip_argument);
+            for (const uint64_t argument : owed_after_) flipped(argument);
         }
+        owed_before_.clear(); owed_after_.clear();
         frame_ = {}; pixels_.clear(); taken_ = false; return 0;
     }
     // The host's pause: vblanks stop counting and flips waiting for one keep
@@ -321,6 +335,9 @@ private:
     int32_t current_buffer_ = -1;
     uint32_t output_width_ = 1920, output_height_ = 1080;
     maxps4_videoout_frame frame_{}; std::vector<uint8_t> pixels_; Deferred deferred_{};
+    // Flip arguments of replaced (before frame_) and skipped (after) flips,
+    // whose events come with frame_'s.
+    std::vector<uint64_t> owed_before_, owed_after_;
     bool taken_ = false; // The host holds frame_'s ticket: it may complete it.
     bool paused_ = false; // Kept across reset: the host's state, not the game's.
     bool stopping_ = false; // Until reset: the run is ending.
@@ -352,6 +369,7 @@ private:
     void clear() {
         if (port_) events_.video_event_remove_source(port_);
         port_ = 0; frame_ = {}; pixels_.clear(); groups_.fill({}); buffers_.fill({}); deferred_ = {}; taken_ = false;
+        owed_before_.clear(); owed_after_.clear();
         flip_count_ = vblank_count_ = flip_time_ = vblank_time_ = dropped_ = paced_vblank_ = replaced_ = flip_returned_ = retired_at_ = 0; stopping_ = false; flip_rate_ = 0;
         last_argument_ = UINT64_MAX; current_buffer_ = -1; paced_.notify_all();
     }
