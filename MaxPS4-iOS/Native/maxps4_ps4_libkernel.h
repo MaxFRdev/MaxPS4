@@ -130,7 +130,8 @@ enum class PS4KernelService : uint32_t {
     // libSceAjm (PS4Ajm).
     ajm_initialize, ajm_finalize, ajm_module_register, ajm_module_unregister, ajm_instance_create,
     ajm_instance_destroy, ajm_instance_codec, ajm_job_control, ajm_job_run, ajm_job_run_split, ajm_job_inline,
-    ajm_batch_start, ajm_batch_wait, ajm_batch_cancel, ajm_memory_register, ajm_memory_unregister, ajm_mp3_parse
+    ajm_batch_start, ajm_batch_wait, ajm_batch_cancel, ajm_memory_register, ajm_memory_unregister, ajm_mp3_parse,
+    app_space_kb
 };
 // Token bit of a trampoline whose function follows the POSIX convention: -1
 // with the error in the calling thread's errno (__Error) instead of an Orbis

@@ -502,6 +502,8 @@ constexpr Binding bindings[] = {
     {"sceAppContentAppParamGetInt", "99b82IKXpH4", PS4KernelService::app_param_int, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
     {"sceAppContentTemporaryDataMount2", "buYbeLOGWmA", PS4KernelService::app_temp_mount, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
     {"sceAppContentTemporaryDataUnmount", "bcolXMmp6qQ", PS4KernelService::succeed, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
+    {"sceAppContentDownloadDataGetAvailableSpaceKb", "Gl6w5i0JokY", PS4KernelService::app_space_kb, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
+    {"sceAppContentTemporaryDataGetAvailableSpaceKb", "SaKib2Ug0yI", PS4KernelService::app_space_kb, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
     // Real-time clock: ticks are microseconds since 0001-01-01 00:00 UTC.
     {"sceRtcGetCurrentTick", "18B2NS1y9UU", PS4KernelService::rtc_current_tick, "libSceRtc"},
     {"sceRtcGetCurrentNetworkTick", "zO9UL3qIINQ", PS4KernelService::rtc_current_tick, "libSceRtc"},
@@ -2423,6 +2425,13 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (c.rdi > 4 || !c.rsi) return signed32(0x80D90002U);
         return write(c.rsi, c.rdi == 0 ? 3 : 0, 4) ? 0 : signed32(0x80D90002U);
     case S::app_temp_mount: return temp_mount(c.rsi);
+    // Download/TemporaryDataGetAvailableSpaceKb(mount point, u64* kb): 1 GiB
+    // free, so a game does not turn its saving or caching off for lack of space.
+    case S::app_space_kb: {
+        if (!c.rsi) return int64_t(int32_t(0x80d90002U));
+        uint8_t wire[8]; put_le(wire, 0, uint64_t(1024) * 1024, 8);
+        return memory_.write(c.rsi, wire, 8) ? 0 : int64_t(int32_t(0x80d90002U));
+    }
     case S::rtc_current_tick: case S::rtc_current_clock: case S::rtc_current_local:
     case S::rtc_get_tick: case S::rtc_set_tick: case S::rtc_resolution: case S::rtc_utc_to_local: case S::rtc_time_t:
         return rtc(service, c);
