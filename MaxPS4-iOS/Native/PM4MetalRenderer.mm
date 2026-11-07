@@ -798,6 +798,19 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     descriptor.cpuCacheMode = holder.cpuCacheMode;
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> view = [holder newTextureWithDescriptor:descriptor offset:offset bytesPerRow:rowBytes];
+    // What Metal reads for a video plane, at its start and middle, when the
+    // CPU can see the buffer (guest memory may hold data a stale copy lacks).
+    if (view && dfmt == 1 && holder.storageMode == MTLStorageModeShared && holder.contents) {
+        const auto* bytesSeen = static_cast<const std::uint8_t*>(holder.contents) + offset;
+        unsigned counts[2] = {0, 0};
+        for (unsigned half = 0; half < 2; ++half)
+            for (unsigned i = 0; i < 64; ++i) counts[half] += bytesSeen[half * (bytes / 2) + i] != 0;
+        char text[160];
+        std::snprintf(text, sizeof text, "%llux%llu base 0x%llx : non nuls %u/64, %u/64 (buffer %s)",
+                      (unsigned long long)width, (unsigned long long)height, (unsigned long long)base, counts[0], counts[1],
+                      holder == memory ? "mémoire" : "partagé");
+        nativeLastPlane = text;
+    }
     return view ? view : miss(4, alignment);
 }
 

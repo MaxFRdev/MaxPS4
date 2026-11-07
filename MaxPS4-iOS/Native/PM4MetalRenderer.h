@@ -144,6 +144,8 @@ public:
     // ranges, alignment, Metal view refused; and the last refused T#.
     unsigned nativeMisses[5] = {};
     std::string nativeLastMiss;
+    // The last 8-bit (video plane) view: non-zero bytes Metal sees, out of 64.
+    std::string nativeLastPlane;
     // A Metal sampler with S# `s`'s address modes and filters, for an argument
     // buffer; nil for modes Metal has no match for (border, mirror once) or
     // depth compare, which keep GCN's filtering.
