@@ -77,6 +77,8 @@ struct GameMetalState {
             @"\nTextures natives : %u dessins, %u textures (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
             renderer.nativeDraws, renderer.nativeViews, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
+        if (nativeTextures && !renderer.nativeLastPlane.empty())
+            native = [native stringByAppendingFormat:@"\nDernier plan vidéo vu par Metal : %s", renderer.nativeLastPlane.c_str()];
         const std::string refusal = renderer.pipelineError();
         const std::string pending = renderer.pipelineStatus();
         native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés · lectures directes %u sur %u%s%s%s%@",
