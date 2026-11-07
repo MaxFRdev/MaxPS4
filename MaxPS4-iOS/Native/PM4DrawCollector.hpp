@@ -255,7 +255,17 @@ private:
         d.indices.resize(count);
         if (indexed) {
             std::vector<std::uint8_t> bytes(std::size_t(count) * indexBytes_);
-            if (!memory_.read(indexAddress, bytes.data(), bytes.size())) { stats_.fail("unreadable index buffer"); return; }
+            // An index buffer the guest memory does not hold skips that draw
+            // only: one missing draw beats stopping the game. Its address goes
+            // to the report.
+            if (!memory_.read(indexAddress, bytes.data(), bytes.size())) {
+                char text[96];
+                std::snprintf(text, sizeof text, "tampon d'indices illisible 0x%llx (%zu octets)",
+                              (unsigned long long)indexAddress, bytes.size());
+                ++stats_.skipped;
+                stats_.lastSkipped = text;
+                return;
+            }
             for (std::uint32_t k = 0; k < count; ++k) {
                 std::uint32_t value = 0;
                 std::memcpy(&value, bytes.data() + std::size_t(k) * indexBytes_, indexBytes_);

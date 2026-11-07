@@ -235,7 +235,12 @@ int main() {
     reject({0xc0012600, 0x10001, 0, 0xc0033500, 3, 0, 3, 0}, "index offset draw range");
     reject({0xc0012600, 0x10000, 0, 0xc0033500, 2, 0, 3, 0}, "index offset draw range");
     reject({0xc0012600, 0x10000, 0, 0xc0033500, 3, 0, 0, 0}, "index offset draw range");
-    reject({0xc0012600, 0x10000, 0, 0xc0033500, 3, 32, 3, 0}, "unreadable index buffer", 1);
+    {   // An unreadable index buffer skips the draw and names its address.
+        Fixture f;
+        f.run({0xc0012600, 0x10000, 0, 0xc0033500, 3, 32, 3, 0});
+        assert(f.stats.failed == 0 && f.stats.skipped == 1 && f.draws.empty() && f.reads == 1);
+        assert(f.stats.lastSkipped.find("tampon d'indices illisible 0x") == 0);
+    }
     reject({0xc0012600, 0xfffffffc, 0xffff, 0xc0033500, 3, 2, 3, 0}, "index offset draw range");
     reject({0xc0012600, 0xfffffffc, 0xffff, 0xc0033500, 3, 0, 3, 0}, "index offset draw range");
     reject({0xc0012600, 0x10000, 0x10000}, "index base packet");
