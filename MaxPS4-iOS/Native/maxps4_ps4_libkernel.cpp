@@ -565,6 +565,8 @@ constexpr Binding bindings[] = {
     {"scePlayGoGetEta", "v6EZ-YWRdMs", PS4KernelService::playgo_eta, "libScePlayGo"},
     {"scePlayGoGetInstallSpeed", "rvBSfTimejE", PS4KernelService::playgo_speed, "libScePlayGo"},
     {"scePlayGoSetInstallSpeed", "4AAcTU9R3XM", PS4KernelService::succeed, "libScePlayGo"},
+    // Everything is installed: nothing to prefetch (shadPS4 returns OK too).
+    {"scePlayGoPrefetch", "-Q1-u1a7p0g", PS4KernelService::succeed, "libScePlayGo"},
     {"scePlayGoGetLanguageMask", "3OMbYZBaa50", PS4KernelService::playgo_language, "libScePlayGo"},
     {"scePlayGoSetLanguageMask", "LosLlHOpNqQ", PS4KernelService::succeed, "libScePlayGo"},
     {"scePlayGoGetChunkId", "73fF1MFU8hA", PS4KernelService::playgo_chunks, "libScePlayGo"},
