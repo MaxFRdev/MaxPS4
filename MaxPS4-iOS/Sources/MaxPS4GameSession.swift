@@ -78,7 +78,6 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var stopped = false
     private var ready = false
     private var port: UInt64 = 1
-    private var missingSince: Date?
     private var lockWait: TimeInterval = 0 // Last snapshot's wait for `lock`.
     private var pad = MaxPS4PadState()
     private var lastBeat = "" // The last heartbeat() text, under lock.
@@ -385,14 +384,14 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let timing = String(format: "Préparation : verrou session %.1f ms · cible %.1f ms · copie %.1f ms",
                             lockWait * 1000, (located - started - lockWait) * 1000,
                             (ProcessInfo.processInfo.systemUptime - located) * 1000)
+        // A flip the GPU never drew (a game clearing its first frames on the
+        // CPU, or before any submission) is still handed back, or the game
+        // waits for it forever: the screen keeps its last image. The report
+        // counts these flips ("sans cible Metal").
         guard let texture = copied else {
-            if missingSince == nil { missingSince = Date() }
-            if Date().timeIntervalSince(missingSince!) > 5 {
-                throw failure("Aucune texture Metal pour le buffer retourné", -EIO)
-            }
+            complete(ticket: info.ticket, presented: true)
             return nil
         }
-        missingSince = nil
         return Frame(info: info, texture: texture, event: displayEvent, eventValue: displayEventValue,
                      report: bridge.report + "\n" + timing)
     }
