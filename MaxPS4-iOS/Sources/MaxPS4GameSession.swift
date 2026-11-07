@@ -389,18 +389,19 @@ final class MaxPS4GameSource: @unchecked Sendable {
         // waits for it forever: the screen keeps its last image. The report
         // counts these flips ("sans cible Metal").
         guard let texture = copied else {
-            complete(ticket: info.ticket, presented: true)
+            complete(ticket: info.ticket, presented: true, shown: false)
             return nil
         }
         return Frame(info: info, texture: texture, event: displayEvent, eventValue: displayEventValue,
                      report: bridge.report + "\n" + timing)
     }
-    @discardableResult func complete(ticket: UInt64, presented: Bool) -> Bool {
+    // `shown`: false for a flip handed back without an image to show.
+    @discardableResult func complete(ticket: UInt64, presented: Bool, shown: Bool = true) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard let engine else { return false }
         let confirmed = presented && !stopped
         let result = maxps4_fex_engine_videoout_complete(engine, ticket, confirmed ? 1 : 0)
-        if result == 0 && confirmed { displayed += 1 }
+        if result == 0 && confirmed && shown { displayed += 1 }
         return result == 0 && confirmed
     }
     func stop() {
