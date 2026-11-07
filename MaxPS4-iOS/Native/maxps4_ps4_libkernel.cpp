@@ -1,3 +1,7 @@
+// The one translation unit with minimp3's decoder (PS4Ajm).
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_FLOAT_OUTPUT
+#include "minimp3.h"
 #include "maxps4_ps4_libkernel.h"
 #include "maxps4_fex_runtime.h"
 #include "maxps4_ps4_kernel_path.h"
@@ -741,6 +745,23 @@ constexpr Binding bindings[] = {
     {"sceNetResolverGetError", "J5i3hiLJMPk", PS4KernelService::succeed, "libSceNet"},
     {"sceNetErrnoLoc", "HQOwnfMGipQ", PS4KernelService::errno_location, "libSceNet"},
     {"sceNetInetNtop", "9vA2aW+CHuA", PS4KernelService::net_ntop, "libSceNet"},
+    {"sceAjmInitialize", "dl+4eHSzUu4", PS4KernelService::ajm_initialize, "libSceAjm"},
+    {"sceAjmFinalize", "MHur6qCsUus", PS4KernelService::ajm_finalize, "libSceAjm"},
+    {"sceAjmModuleRegister", "Q3dyFuwGn64", PS4KernelService::ajm_module_register, "libSceAjm"},
+    {"sceAjmModuleUnregister", "Wi7DtlLV+KI", PS4KernelService::ajm_module_unregister, "libSceAjm"},
+    {"sceAjmInstanceCreate", "AxoDrINp4J8", PS4KernelService::ajm_instance_create, "libSceAjm"},
+    {"sceAjmInstanceDestroy", "RbLbuKv8zho", PS4KernelService::ajm_instance_destroy, "libSceAjm"},
+    {"sceAjmInstanceCodecType", "diXjQNiMu-s", PS4KernelService::ajm_instance_codec, "libSceAjm"},
+    {"sceAjmBatchJobControlBufferRa", "dmDybN--Fn8", PS4KernelService::ajm_job_control, "libSceAjm"},
+    {"sceAjmBatchJobRunBufferRa", "ElslOCpOIns", PS4KernelService::ajm_job_run, "libSceAjm"},
+    {"sceAjmBatchJobRunSplitBufferRa", "7jdAXK+2fMo", PS4KernelService::ajm_job_run_split, "libSceAjm"},
+    {"sceAjmBatchJobInlineBuffer", "stlghnic3Jc", PS4KernelService::ajm_job_inline, "libSceAjm"},
+    {"sceAjmBatchStartBuffer", "fFFkk0xfGWs", PS4KernelService::ajm_batch_start, "libSceAjm"},
+    {"sceAjmBatchWait", "-qLsfDAywIY", PS4KernelService::ajm_batch_wait, "libSceAjm"},
+    {"sceAjmBatchCancel", "NVDXiUesSbA", PS4KernelService::ajm_batch_cancel, "libSceAjm"},
+    {"sceAjmMemoryRegister", "bkRHEYG6lEM", PS4KernelService::ajm_memory_register, "libSceAjm"},
+    {"sceAjmMemoryUnregister", "pIpGiaYkHkM", PS4KernelService::ajm_memory_unregister, "libSceAjm"},
+    {"sceAjmDecMp3ParseFrame", "eDFeTyi+G3Y", PS4KernelService::ajm_mp3_parse, "libSceAjm"},
     {"sceNetInetPton", "8Kcp5d-q1Uo", PS4KernelService::net_pton, "libSceNet"},
     // HTTP, HTTP/2 and Web API contexts open; every request fails (offline).
     {"sceHttpInit", "A9cVMUtEp4Y", PS4KernelService::net_pool, "libSceHttp"},
@@ -920,7 +941,7 @@ PS4KernelService resolve_libkernel(std::string_view symbol, std::string_view lib
     return PS4KernelService::unresolved;
 }
 PS4Libkernel::PS4Libkernel(PS4GuestMemory& memory, PS4VirtualMemory* dynamic)
-    : memory_(memory), dynamic_(dynamic), threads_(memory), videoout_(memory, threads_), user_service_(memory), pad_(memory), audio_(memory, threads_), gnm_(memory), graphics_(memory), started_us_(monotonic_us()) {}
+    : memory_(memory), dynamic_(dynamic), threads_(memory), videoout_(memory, threads_), user_service_(memory), pad_(memory), audio_(memory, threads_), ajm_(memory), gnm_(memory), graphics_(memory), started_us_(monotonic_us()) {}
 PS4Libkernel::~PS4Libkernel() {
     reset();
 }
@@ -2292,6 +2313,31 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         return audio_.open(signed32(c.rdi), signed32(c.rsi), signed32(c.rdx), uint32_t(c.rcx), uint32_t(c.r8), uint32_t(c.r9));
     case S::audio_close: return audio_.close(signed32(c.rdi));
     case S::audio_output: return audio_.output(signed32(c.rdi), c.rsi);
+    case S::ajm_initialize: return ajm_.initialize(c.rdi, c.rsi);
+    case S::ajm_finalize: case S::ajm_memory_register: case S::ajm_memory_unregister: return 0;
+    case S::ajm_module_register: return ajm_.module_register(uint32_t(c.rdi), uint32_t(c.rsi), c.rdx);
+    case S::ajm_module_unregister: return ajm_.module_unregister(uint32_t(c.rdi), uint32_t(c.rsi));
+    case S::ajm_instance_create: return ajm_.instance_create(uint32_t(c.rdi), uint32_t(c.rsi), c.rdx, c.rcx);
+    case S::ajm_instance_destroy: return ajm_.instance_destroy(uint32_t(c.rdi), uint32_t(c.rsi));
+    case S::ajm_instance_codec: return PS4Ajm::codec_type(uint32_t(c.rdi));
+    case S::ajm_job_inline: return int64_t(ajm_.job_inline(c.rdi, c.rsi, c.rdx, c.rcx));
+    case S::ajm_job_control: case S::ajm_job_run: case S::ajm_job_run_split: {
+        // Arguments after R9 on the stack: two for a control job, four for a run.
+        uint8_t stack[32]{};
+        const size_t words = service == S::ajm_job_control ? 2 : 4;
+        if (!c.rsp || c.rsp > UINT64_MAX - 40 || !memory_.read(c.rsp + 8, stack, words * 8)) return 0;
+        const uint64_t s0 = get_le(stack, 8), s1 = get_le(stack + 8, 8), s2 = get_le(stack + 16, 8), s3 = get_le(stack + 24, 8);
+        if (service == S::ajm_job_control)
+            return int64_t(ajm_.job_control(c.rdi, uint32_t(c.rsi), c.rdx, c.rcx, c.r8, c.r9, s0, s1));
+        if (service == S::ajm_job_run)
+            return int64_t(ajm_.job_run(c.rdi, uint32_t(c.rsi), c.rdx, c.rcx, c.r8, c.r9, s0, s1, s2, s3));
+        return int64_t(ajm_.job_run_split(c.rdi, uint32_t(c.rsi), c.rdx, c.rcx, c.r8, c.r9, s0, s1, s2, s3));
+    }
+    case S::ajm_batch_start:
+        return ajm_.start(uint32_t(c.rdi), c.rsi, uint32_t(c.rdx), signed32(c.rcx), c.r8, c.r9);
+    case S::ajm_batch_wait: return ajm_.wait(uint32_t(c.rdi), uint32_t(c.rsi), uint32_t(c.rdx), c.rcx);
+    case S::ajm_batch_cancel: return ajm_.cancel(uint32_t(c.rdi), uint32_t(c.rsi));
+    case S::ajm_mp3_parse: return ajm_.parse_mp3_frame(c.rdi, uint32_t(c.rsi), signed32(c.rdx), c.rcx);
     case S::user_terminate: return user_service_.terminate();
     case S::user_initial: return user_service_.initial_user(c.rdi);
     case S::user_login_list: return user_service_.login_users(c.rdi);

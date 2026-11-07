@@ -2582,6 +2582,18 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
     out += engine->libkernel.graphics().submit_activity();
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();
+    {
+        const auto ajm = engine->libkernel.ajm().stats();
+        if (ajm.batches || ajm.instances) {
+            char line[200];
+            std::snprintf(line, sizeof line, "Ajm : %u instances · %llu lots, %llu tâches (%llu en erreur, dernier résultat 0x%x) · %llu trames MP3, %llu échantillons
+",
+                ajm.instances, (unsigned long long)ajm.batches, (unsigned long long)ajm.jobs,
+                (unsigned long long)ajm.failed_jobs, unsigned(ajm.last_result), (unsigned long long)ajm.frames,
+                (unsigned long long)ajm.samples);
+            out += line;
+        }
+    }
     const uint64_t now = ProbeAddressSpace::now_ns();
     if (const uint64_t asked = engine->probe.stop_asked_ns.load()) {
         const uint64_t told = engine->probe.stop_told_ns.load();

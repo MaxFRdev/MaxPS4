@@ -6,6 +6,7 @@
 #include "maxps4_ps4_user_service.h"
 #include "maxps4_ps4_pad.h"
 #include "maxps4_ps4_audio_out.h"
+#include "maxps4_ps4_ajm.h"
 #include "maxps4_ps4_gnm.h"
 #include "maxps4_ps4_gnm_queue.h"
 #include <algorithm>
@@ -125,7 +126,11 @@ enum class PS4KernelService : uint32_t {
     gnm_dispatch_indirect_mec, thread_getname,
     trophy_game_info, trophy_group_info, trophy_unlock_state, rtc_time_t,
     attr_getschedparam, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_timedwait, sem_post, uuid_create,
-    net_pton, net_ntop
+    net_pton, net_ntop,
+    // libSceAjm (PS4Ajm).
+    ajm_initialize, ajm_finalize, ajm_module_register, ajm_module_unregister, ajm_instance_create,
+    ajm_instance_destroy, ajm_instance_codec, ajm_job_control, ajm_job_run, ajm_job_run_split, ajm_job_inline,
+    ajm_batch_start, ajm_batch_wait, ajm_batch_cancel, ajm_memory_register, ajm_memory_unregister, ajm_mp3_parse
 };
 // Token bit of a trampoline whose function follows the POSIX convention: -1
 // with the error in the calling thread's errno (__Error) instead of an Orbis
@@ -223,6 +228,7 @@ public:
     PS4VideoOut& videoout() { return videoout_; }
     PS4Pad& pad() { return pad_; }
     PS4AudioOut& audio() { return audio_; }
+    PS4Ajm& ajm() { return ajm_; }
     PS4GnmQueue& graphics() { return graphics_; }
     // The last console_limit bytes the game wrote to its stdout and stderr.
     // What the game last passed to sceSystemServiceLoadExec; empty if nothing.
@@ -256,6 +262,7 @@ private:
     PS4UserService user_service_;
     PS4Pad pad_;
     PS4AudioOut audio_;
+    PS4Ajm ajm_;
     PS4Gnm gnm_;
     PS4GnmQueue graphics_;
     uint64_t errno_table_ = 0, errno_table_size_ = 0, process_param_ = 0;
