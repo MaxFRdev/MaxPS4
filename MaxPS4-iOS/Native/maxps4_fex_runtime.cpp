@@ -919,11 +919,16 @@ public:
         return out;
     }
     // How a thread that is no longer running ended (false: unknown).
-    bool ending_of(uint64_t id, uint64_t& rip, uint64_t& ns, int& signal, int& code, uint64_t& address) const {
+    bool ending_of(uint64_t id, uint64_t& rip, uint64_t& ns, int& signal, int& code, uint64_t& address,
+                   std::array<uint64_t, 16>* gprs = nullptr) const {
         std::lock_guard held(lock);
         for (size_t k = 0; k < ended.size(); ++k) {
             const Ended& e = ended[(ended_next + ended.size() - 1 - k) % ended.size()];
-            if (e.id == id && e.ns) { rip = e.rip; ns = e.ns; signal = e.signal; code = e.code; address = e.address; return true; }
+            if (e.id == id && e.ns) {
+                rip = e.rip; ns = e.ns; signal = e.signal; code = e.code; address = e.address;
+                if (gprs) *gprs = e.gprs;
+                return true;
+            }
         }
         return false;
     }
@@ -959,6 +964,7 @@ private:
         current = &thread;
         maxps4_fex_guest_fault fault {};
         uint64_t ended_rip = 0, ended_address = 0;
+        std::array<uint64_t, 16> ended_gprs {};
         int ended_signal = 0, ended_code = 0;
         bool skip = false;
         { std::lock_guard guard(lock); skip = stopping; }
@@ -975,6 +981,8 @@ private:
                     const int signal = guard.signal.load();
                     ended_rip = guard.fault_rip ? guard.fault_rip : fex->CurrentFrame->State.rip; ended_signal = signal;
                     ended_code = guard.code; ended_address = guard.address;
+                    // Guest registers as the stop handler spilled them (x86 encoding order).
+                    std::copy_n(std::begin(fex->CurrentFrame->State.gregs), 16, ended_gprs.begin());
                     // SIGURG only comes from finish(): a stop, not a fault.
                     if (signal && signal != SIGURG)
                         fault = {signal, guard.code, guard.address, fex->CurrentFrame->State.rip};
@@ -988,7 +996,7 @@ private:
             std::lock_guard guard(lock);
             if (fault.signal && !first_fault.signal) { first_fault = fault; stop_main = stopping = true; }
             if (thread.ends_process) stop_main = stopping = true;
-            ended[ended_next++ % ended.size()] = {thread.id, ended_rip, ProbeAddressSpace::now_ns(), ended_address, ended_signal, ended_code};
+            ended[ended_next++ % ended.size()] = {thread.id, ended_rip, ProbeAddressSpace::now_ns(), ended_address, ended_signal, ended_code, ended_gprs};
             thread.finished = true; // `thread` may be reused from here on.
         }
         changed.notify_all();
@@ -1012,7 +1020,7 @@ private:
     std::condition_variable changed;
     std::array<Thread, maxps4::GuestELF::generalThreads> threads {};
     // The last threads that ended, for reports: where FEX stopped them.
-    struct Ended { uint64_t id = 0, rip = 0, ns = 0, address = 0; int signal = 0, code = 0; };
+    struct Ended { uint64_t id = 0, rip = 0, ns = 0, address = 0; int signal = 0, code = 0; std::array<uint64_t, 16> gprs {}; };
     std::array<Ended, 32> ended {};
     size_t ended_next = 0;
     bool stopping = false, main_done = false, main_exited = false, timed_out = false;
@@ -2460,6 +2468,33 @@ extern "C" int32_t maxps4_fex_set_tso_emulation(uint32_t enabled) {
 // Where a thread's faulting access went: the game's view of the page (read,
 // write), the host's protection of it, and the game's last map/unmap/protect
 // calls that covered it.
+// The guest registers of a faulting thread, and the first 0x30 bytes each
+// readable register points at (a Gnm command buffer: begin, end, current,
+// reserve callback and its argument).
+static std::string fault_registers(maxps4_fex_engine* engine, const std::array<uint64_t, 16>& gprs) {
+    static constexpr const char* names[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+                                              "r8","r9","r10","r11","r12","r13","r14","r15"};
+    std::string out = " · registres :";
+    char line[160];
+    for (size_t i = 0; i < 16; ++i) {
+        std::snprintf(line, sizeof line, " %s 0x%llx", names[i], (unsigned long long)gprs[i]);
+        out += line;
+    }
+    for (const size_t i : {size_t(3), size_t(7), size_t(14)}) {
+        uint8_t bytes[0x30];
+        if (!gprs[i] || !engine->system_memory.read(gprs[i], bytes, sizeof bytes)) continue;
+        std::snprintf(line, sizeof line, " · [%s] :", names[i]);
+        out += line;
+        for (size_t q = 0; q < sizeof bytes / 8; ++q) {
+            const uint64_t value = maxps4::ps4::get_le(bytes + 8 * q, 8);
+            const bool code = value >= engine->relocation && value - engine->relocation < 0x10000000;
+            std::snprintf(line, sizeof line, code ? " code+0x%llx" : " 0x%llx",
+                (unsigned long long)(code ? value - engine->relocation : value));
+            out += line;
+        }
+    }
+    return out;
+}
 static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address) {
     std::string out;
     char line[320];
@@ -2573,7 +2608,8 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                     out += engine->probe.threads->sample(thread, engine->relocation);
                     uint64_t rip = 0, ended_ns = 0, address = 0;
                     int signal = 0, code = 0;
-                    if (engine->probe.threads->ending_of(thread, rip, ended_ns, signal, code, address)) {
+                    std::array<uint64_t, 16> gprs {};
+                    if (engine->probe.threads->ending_of(thread, rip, ended_ns, signal, code, address, &gprs)) {
                         std::snprintf(line, sizeof line, " · terminé il y a %.1f s en 0x%llx (signal %d code %d adresse 0x%llx), octets",
                             double(now - std::min(now, ended_ns)) / 1e9,
                             (unsigned long long)(rip >= engine->relocation ? rip - engine->relocation : rip), signal, code,
@@ -2583,7 +2619,10 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                         if (engine->system_memory.read(rip, code, sizeof code))
                             for (const uint8_t byte : code) { std::snprintf(line, sizeof line, " %02x", byte); out += line; }
                         else out += " illisibles";
-                        if (address && signal != SIGILL) out += fault_memory(engine, address);
+                        if (address && signal != SIGILL) {
+                            out += fault_memory(engine, address);
+                            out += fault_registers(engine, gprs);
+                        }
                     }
                 }
                 else out += " · threads inconnus";
