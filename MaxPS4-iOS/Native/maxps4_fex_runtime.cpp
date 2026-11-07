@@ -112,7 +112,7 @@ public:
     // Per guest thread: the HLE call in progress, or the last one and when it
     // returned, so a stalled game shows where each of its threads waits.
     struct Activity {
-        std::atomic<uint64_t> thread {0}, since {0}, returned {0}, rsp {0}, rbp {0};
+        std::atomic<uint64_t> thread {0}, since {0}, returned {0}, rsp {0}, rbp {0}, argument {0};
         std::atomic<uint32_t> service {0};
         std::atomic<bool> inside {false};
     };
@@ -227,7 +227,8 @@ public:
             Activity* slot = activity_slot();
             if (slot) {
                 slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns();
-                slot->rsp = r[x86::REG_RSP]; slot->rbp = r[x86::REG_RBP]; slot->inside = true;
+                slot->rsp = r[x86::REG_RSP]; slot->rbp = r[x86::REG_RBP]; slot->argument = r[x86::REG_RDI];
+                slot->inside = true;
             }
             const uint32_t stub = static_cast<uint32_t>(orbis) - maxps4::missing_import_token;
             if (static_cast<uint32_t>(orbis) >= maxps4::missing_import_token) {
@@ -2405,6 +2406,15 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         std::snprintf(line, sizeof line, "thread %llu : dans %s depuis %.1f s (%llu appels)",
             (unsigned long long)thread, name, seconds, returned);
         out += line;
+        // A thread waiting for a mutex: who holds it (itself: a deadlock).
+        if (raw == static_cast<uint32_t>(maxps4::PS4KernelService::mutex_lock)) {
+            const uint64_t owner = engine->libkernel.threads().mutex_owner(a.argument.load());
+            if (owner == thread) out += " · verrou déjà tenu par ce thread";
+            else if (owner) {
+                std::snprintf(line, sizeof line, " · verrou tenu par le thread %llu", (unsigned long long)owner);
+                out += line;
+            }
+        }
         // Where the game called from: the return address, then the frame pointer
         // chain (the stack stays put while the thread is inside the service).
         auto relative = [&](uint64_t rip) { return rip >= engine->relocation ? rip - engine->relocation : rip; };

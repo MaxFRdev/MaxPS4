@@ -284,6 +284,11 @@ Error PS4Threads::lock(uint64_t slot, uint64_t thread) {
     mutex->count = 1;
     return ok;
 }
+uint64_t PS4Threads::mutex_owner(uint64_t slot) {
+    std::lock_guard<std::mutex> lock(guard_);
+    const Mutex* mutex = slot ? lookup(slot) : nullptr;
+    return mutex ? mutex->owner : 0;
+}
 Error PS4Threads::unlock(uint64_t slot, uint64_t thread) {
     {
         std::lock_guard<std::mutex> lock(guard_);

@@ -50,6 +50,8 @@ public:
     // and a normal one blocks (until interrupt()), as POSIX says.
     ps4::Error lock(uint64_t slot, uint64_t thread);
     ps4::Error unlock(uint64_t slot, uint64_t thread);
+    // The thread holding the mutex at `slot`, 0 if none (for reports).
+    uint64_t mutex_owner(uint64_t slot);
     ps4::Error destroy(uint64_t slot);
     // Condition attributes (clock, process sharing) do not change waits here.
     ps4::Error cond_init(uint64_t slot, uint64_t attributes, uint64_t name);
