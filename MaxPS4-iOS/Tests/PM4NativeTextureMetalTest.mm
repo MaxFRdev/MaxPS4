@@ -369,6 +369,49 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             assert(worst <= 2 && fast != refused);
             std::puts("PASS a transparent black border is filtered by Metal's sampler");
         }
+        // 3d. BC1 and BC3 T#s in tile mode 13, as Call of Duty's menu: decoded
+        //     once into a texture Metal filters, as close to the translated
+        //     shader's own BC decode (the reference, refused sampler) as BC
+        //     interpolation rounding allows.
+        for (unsigned dfmt : {35u, 37u}) {
+            constexpr unsigned bcW = 256, bcH = 128;
+            const unsigned bytes = (bcW / 4) * (bcH / 4) * (dfmt == 35 ? 8 : 16);
+            for (unsigned n = 0; n < bytes / 4; ++n) arena.put(image + 4 * n, noise(n * 3 + dfmt));
+            auto decoded = [&](bool nativeOnly, uint32_t sampler) {
+                PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
+                renderer.nativeSamplesOnly = nativeOnly;
+                const uint32_t bc[12] = {std::uint32_t(image >> 8), dfmt << 20, (bcW - 1) | ((bcH - 1) << 14), 0x90d00facu,
+                                         (bcW - 1) << 13, 0, 0, 0, sampler, 0, 0x500000, 0};
+                std::memcpy(d.psUser, bc, sizeof bc);
+                id<MTLCommandBuffer> commands = [queue commandBuffer];
+                const bool encoded = renderer.encode(d, commands);
+                if (!encoded) std::printf("BC T#: %s\n", renderer.error.c_str());
+                assert(encoded);
+                [commands commit]; [commands waitUntilCompleted];
+                assert(commands.status == MTLCommandBufferStatusCompleted && !commands.error);
+                if (nativeOnly && !(sampler >> 12)) assert(renderer.nativeDraws == 1);
+                return pixels(renderer.target(target));
+            };
+            const uint32_t clamp = 2 | (2 << 3);
+            const auto fast = decoded(true, clamp);
+            const auto slow = decoded(false, clamp | (1 << 12));
+            const auto refused = decoded(true, clamp | (1 << 12));
+            unsigned worst = 0;
+            std::size_t far = 0;
+            for (std::size_t k = 0; k < fast.size(); ++k) {
+                const unsigned difference = unsigned(std::abs(int(fast[k]) - int(slow[k])));
+                worst = std::max(worst, difference); far += difference > 2;
+            }
+            std::printf("BC%u tile 13: worst difference with the shader's decode %u, %zu bytes over 2\n", dfmt == 35 ? 1 : 3, worst, far);
+            assert(worst <= 4 && far * 100 < fast.size() && fast != refused);
+        }
+        for (unsigned n = 0; n < imageW * imageH; ++n) arena.put(image + 4 * n, noise(n + 7));
+        {
+            const uint32_t linear[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,
+                                         (imageW - 1) << 13, 0, 0, 0, 0, 0, 0x500000, 0};
+            std::memcpy(d.psUser, linear, sizeof linear);
+        }
+        std::puts("PASS BC1 and BC3 tiled T#s are decoded once and filtered by Metal");
         // 4. Asynchronous pipelines (the game bridge): the first draw is
         //    deferred while Metal builds its pipeline, a later one draws.
         {

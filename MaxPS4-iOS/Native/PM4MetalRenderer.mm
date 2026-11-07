@@ -701,14 +701,18 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
     return buffer;
 }
 
-// A BC7 T# in tile mode 13 (Thin_1dThin: blocks in 8x8 micro tiles, Morton
-// order inside) decoded once into a texture: Metal cannot sample it on iPhone.
-id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch) {
+// A BC1, BC2, BC3 or BC7 T# (dfmt 35, 36, 37, 41) in tile mode 13
+// (Thin_1dThin: blocks in 8x8 micro tiles, Morton order inside) decoded once
+// into an RGBA8 texture: Metal cannot sample BC textures on iPhone, and the
+// translated shader would otherwise decode every texel it samples.
+id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch,
+                                            unsigned dfmt) {
+    const std::uint64_t blockBytes = dfmt == 35 ? 8 : 16;
     const std::uint64_t blocksWide = (pitch + 3) / 4, blocksHigh = (height + 3) / 4;
     const std::uint64_t tilesWide = (blocksWide + 7) / 8, tilesHigh = (blocksHigh + 7) / 8;
-    const std::uint64_t bytes = tilesWide * tilesHigh * 64 * 16;
+    const std::uint64_t bytes = tilesWide * tilesHigh * 64 * blockBytes;
     if (!bytes || bytes > (64ull << 20)) return nil;
-    const auto key = std::make_tuple(base, width, height);
+    const auto key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32, height);
     const auto found = bc7Textures_.find(key);
     if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
     // A game fills its atlases as it loads: 16 bytes of every 4 KiB, once a
@@ -722,19 +726,27 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     if (found != bc7Textures_.end() && found->second.mark == mark) { found->second.batch = batchSerial_; return found->second.texture; }
     std::vector<std::uint8_t> blocks(bytes);
     copyGuest(base, blocks.data(), bytes);
-    const std::uint64_t rowBytes = blocksWide * 16;
+    const std::uint64_t rowBytes = blocksWide * 16; // 4 RGBA8 pixels per block row.
     std::vector<std::uint8_t> pixels(rowBytes * blocksHigh * 4);
     for (std::uint64_t y = 0; y < blocksHigh; ++y) for (std::uint64_t x = 0; x < blocksWide; ++x) {
         const std::uint64_t morton = (x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3;
-        const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * 16;
-        bcdec_bc7(blocks.data() + at, pixels.data() + y * 4 * rowBytes + x * 16, int(rowBytes));
+        const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * blockBytes;
+        std::uint8_t* out = pixels.data() + y * 4 * rowBytes + x * 16;
+        switch (dfmt) {
+        case 35: bcdec_bc1(blocks.data() + at, out, int(rowBytes)); break;
+        case 36: bcdec_bc2(blocks.data() + at, out, int(rowBytes)); break;
+        case 37: bcdec_bc3(blocks.data() + at, out, int(rowBytes)); break;
+        default: bcdec_bc7(blocks.data() + at, out, int(rowBytes)); break;
+        }
     }
     auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
     if (!texture) return nil;
     [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
-    if (bc7Textures_.size() >= 32) bc7Textures_.clear();
+    // Menus draw from hundreds of small BC textures: keep up to 256 MiB.
+    decodedBytes_ += std::uint64_t(width) * height * 4;
+    if (bc7Textures_.size() >= 512 || decodedBytes_ > (256ull << 20)) { bc7Textures_.clear(); decodedBytes_ = std::uint64_t(width) * height * 4; }
     bc7Textures_[key] = {texture, mark, batchSerial_};
     return texture;
 }
@@ -754,9 +766,9 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         nativeLastMiss = text;
         return nil;
     };
-    if (dfmt == 41) {
+    if (dfmt == 41 || dfmt == 35 || dfmt == 36 || dfmt == 37) {
         if (((t[3] >> 20) & 31) != 13 || ((t[1] >> 26) & 15) != 0) return miss(1, 0);
-        id<MTLTexture> decoded = bc7Texture(base, width, height, pitch);
+        id<MTLTexture> decoded = bc7Texture(base, width, height, pitch, dfmt);
         return decoded ? decoded : miss(4, 0);
     }
     // A colour target lives only in its Metal texture, never written back to
