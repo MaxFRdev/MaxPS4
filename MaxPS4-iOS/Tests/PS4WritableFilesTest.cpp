@@ -371,6 +371,11 @@ int main() {
         assert(call(S::save_memory_get2, 0x11c00) == 0);
         char second[7]{}; assert(memory.read(0x10700, second, 7) && !std::strcmp(second, "second"));
         assert(call(S::save_memory_get, 1, 0x10500, 8, 16) == 0 && memory.read(0x10500, back_text, 8) && !std::strcmp(back_text, "memory!"));
+        // dataNum 0 (Call of Duty, SDK 3.50) still writes its one block.
+        put_le(set2, 32, 0, 4); put_le(block, 0, 0x10600, 8); put_le(block, 16, 48, 8);
+        assert(memory.write(0x10600, "third", 6) && memory.write(0x11b80, block, sizeof(block)));
+        assert(memory.write(0x11b00, set2, sizeof(set2)) && call(S::save_memory_set2, 0x11b00) == 0);
+        assert(call(S::save_memory_get, 1, 0x10500, 6, 48) == 0 && memory.read(0x10500, back_text, 6) && !std::strcmp(back_text, "third"));
         assert(resolve_libkernel("oQySEUfgXRA", "libSceSaveData", "libSceSaveData", 1) == S::save_memory_setup2);
     }
     kernel.reset();

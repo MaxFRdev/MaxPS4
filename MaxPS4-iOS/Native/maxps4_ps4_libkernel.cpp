@@ -2482,8 +2482,10 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         uint8_t request[40];
         if (!c.rdi || !memory_.read(c.rdi, request, sizeof(request))) return save_error(save_parameter);
         const uint64_t data = get_le(request + 8, 8);
-        const uint64_t count = service == S::save_memory_set2 ? get_le(request + 32, 4) : (data ? 1 : 0);
-        if (!data || !count) return 0; // Only the parameters or the icon: kept nowhere.
+        // dataNum counts only from SDK 5.00 on: below 2 (Call of Duty leaves
+        // 0) it is one block, as libSceSaveData and shadPS4 read it.
+        const uint64_t count = service == S::save_memory_set2 ? std::max<uint64_t>(get_le(request + 32, 4), 1) : 1;
+        if (!data) return 0; // Only the parameters or the icon: kept nowhere.
         if (count > 64) return save_error(save_parameter);
         for (uint64_t k = 0; k < count; ++k) {
             uint8_t block[24];
