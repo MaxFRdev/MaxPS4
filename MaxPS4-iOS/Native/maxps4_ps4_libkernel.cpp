@@ -463,6 +463,9 @@ constexpr Binding bindings[] = {
     {"sceSaveDataSetupSaveDataMemory", "v7AAAMo0Lz4", PS4KernelService::save_memory_setup, "libSceSaveData"},
     {"sceSaveDataGetSaveDataMemory", "7Bt5pBC-Aco", PS4KernelService::save_memory_get, "libSceSaveData"},
     {"sceSaveDataSetSaveDataMemory", "h3YURzXGSVQ", PS4KernelService::save_memory_set, "libSceSaveData"},
+    {"sceSaveDataSetupSaveDataMemory2", "oQySEUfgXRA", PS4KernelService::save_memory_setup2, "libSceSaveData"},
+    {"sceSaveDataGetSaveDataMemory2", "QwOO7vegnV8", PS4KernelService::save_memory_get2, "libSceSaveData"},
+    {"sceSaveDataSetSaveDataMemory2", "cduy9v4YmT4", PS4KernelService::save_memory_set2, "libSceSaveData"},
     {"sceSaveDataInitialize", "ZkZhskCPXFw", PS4KernelService::save_init, "libSceSaveData"},
     {"sceSaveDataInitialize2", "l1NmDeDpNGU", PS4KernelService::save_init, "libSceSaveData"},
     {"sceSaveDataGetEventResult", "j8xKtiFj0SY", PS4KernelService::save_event, "libSceSaveData"},
@@ -2380,6 +2383,32 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
     case S::save_save_icon: case S::save_load_icon: case S::save_delete: case S::save_mount_info: case S::save_event:
     case S::save_progress: case S::save_memory_setup: case S::save_memory_get: case S::save_memory_set:
         return save_service(service, c);
+    // Version 2 of save data memory takes structures (layouts from shadPS4
+    // savedata.h) and goes to the version 1 services, one data block at a time:
+    // Setup2 {u32 option; s32 user; u64 size; u64 icon size; param*; icon*; u32 slot}
+    // -> result {u64 existed}; Set2 {s32 user; data*; param*; icon*; u32 count}
+    // and Get2 {s32 user; data*; param*; icon*}, data {void* buf; u64 size; s64 offset; 40 bytes}.
+    case S::save_memory_setup2: {
+        uint8_t setup[48];
+        if (!c.rdi || !memory_.read(c.rdi, setup, sizeof(setup))) return save_error(save_parameter);
+        return save_service(S::save_memory_setup, {get_le(setup + 4, 4), get_le(setup + 8, 8), c.rsi, 0, 0, 0, c.rsp});
+    }
+    case S::save_memory_set2: case S::save_memory_get2: {
+        uint8_t request[40];
+        if (!c.rdi || !memory_.read(c.rdi, request, sizeof(request))) return save_error(save_parameter);
+        const uint64_t data = get_le(request + 8, 8);
+        const uint64_t count = service == S::save_memory_set2 ? get_le(request + 32, 4) : (data ? 1 : 0);
+        if (!data || !count) return 0; // Only the parameters or the icon: kept nowhere.
+        if (count > 64) return save_error(save_parameter);
+        for (uint64_t k = 0; k < count; ++k) {
+            uint8_t block[24];
+            if (!memory_.read(data + k * 64, block, sizeof(block))) return save_error(save_parameter);
+            const int64_t result = save_service(service == S::save_memory_set2 ? S::save_memory_set : S::save_memory_get,
+                {get_le(request, 4), get_le(block, 8), get_le(block + 8, 8), get_le(block + 16, 8), 0, 0, c.rsp});
+            if (result) return result;
+        }
+        return 0;
+    }
     case S::save_term: save_umount(0); return 0;
     case S::save_mount2: return save_mount(c.rdi, c.rsi);
     case S::save_umount: return save_umount(c.rdi);

@@ -76,6 +76,7 @@ enum class PS4KernelService : uint32_t {
     save_init, save_term, save_mount2, save_umount,
     save_mount1, save_umount2, save_search, save_set_param, save_get_param, save_save_icon, save_load_icon,
     save_delete, save_mount_info, save_event, save_progress, save_memory_setup, save_memory_get, save_memory_set,
+    save_memory_setup2, save_memory_get2, save_memory_set2,
     sema_create, sema_delete, sema_wait, sema_poll, sema_signal, sema_cancel,
     flag_create, flag_delete, flag_set, flag_clear, flag_wait, flag_poll, flag_cancel,
     process_counter, counter_frequency, kernel_sleep,

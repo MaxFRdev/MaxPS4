@@ -357,6 +357,21 @@ int main() {
         assert(memory.write(0x10400, "memory!", 8) && call(S::save_memory_set, 1, 0x10400, 8, 16) == 0);
         assert(call(S::save_memory_get, 1, 0x10500, 8, 16) == 0);
         char back_text[8]{}; assert(memory.read(0x10500, back_text, 8) && !std::strcmp(back_text, "memory!"));
+        // Version 2: structures around the same file (Call of Duty).
+        uint8_t setup2[48]{}; put_le(setup2, 4, 1, 4); put_le(setup2, 8, 64, 8);
+        assert(memory.write(0x11a00, setup2, sizeof(setup2)) && call(S::save_memory_setup2, 0x11a00, 0x11a40) == 0);
+        assert(memory.read(0x11a40, existed, 8) && get_le(existed, 8) == 64);
+        uint8_t block[64]{}; put_le(block, 0, 0x10600, 8); put_le(block, 8, 7, 8); put_le(block, 16, 32, 8);
+        uint8_t set2[40]{}; put_le(set2, 0, 1, 4); put_le(set2, 8, 0x11b80, 8); put_le(set2, 32, 1, 4);
+        assert(memory.write(0x10600, "second", 7) && memory.write(0x11b80, block, sizeof(block)));
+        assert(memory.write(0x11b00, set2, sizeof(set2)) && call(S::save_memory_set2, 0x11b00) == 0);
+        put_le(block, 0, 0x10700, 8);
+        uint8_t get2[40]{}; put_le(get2, 0, 1, 4); put_le(get2, 8, 0x11c80, 8);
+        assert(memory.write(0x11c80, block, sizeof(block)) && memory.write(0x11c00, get2, sizeof(get2)));
+        assert(call(S::save_memory_get2, 0x11c00) == 0);
+        char second[7]{}; assert(memory.read(0x10700, second, 7) && !std::strcmp(second, "second"));
+        assert(call(S::save_memory_get, 1, 0x10500, 8, 16) == 0 && memory.read(0x10500, back_text, 8) && !std::strcmp(back_text, "memory!"));
+        assert(resolve_libkernel("oQySEUfgXRA", "libSceSaveData", "libSceSaveData", 1) == S::save_memory_setup2);
     }
     kernel.reset();
     std::filesystem::remove_all(saves2);
