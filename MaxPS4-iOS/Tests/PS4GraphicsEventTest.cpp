@@ -96,5 +96,15 @@ int main() {
     assert(threads.graphics_event_complete(other_ticket) == noent);
     ticket = 99;
     assert(threads.graphics_event_ticket(other, 6, ticket) == badf && ticket == 0);
+    {   // Two EOP interrupts before the handler waits are two events, not one.
+        assert(memory.write(timeout, zero, 4) && threads.equeue_create(slot, name) == ok);
+        const uint64_t eop = read(slot);
+        assert(threads.graphics_event_add(eop, 0x40, 5) == ok);
+        threads.graphics_interrupt();
+        threads.graphics_interrupt();
+        assert(threads.equeue_wait(eop, events, 1, count, timeout) == ok && read(count, 4) == 1);
+        assert(threads.equeue_wait(eop, events, 1, count, timeout) == ok && read(count, 4) == 1);
+        assert(memory.write(timeout, zero, 4) && threads.equeue_wait(eop, events, 1, count, timeout) == timedout);
+    }
     std::puts("PASS GNM completion events: typed delivery, backend wakeup, stale tickets, queue isolation and reset");
 }

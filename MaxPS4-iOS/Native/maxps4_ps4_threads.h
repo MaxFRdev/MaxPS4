@@ -159,6 +159,8 @@ private:
         uint64_t user_data = 0, data = 0, ticket = 0;
         int16_t filter = -11;
         uint64_t source = 0;
+        // EOP interrupts not yet returned: each wait returns one (they never merge).
+        uint32_t pending = 0;
     };
     struct Equeue { uint64_t token = 0; std::array<Event, event_limit> events{}; };
     std::array<Equeue, equeue_limit> equeues_{};

@@ -655,7 +655,13 @@ void PS4Threads::graphics_interrupt() {
         std::lock_guard<std::mutex> lock(guard_);
         for (auto& queue : equeues_) if (queue.token)
             for (auto& event : queue.events)
-                if (event.used && event.filter == -14 && event.id == 0x40) { event.data = event.id; event.triggered = true; }
+                if (event.used && event.filter == -14 && event.id == 0x40) {
+                    // Work retires at submission here, so two submissions can
+                    // interrupt before the handler wakes: count them, as a GPU
+                    // finishing them apart would deliver one each.
+                    event.data = event.id; event.triggered = true;
+                    if (event.pending < (1u << 20)) ++event.pending;
+                }
     }
     changed_.notify_all();
 }
@@ -742,6 +748,8 @@ Error PS4Threads::equeue_wait(uint64_t handle, uint64_t events, int32_t count,
     size_t consumed = 0;
     for (auto& event : queue->events) if (event.used && event.triggered && consumed < returned) {
         ++consumed;
+        if (event.filter == -14 && event.pending > 1) { --event.pending; continue; }
+        event.pending = 0;
         if (event.edge) event.triggered = false;
     }
     return ok;
