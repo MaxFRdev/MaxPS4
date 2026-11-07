@@ -849,19 +849,21 @@ public:
             thread.used = false;
         }
     }
-    // For reports: where a child thread making no HLE call runs, as the
-    // distinct guest addresses of 8 reads 1 ms apart (a spinning loop shows as
-    // a few). Empty when it is not in JIT code or cannot be read.
-    std::vector<uint64_t> sample(uint64_t id) {
-        std::vector<uint64_t> rips;
+    // For reports: where a child thread making no HLE call runs, from 8 reads
+    // 1 ms apart: the distinct guest addresses in JIT code (a spinning loop
+    // shows as a few), else the host function and its caller (a thread held
+    // inside FEX), and the guest RIP FEX last stored.
+    std::string sample(uint64_t id, uint64_t relocation) {
+        std::string out;
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
         std::lock_guard held(lock); // Keeps the thread's guard alive.
         const auto at = std::find_if(threads.begin(), threads.end(),
             [&](const Thread& t) { return t.used && !t.finished && t.id == id && t.guard; });
-        if (at == threads.end()) return rips;
+        if (at == threads.end()) return " · thread hôte introuvable";
         GuestFaultGuard* const fault = at->guard;
+        std::vector<uint64_t> rips;
         const thread_act_t port = ::pthread_mach_thread_np(fault->host);
-        uint64_t pcs[8] {};
+        uint64_t pcs[8] {}, lrs[8] {};
         size_t count = 0;
         rips.reserve(8);
         // Nothing that may lock runs while the thread is suspended.
@@ -874,21 +876,45 @@ public:
                 reinterpret_cast<thread_state_t>(&state), &words) == KERN_SUCCESS;
             ::thread_resume(port);
             if (!read) continue;
-            uint64_t pc = arm_thread_state64_get_pc(state);
+            uint64_t pc = arm_thread_state64_get_pc(state), lr = arm_thread_state64_get_lr(state);
 #if __has_feature(ptrauth_calls)
             pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
+            lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(lr), ptrauth_key_return_address)));
 #endif
-            pcs[count++] = pc;
+            lrs[count] = lr; pcs[count++] = pc;
         }
+        auto relative = [&](uint64_t rip) { return rip >= relocation ? rip - relocation : rip; };
+        auto name = [](uint64_t address) {
+            Dl_info info {};
+            if (!::dladdr(reinterpret_cast<void*>(address), &info) || !info.dli_sname) return std::string("?");
+            char text[160];
+            std::snprintf(text, sizeof text, "%s+0x%llx", info.dli_sname,
+                (unsigned long long)(address - reinterpret_cast<uintptr_t>(info.dli_saddr)));
+            return std::string(text);
+        };
+        std::string host;
+        char line[96];
         for (size_t k = 0; k < count; ++k) {
-            if (!fault->in_jit(pcs[k])) continue;
-            const uint64_t rip = fault->guest_rip(pcs[k]);
-            if (std::find(rips.begin(), rips.end(), rip) == rips.end()) rips.push_back(rip);
+            if (fault->in_jit(pcs[k])) {
+                const uint64_t rip = fault->guest_rip(pcs[k]);
+                if (std::find(rips.begin(), rips.end(), rip) == rips.end()) rips.push_back(rip);
+            } else if (host.empty()) {
+                host = fault->in_dispatcher(pcs[k]) ? std::string("répartiteur FEX") : name(pcs[k]) + " < " + name(lrs[k]);
+            }
         }
+        const char* separator = " · tourne en";
+        for (const uint64_t rip : rips) {
+            std::snprintf(line, sizeof line, "%s 0x%llx", separator, (unsigned long long)relative(rip));
+            out += line; separator = ",";
+        }
+        if (!host.empty()) out += " · dans l'émulateur : " + host;
+        std::snprintf(line, sizeof line, " · RIP FEX 0x%llx", (unsigned long long)relative(fault->stored_rip()));
+        out += line;
+        if (!count) out += " · illisible";
 #else
-        (void)id;
+        (void)id; (void)relocation;
 #endif
-        return rips;
+        return out;
     }
     bool faulted(maxps4_fex_guest_fault& out) const {
         std::lock_guard guard(lock);
@@ -2449,15 +2475,8 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             // Over a second without a call: where it spins.
             if (seconds > 1 && thread != 1) {
                 std::lock_guard sampling(engine->sample_lock);
-                if (engine->probe.threads) {
-                    const char* separator = " · tourne en";
-                    for (const uint64_t rip : engine->probe.threads->sample(thread)) {
-                        std::snprintf(line, sizeof line, "%s 0x%llx", separator,
-                            (unsigned long long)(rip >= engine->relocation ? rip - engine->relocation : rip));
-                        out += line;
-                        separator = ",";
-                    }
-                }
+                if (engine->probe.threads) out += engine->probe.threads->sample(thread, engine->relocation);
+                else out += " · threads inconnus";
             }
             out += "\n";
             continue;
