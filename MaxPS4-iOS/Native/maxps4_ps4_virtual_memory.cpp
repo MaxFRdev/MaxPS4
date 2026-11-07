@@ -360,19 +360,28 @@ void PS4VirtualMemory::reset() {
 }
 size_t PS4VirtualMemory::contiguous(uint64_t address, size_t limit, uint32_t permissions) const {
     if (!limit || !permissions || (permissions & ~7U)) return 0;
-    const size_t r = holding(address);
+    size_t r = holding(address);
     if (r == SIZE_MAX) return 0;
-    const Region& region = regions_[r];
-    const uint64_t relative = address - region.address;
-    const size_t first = size_t(relative / page_size);
-    // Only the pages `limit` reaches: a region can hold a million of them.
-    const uint64_t reach = (relative + std::min<uint64_t>(limit, region.size - relative) + page_size - 1) / page_size;
-    const size_t end = size_t(std::min<uint64_t>(reach, region.pages.size()));
-    size_t last = first;
-    while (last < end && region.pages[last] != 0xff &&
-           (region.pages[last] & permissions) == permissions) ++last;
-    if (last == first) return 0;
-    return std::min(limit, size_t(last * page_size - relative));
+    // Host-backed regions that touch are one range (guest and host addresses
+    // coincide): Call of Duty maps its frame buffers 64 KiB at a time.
+    size_t total = 0;
+    for (;;) {
+        const Region& region = regions_[r];
+        const uint64_t relative = address + total - region.address;
+        const size_t first = size_t(relative / page_size);
+        // Only the pages `limit` reaches: a region can hold a million of them.
+        const uint64_t reach = (relative + std::min<uint64_t>(limit - total, region.size - relative) + page_size - 1) / page_size;
+        const size_t end = size_t(std::min<uint64_t>(reach, region.pages.size()));
+        size_t last = first;
+        while (last < end && region.pages[last] != 0xff &&
+               (region.pages[last] & permissions) == permissions) ++last;
+        if (last == first) return total;
+        total += std::min(limit - total, size_t(last * page_size - relative));
+        if (total == limit || last < region.pages.size() || r + 1 == regions_.size()) return total;
+        const Region& next = regions_[r + 1];
+        if (next.address != region.address + region.size || !hosted(region) || !hosted(next)) return total;
+        ++r;
+    }
 }
 const uint8_t* PS4VirtualMemory::translate(uint64_t address, size_t size, uint32_t permissions) const {
     if (!size || contiguous(address, size, permissions) != size) return nullptr;

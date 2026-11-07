@@ -341,6 +341,18 @@ int main() {
             CHECK(memory.read(reserved+page,word,sizeof(word)) && maxps4::ps4::get_le(word,8)==0);
             CHECK(kernel.invoke(S::mtype_protect,{reserved,page,0,1})==0);
             CHECK(memory.permitted(reserved,page,4) && !memory.permitted(reserved,1,2));
+            // Mappings that touch read as one range; the hole after them stops it.
+            for (const uint64_t at : {reserved+4*page, reserved+5*page}) {
+                uint8_t flexible[32]{};
+                maxps4::ps4::put_le(flexible,0,at,8);
+                maxps4::ps4::put_le(flexible,16,page,8);
+                maxps4::ps4::put_le(flexible,28,3,4); // Operation 3 maps flexible memory.
+                flexible[24]=3;
+                CHECK(memory.write(batch,flexible,sizeof(flexible)));
+                CHECK(kernel.invoke(S::batch_map,{batch,1,doneOut})==0);
+            }
+            CHECK(memory.permitted(reserved+4*page,2*page,6) && memory.contiguous(reserved+4*page,3*page,4)==2*page);
+            CHECK(!memory.permitted(reserved+4*page,3*page,4));
             kernel.reset();
             CHECK(vm.allocated()==0 && !memory.permitted(reserved+page,1,4));
         }
