@@ -2063,7 +2063,8 @@ void PS4Libkernel::record_save_call(PS4KernelService service, const PS4KernelCal
     const bool by_fd = service == S::read || service == S::write || service == S::pread || service == S::pwrite ||
                        service == S::close || service == S::fsync || service == S::ftruncate || service == S::fstat ||
                        service == S::lseek || service == S::getdirentries;
-    if (!save && !by_path && !by_fd) return;
+    // The dialog status is polled every frame: it would push everything else out.
+    if ((!save && !by_path && !by_fd) || service == S::save_dialog_update) return;
     SaveCall entry{service, c, result, {}};
     if (by_path) {
         if (!memory_.read_cstring(c.rdi, entry.path, sizeof(entry.path)) || std::strncmp(entry.path, "/savedata", 9)) return;
