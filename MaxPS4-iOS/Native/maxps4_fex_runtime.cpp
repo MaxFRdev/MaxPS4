@@ -2373,6 +2373,8 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         tso_emulation.load() ? "émulé" : "désactivé", (unsigned long long)alignment_repairs.load(),
         (unsigned long long)last_repair_pc.load());
     std::string out = header;
+    if (const std::string asked = engine->libkernel.load_exec(); !asked.empty())
+        out += "LoadExec demandé : " + asked + "\n";
     out += engine->libkernel.graphics().submit_activity();
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();

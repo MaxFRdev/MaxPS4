@@ -165,6 +165,18 @@ int main() {
     assert(resolve_libkernel("w5IHyvahg-o", "libScePosix", "libScePosix", 1) == S::sem_timedwait);
     assert(resolve_libkernel("JGMio+21L4c", "libScePosix", "libScePosix", 1) == S::mkdir);
     assert(resolve_libkernel("NN01qLRhiqU", "libScePosix", "libScePosix", 1) == S::rename);
+    {   // LoadExec replaces nothing: the path and the text of argv[0] are kept.
+        const char path[] = "/app0/default.elf", argument[] = "AgAAAGVycmV1ciBkZSB0ZXN0AAAHeHk~";
+        uint8_t pointer[8];
+        for (size_t i = 0; i < 8; ++i) pointer[i] = uint8_t(uint64_t(0x11600) >> (8 * i));
+        assert(memory.write(0x11500, path, sizeof(path)) && memory.write(0x11600, argument, sizeof(argument)));
+        assert(memory.write(0x11700, pointer, sizeof(pointer)));
+        assert(kernel.load_exec().empty() && resolve_libkernel("JoBqSQt1yyA", "libSceSystemService", "libSceSystemService", 1) == S::load_exec);
+        assert(call(S::load_exec, 0x11500, 0x11700) == 0);
+        const std::string asked = kernel.load_exec();
+        assert(asked.find("/app0/default.elf (23 octets)") == 0 && asked.find(" erreur de test") != std::string::npos);
+        assert(asked.find("brut AgAAAGVy") != std::string::npos);
+    }
     assert(call(S::sem_init, 0x11108, 1, 0) == kernel_error(notsup));
     assert(call(S::sem_destroy, 0x11100) == 0 && call(S::sem_post, 0x11100) == kernel_error(srch));
     assert(call(S::uuid_create, 0x11200) == 0);

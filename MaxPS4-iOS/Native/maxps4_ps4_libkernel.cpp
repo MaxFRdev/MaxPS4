@@ -443,6 +443,7 @@ constexpr Binding bindings[] = {
      false, false, 0, nullptr, 0, "libSceLibcInternal"},
     {"sceSystemServiceParamGetInt", "fZo48un7LK4", PS4KernelService::system_param_int, "libSceSystemService"},
     {"sceSystemServiceGetStatus", "rPo6tV8D9bM", PS4KernelService::system_status, "libSceSystemService"},
+    {"sceSystemServiceLoadExec", "JoBqSQt1yyA", PS4KernelService::load_exec, "libSceSystemService"},
     {"sceSystemServiceReceiveEvent", "656LMQSrg6U", PS4KernelService::system_event, "libSceSystemService"},
     {"sceSystemServiceHideSplashScreen", "Vo5V8KAwCmk", PS4KernelService::succeed, "libSceSystemService"},
     // Save data (shadPS4 libraries/save_data): one directory at a time.
@@ -2675,6 +2676,40 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         return memory_.write(c.rdi, status, sizeof(status)) ? 0 : kernel_error(fault);
     }
     case S::system_event: return int32_t(0x80A10004); // No event.
+    // sceSystemServiceLoadExec(path, argv): the process is not replaced. What it
+    // asked for goes to the report: the path, then argv[0], which Call of Duty
+    // encodes as base64 (- and _, ~ for =): its text and the raw argument.
+    case S::load_exec: {
+        char path[256], argument[2400];
+        if (!c.rdi || !memory_.read_cstring(c.rdi, path, sizeof(path))) return int32_t(0x80A10003);
+        std::string text = path;
+        uint8_t cell[8];
+        if (c.rsi && memory_.read(c.rsi, cell, sizeof(cell)) && get_le(cell, 8) &&
+            memory_.read_cstring(get_le(cell, 8), argument, sizeof(argument))) {
+            static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            std::string decoded, run;
+            uint32_t bits = 0;
+            int count = 0;
+            for (const char* p = argument; *p; ++p) {
+                const char* at = std::strchr(alphabet, *p);
+                if (!at) break;
+                bits = (bits << 6) | uint32_t(at - alphabet);
+                count += 6;
+                if (count >= 8) { count -= 8; decoded.push_back(char(bits >> count)); }
+            }
+            text += " (" + std::to_string(decoded.size()) + " octets) :";
+            decoded.push_back('\0');
+            for (const char ch : decoded) {
+                if (ch >= 32 && ch < 127) { run.push_back(ch); continue; }
+                if (run.size() >= 4) text += " " + run;
+                run.clear();
+            }
+            text += " · brut " + std::string(argument).substr(0, 1500);
+        }
+        std::lock_guard<std::mutex> guard(load_exec_lock_);
+        load_exec_ = std::move(text);
+        return 0;
+    }
     case S::module_info_from_addr: return kernel_error(srch);
     case S::succeed: return 0;
     default: handled = false; return 0;

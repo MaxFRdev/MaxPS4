@@ -107,7 +107,7 @@ enum class PS4KernelService : uint32_t {
     heap_trace_info,
     // libSceSystemService (shadPS4 system_service.cpp): settings of an
     // English console, a foreground application status, no system events.
-    system_param_int, system_status, system_event,
+    system_param_int, system_status, system_event, load_exec,
     // libSceAudioOut (PS4AudioOut). Output blocks for one buffer's duration.
     audio_init, audio_open, audio_close, audio_output,
     // Append new services to preserve existing trampoline service IDs.
@@ -223,12 +223,16 @@ public:
     PS4AudioOut& audio() { return audio_; }
     PS4GnmQueue& graphics() { return graphics_; }
     // The last console_limit bytes the game wrote to its stdout and stderr.
+    // What the game last passed to sceSystemServiceLoadExec; empty if nothing.
+    std::string load_exec() { std::lock_guard<std::mutex> guard(load_exec_lock_); return load_exec_; }
     std::string console() { std::lock_guard<std::mutex> guard(lock_); return std::string(console_.begin(), console_.end()); }
     static constexpr size_t console_limit = 4096;
     static constexpr int32_t abort_status = 134; // As a process killed by SIGABRT.
 private:
     PS4GuestMemory& memory_;
     PS4VirtualMemory* dynamic_;
+    std::mutex load_exec_lock_;
+    std::string load_exec_;
     PS4Threads threads_;
     PS4VideoOut videoout_;
     PS4UserService user_service_;
