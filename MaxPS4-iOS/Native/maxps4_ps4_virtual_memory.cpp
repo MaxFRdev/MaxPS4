@@ -1,5 +1,6 @@
 #include "maxps4_ps4_virtual_memory.h"
 #include <algorithm>
+#include <chrono>
 #include <iterator>
 #include <cerrno>
 #include <new>
@@ -164,7 +165,32 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
     // video decoder: VPX_CODEC_MEM_ERROR).
     const Error e = place_unrecorded(hint, length, alignment, protection, fixed, result);
     if (e) record_move(hint, length, 0, int(e));
+    record(fixed ? 'f' : 'm', hint, length, protection, e, e ? 0 : result);
     return e;
+}
+uint64_t PS4VirtualMemory::clock_ns() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+void PS4VirtualMemory::record(char kind, uint64_t address, uint64_t size, uint32_t protection, Error error, uint64_t result) {
+    std::lock_guard guard(moved_lock_);
+    operations_[operations_total_++ % operation_limit] = {address, size, clock_ns(), result, protection, int(error), kind};
+}
+size_t PS4VirtualMemory::operations_at(uint64_t address, std::array<Operation, 6>& out, size_t& count) const {
+    std::lock_guard guard(moved_lock_);
+    const size_t kept = std::min(operations_total_, operation_limit);
+    size_t found = 0;
+    count = 0;
+    auto holds = [address](uint64_t start, uint64_t size) { return start && address >= start && address - start < size; };
+    // Newest first, then reversed to oldest first.
+    for (size_t i = 0; i < kept; ++i) {
+        const Operation& o = operations_[(operations_total_ - 1 - i) % operation_limit];
+        if (!holds(o.address, o.size) && !holds(o.result, o.size)) continue;
+        if (count < out.size()) out[count++] = o;
+        ++found;
+    }
+    std::reverse(out.begin(), out.begin() + long(count));
+    return found;
 }
 Error PS4VirtualMemory::place_unrecorded(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
     bool fixed, uint64_t& result) {
@@ -300,6 +326,11 @@ PS4VirtualMemory::Region* PS4VirtualMemory::range(uint64_t address, uint64_t siz
     return &region;
 }
 Error PS4VirtualMemory::unmap(uint64_t address, uint64_t length) {
+    const Error e = unmap_unrecorded(address, length);
+    record('u', address, length, 0, e);
+    return e;
+}
+Error PS4VirtualMemory::unmap_unrecorded(uint64_t address, uint64_t length) {
     uint64_t size;
     if (address % page_size || !rounded(length, size)) return inval;
     Region* region = range(address, size);
@@ -337,6 +368,11 @@ Error PS4VirtualMemory::unmap(uint64_t address, uint64_t length) {
     return ok;
 }
 Error PS4VirtualMemory::protect(uint64_t address, uint64_t length, uint32_t protection) {
+    const Error e = protect_unrecorded(address, length, protection);
+    record('p', address, length, protection, e);
+    return e;
+}
+Error PS4VirtualMemory::protect_unrecorded(uint64_t address, uint64_t length, uint32_t protection) {
     uint8_t permission;
     Error e = permissions(protection, permission);
     if (e) return e;

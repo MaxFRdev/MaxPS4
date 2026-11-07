@@ -2457,6 +2457,53 @@ extern "C" int32_t maxps4_fex_set_tso_emulation(uint32_t enabled) {
     if (enabled > 1) return -EINVAL;
     tso_emulation = enabled != 0; return 0;
 }
+// Where a thread's faulting access went: the game's view of the page (read,
+// write), the host's protection of it, and the game's last map/unmap/protect
+// calls that covered it.
+static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address) {
+    std::string out;
+    char line[192];
+    std::snprintf(line, sizeof line, " · page du jeu : lecture %s, écriture %s",
+        engine->system_memory.permitted(address, 1, 4) ? "oui" : "non",
+        engine->system_memory.permitted(address, 1, 2) ? "oui" : "non");
+    out += line;
+#if defined(__APPLE__)
+    vm_address_t region = vm_address_t(address);
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info {};
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    const kern_return_t kr = vm_region_64(mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64,
+        reinterpret_cast<vm_region_info_t>(&info), &count, &object);
+    if (kr != KERN_SUCCESS) std::snprintf(line, sizeof line, " · hôte : erreur %d", int(kr));
+    else if (region > address) std::snprintf(line, sizeof line, " · hôte : non mappée (suivante 0x%llx)", (unsigned long long)region);
+    else std::snprintf(line, sizeof line, " · hôte : 0x%llx-0x%llx %c%c%c (max %c%c%c)",
+        (unsigned long long)region, (unsigned long long)(region + size),
+        (info.protection & VM_PROT_READ) ? 'r' : '-', (info.protection & VM_PROT_WRITE) ? 'w' : '-',
+        (info.protection & VM_PROT_EXECUTE) ? 'x' : '-', (info.max_protection & VM_PROT_READ) ? 'r' : '-',
+        (info.max_protection & VM_PROT_WRITE) ? 'w' : '-', (info.max_protection & VM_PROT_EXECUTE) ? 'x' : '-');
+    out += line;
+#endif
+    std::array<maxps4::PS4VirtualMemory::Operation, 6> operations {};
+    size_t shown = 0;
+    const size_t found = engine->dynamic_ps4.operations_at(address, operations, shown);
+    const uint64_t now = maxps4::PS4VirtualMemory::clock_ns();
+    std::snprintf(line, sizeof line, " · %zu appels mémoire sur cette page", found);
+    out += line;
+    for (size_t i = 0; i < shown; ++i) {
+        const auto& o = operations[i];
+        const char* kind = o.kind == 'u' ? "unmap" : o.kind == 'p' ? "protect" : o.kind == 'f' ? "map fixe" : "map";
+        std::snprintf(line, sizeof line, "%s il y a %.2f s %s 0x%llx +0x%llx prot 0x%x%s",
+            i ? " ;" : " :", double(now - std::min(now, o.ns)) / 1e9, kind,
+            (unsigned long long)o.address, (unsigned long long)o.size, o.protection, o.error ? " REFUSÉ" : "");
+        out += line;
+        if (o.result && o.result != o.address) {
+            std::snprintf(line, sizeof line, " -> 0x%llx", (unsigned long long)o.result);
+            out += line;
+        }
+    }
+    return out;
+}
 extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     char header[160];
@@ -2509,6 +2556,7 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                         if (engine->system_memory.read(rip, code, sizeof code))
                             for (const uint8_t byte : code) { std::snprintf(line, sizeof line, " %02x", byte); out += line; }
                         else out += " illisibles";
+                        if (address) out += fault_memory(engine, address);
                     }
                 }
                 else out += " · threads inconnus";

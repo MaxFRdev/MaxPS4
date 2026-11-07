@@ -62,6 +62,14 @@ public:
     static constexpr size_t moved_limit = 16;
     // Copies the last records (oldest first); returns how many moves happened.
     size_t moved(std::array<Moved, moved_limit>& out, size_t& count) const;
+    // Recent map/unmap/protect calls, for the report of a thread that faulted
+    // on game memory. `kind`: 'm' placed, 'f' fixed, 'u' unmapped, 'p' protected.
+    struct Operation { uint64_t address = 0, size = 0, ns = 0, result = 0; uint32_t protection = 0; int error = 0; char kind = 0; };
+    static constexpr size_t operation_limit = 4096;
+    // The last calls (oldest first) whose span (or result span) holds
+    // `address`; returns how many there were among the kept ones.
+    size_t operations_at(uint64_t address, std::array<Operation, 6>& out, size_t& count) const;
+    static uint64_t clock_ns();
     // The mapping holding `address` (or, with `next`, the first at or after it):
     // its span of pages with the same permissions and their PS4 protection
     // (READ 1, WRITE 2, EXEC 4). False when there is none.
@@ -86,6 +94,11 @@ private:
     std::array<Moved, moved_limit> moved_ {};
     size_t moved_total_ = 0;
     void record_move(uint64_t hint, uint64_t size, uint64_t result, int status);
+    std::vector<Operation> operations_ = std::vector<Operation>(operation_limit);
+    size_t operations_total_ = 0;
+    void record(char kind, uint64_t address, uint64_t size, uint32_t protection, ps4::Error error, uint64_t result = 0);
+    ps4::Error unmap_unrecorded(uint64_t address, uint64_t length);
+    ps4::Error protect_unrecorded(uint64_t address, uint64_t length, uint32_t protection);
     ps4::Error place_unrecorded(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
                                 bool fixed, uint64_t& result);
     static ps4::Error permissions(uint32_t protection, uint8_t& result);
