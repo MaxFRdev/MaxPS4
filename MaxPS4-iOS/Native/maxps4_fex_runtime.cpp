@@ -2374,6 +2374,7 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         tso_emulation.load() ? "émulé" : "désactivé", (unsigned long long)alignment_repairs.load(),
         (unsigned long long)last_repair_pc.load());
     std::string out = header;
+    out += "Interruptions GPU de fin de travail : " + std::to_string(engine->libkernel.threads().graphics_interrupts()) + "\n";
     if (const std::string asked = engine->libkernel.load_exec(); !asked.empty())
         out += "LoadExec demandé : " + asked + "\n";
     out += engine->libkernel.graphics().submit_activity();
@@ -2407,6 +2408,11 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             (unsigned long long)thread, name, seconds, returned);
         out += line;
         // A thread waiting for a mutex: who holds it (itself: a deadlock).
+        // A semaphore or an event queue a thread waits on: its state.
+        if (raw == static_cast<uint32_t>(maxps4::PS4KernelService::sema_wait))
+            out += " · sémaphore " + engine->libkernel.threads().sema_state(a.argument.load());
+        if (raw == static_cast<uint32_t>(maxps4::PS4KernelService::equeue_wait))
+            out += " · file : " + engine->libkernel.threads().equeue_state(a.argument.load());
         if (raw == static_cast<uint32_t>(maxps4::PS4KernelService::mutex_lock)) {
             const uint64_t owner = engine->libkernel.threads().mutex_owner(a.argument.load());
             if (owner == thread) out += " · verrou déjà tenu par ce thread";

@@ -100,8 +100,7 @@ int main() {
         assert(memory.write(timeout, zero, 4) && threads.equeue_create(slot, name) == ok);
         const uint64_t eop = read(slot);
         assert(threads.graphics_event_add(eop, 0x40, 5) == ok);
-        threads.graphics_interrupt();
-        threads.graphics_interrupt();
+        threads.graphics_interrupt(2); // One submission with two EOP interrupts.
         assert(threads.equeue_wait(eop, events, 1, count, timeout) == ok && read(count, 4) == 1);
         assert(threads.equeue_wait(eop, events, 1, count, timeout) == ok && read(count, 4) == 1);
         assert(memory.write(timeout, zero, 4) && threads.equeue_wait(eop, events, 1, count, timeout) == timedout);

@@ -2055,7 +2055,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         const int64_t result = graphics_.submit(uint32_t(c.rdi),c.rsi,c.rdx,c.rcx,c.r8,&interrupts,
                                                 flip ? &prepared : nullptr);
         if (result) return result;
-        if (interrupts) threads_.graphics_interrupt();
+        threads_.graphics_interrupt(interrupts);
         if (!flip) return 0;
         // The host backend presents the GPU-rendered target: no CPU copy.
         const int64_t shown = videoout_.submit(c.r9, signed32(get_le(stack, 4)), signed32(get_le(stack + 8, 4)),
@@ -2158,7 +2158,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (next >= q.offset) span(q.offset, next);
         else { span(q.offset, q.size); span(0, next); }
         q.offset = next == q.size ? 0 : next;
-        if (interrupts) threads_.graphics_interrupt();
+        threads_.graphics_interrupt(uint32_t(std::min<int64_t>(interrupts, 1 << 20)));
         return write(q.read_pointer, next, 4) ? 0 : kernel_error(fault);
     }
     case S::gnm_tessellation_offchip: return 0x800000;

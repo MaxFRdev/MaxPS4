@@ -1,6 +1,7 @@
 #include "maxps4_ps4_threads.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 
 namespace maxps4 {
 using namespace ps4;
@@ -650,7 +651,31 @@ Error PS4Threads::graphics_event_complete(uint64_t ticket) {
     changed_.notify_all();
     return ok;
 }
-void PS4Threads::graphics_interrupt() {
+std::string PS4Threads::sema_state(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(guard_);
+    for (const auto& sema : semas_) if (sema.token && sema.token == handle) {
+        char text[96];
+        std::snprintf(text, sizeof text, "compte %d/%d, %u en attente", sema.count, sema.max, sema.waiters);
+        return text;
+    }
+    return "inconnu";
+}
+std::string PS4Threads::equeue_state(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(guard_);
+    auto* queue = find_equeue(handle);
+    if (!queue) return "inconnue";
+    std::string out;
+    for (const auto& event : queue->events) if (event.used) {
+        char text[96];
+        std::snprintf(text, sizeof text, "%sfiltre %d id 0x%llx%s%s", out.empty() ? "" : ", ", int(event.filter),
+                      (unsigned long long)event.id, event.triggered ? " prêt" : "", event.pending > 1 ? " (+)" : "");
+        out += text;
+    }
+    return out.empty() ? "aucun événement" : out;
+}
+void PS4Threads::graphics_interrupt(uint32_t count) {
+    if (!count) return;
+    graphics_interrupts_ += count;
     {
         std::lock_guard<std::mutex> lock(guard_);
         for (auto& queue : equeues_) if (queue.token)
@@ -660,7 +685,7 @@ void PS4Threads::graphics_interrupt() {
                     // interrupt before the handler wakes: count them, as a GPU
                     // finishing them apart would deliver one each.
                     event.data = event.id; event.triggered = true;
-                    if (event.pending < (1u << 20)) ++event.pending;
+                    event.pending = std::min<uint32_t>(event.pending + count, 1u << 20);
                 }
     }
     changed_.notify_all();

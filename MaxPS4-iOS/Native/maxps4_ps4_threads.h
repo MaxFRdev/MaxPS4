@@ -2,6 +2,8 @@
 #include "maxps4_ps4_abi.h"
 #include "maxps4_ps4_guest_memory.h"
 #include <array>
+#include <atomic>
+#include <string>
 #include <condition_variable>
 #include <mutex>
 
@@ -114,7 +116,12 @@ public:
     ps4::Error flag_wait(uint64_t handle, uint64_t bits, uint32_t mode, uint64_t result, uint64_t timeout, bool poll);
     ps4::Error flag_cancel(uint64_t handle, uint64_t pattern, uint64_t waiters);
     // An end-of-pipe interrupt: triggers every registered EOP event (id 0x40).
-    void graphics_interrupt();
+    // `count` end-of-pipe interrupts of one submission, each returned by a wait.
+    void graphics_interrupt(uint32_t count = 1);
+    uint64_t graphics_interrupts() const { return graphics_interrupts_.load(); }
+    // For reports: a semaphore's count, its waiters; an event queue's events.
+    std::string sema_state(uint64_t handle);
+    std::string equeue_state(uint64_t handle);
     ps4::Error video_event_add(uint64_t queue, uint64_t source, uint64_t id, uint64_t user_data);
     ps4::Error video_event_delete(uint64_t queue, uint64_t source, uint64_t id);
     void video_event_remove_source(uint64_t source);
@@ -168,6 +175,7 @@ private:
     struct Sema { uint64_t token = 0, generation = 0; int32_t count = 0, max = 0; uint32_t waiters = 0; };
     struct Flag { uint64_t token = 0, generation = 0, pattern = 0; uint32_t attributes = 0, waiters = 0; };
     std::array<Sema, sema_limit> semas_{};
+    std::atomic<uint64_t> graphics_interrupts_{0};
     std::array<Flag, flag_limit> flags_{};
     // A readable name of at most 32 bytes (0: none).
     ps4::Error check_name(uint64_t name) const;
