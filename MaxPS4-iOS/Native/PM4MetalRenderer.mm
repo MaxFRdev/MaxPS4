@@ -1126,6 +1126,20 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                               (t[2] & 0x3fff) + 1, ((t[2] >> 14) & 0x3fff) + 1, (t[3] >> 20) & 31, (unsigned long long)base,
                               targets_.count(base) ? " (rendue GPU)" : "");
                 batchDraws += text;
+                // What guest memory holds there: non-zero bytes out of 64 at the
+                // start and in the middle (a black video plane is all zeros).
+                const std::uint64_t bytes = std::uint64_t((t[2] & 0x3fff) + 1) * (((t[2] >> 14) & 0x3fff) + 1);
+                for (const std::uint64_t at : {base, base + bytes / 2}) {
+                    std::uint8_t sample[64];
+                    if (!code_.read(at, sample, sizeof sample)) { batchDraws += at == base ? " [illisible" : ", illisible"; }
+                    else {
+                        unsigned set = 0;
+                        for (const auto byte : sample) set += byte != 0;
+                        std::snprintf(text, sizeof text, "%s%u/64", at == base ? " [non nuls " : ", ", set);
+                        batchDraws += text;
+                    }
+                }
+                batchDraws += "]";
             }
         }
     }
