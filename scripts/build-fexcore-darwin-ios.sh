@@ -41,6 +41,7 @@ python3 -B "$ROOT/scripts/patch-fexcore-dispatcher-init.py" "$FEX"
 python3 -B "$ROOT/MaxPS4-iOS/Tests/FEXJITProviderPatchTest.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-jit-provider.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-lookup-cache.py" "$FEX"
+python3 -B "$ROOT/scripts/patch-fexcore-code-cache-reuse.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-ps4-cpuid.py" "$FEX"
 # Patch only the disposable dependency checkout. No replacement symbols are defined.
 python3 - "$FEX" <<'PY'
