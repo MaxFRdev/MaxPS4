@@ -28,7 +28,10 @@ int main() {
     assert(call(S::mutex_init, 0x1000) == kernel_error(fault));
     assert(kernel.invoke(S::mutex_init, {0x10000, 1}) == kernel_error(fault)); // Attribute object address.
     assert(kernel.invoke(S::mutex_init, {0x10000, 0, UINT64_MAX}) == kernel_error(fault));
-    assert(call(S::mutex_init) == 0 && call(S::mutex_init) == kernel_error(busy));
+    // A slot initialized again holds a new, free mutex of the new type (never busy).
+    assert(call(S::mutex_init) == 0 && call(S::mutex_trylock) == 0);
+    assert(call(S::mutex_init) == 0 && call(S::mutex_trylock, 0x10000, second) == 0);
+    assert(call(S::mutex_init) == 0);
     uint8_t wire[8]; assert(memory.read(0x10000, wire, sizeof(wire)));
     const auto token = get_le(wire, 8); assert(token >= 0x10000);
     assert(call(S::mutex_trylock) == 0);

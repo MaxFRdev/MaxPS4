@@ -233,7 +233,13 @@ Error PS4Threads::init(uint64_t slot, uint64_t attributes, uint64_t name) {
         char text[1024];
         if (!memory_.read_cstring(name, text, sizeof(text))) return fault;
     }
-    for (const auto& mutex : mutexes_) if (mutex.token && mutex.slot == slot) return busy;
+    // Initializing a slot again makes a new mutex, as libkernel does (it never
+    // answers busy): a game reuses the memory of an object it freed without
+    // destroying its mutex, and the old record's type or owner must not stay
+    // (Call of Duty's recursive lock then failed with EDEADLK, unprotected).
+    bool replaced = false;
+    for (auto& mutex : mutexes_) if (mutex.token && mutex.slot == slot) { mutex = {}; replaced = true; }
+    if (replaced) changed_.notify_all(); // Waiters on the old record return EINVAL.
     for (auto& mutex : mutexes_) if (!mutex.token) {
         const uint64_t fresh = next_token();
         if (!fresh) return again;
