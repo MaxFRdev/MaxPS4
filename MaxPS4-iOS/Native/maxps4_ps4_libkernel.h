@@ -182,7 +182,9 @@ PS4KernelService resolve_libkernel(std::string_view symbol,
 class PS4Libkernel final {
 public:
     static constexpr size_t descriptor_limit = 256;
+    // Host buffer for one piece of a file transfer (transfer() has no size limit).
     static constexpr size_t transfer_limit = 1024 * 1024;
+    int64_t transfer(int fd, uint64_t guest, size_t count, int64_t offset, bool reading);
     static constexpr size_t stat_size = 120;
     explicit PS4Libkernel(PS4GuestMemory& memory, PS4VirtualMemory* dynamic = nullptr);
     ~PS4Libkernel();

@@ -1755,17 +1755,36 @@ int64_t PS4Libkernel::close(int32_t fd) {
 int64_t PS4Libkernel::read(const PS4KernelCall& c) {
     File* f = file(signed32(c.rdi));
     if (!f || !f->readable) return kernel_error(badf);
-    if (c.rdx > transfer_limit) return kernel_error(inval);
+    if (c.rdx > uint64_t(INT64_MAX)) return kernel_error(inval);
     const size_t count = size_t(c.rdx);
-    if (count && !writable(c.rsi, count)) return kernel_error(fault);
+    if (count && !writable(c.rsi, count)) return kernel_error(fault); // Before the offset moves.
     if (f->directory) return kernel_error(isdir);
     if (!count) return 0;
-    std::vector<uint8_t> buffer(count); // Allocate before advancing file offset.
-    ssize_t got;
-    do { got = ::read(f->fd, buffer.data(), count); } while (got < 0 && errno == EINTR);
-    if (got < 0) return kernel_error(host_error(errno));
-    if (got && !memory_.write(c.rsi, buffer.data(), size_t(got))) return kernel_error(fault);
-    return got;
+    return transfer(f->fd, c.rsi, count, -1, true);
+}
+// Moves `count` bytes between a host file and guest memory by pieces of
+// transfer_limit, at the file's position (offset < 0) or at `offset`. There
+// is no size limit: a read over 1 MiB used to fail with EINVAL, and Call of
+// Duty's fastfile reads then left stale data in its zone buffers.
+int64_t PS4Libkernel::transfer(int fd, uint64_t guest, size_t count, int64_t offset, bool reading) {
+    std::vector<uint8_t> buffer(std::min(count, transfer_limit));
+    size_t done = 0;
+    while (done < count) {
+        const size_t piece = std::min(count - done, buffer.size());
+        if (!reading && !memory_.read(guest + done, buffer.data(), piece)) return done ? int64_t(done) : kernel_error(fault);
+        ssize_t moved;
+        do {
+            const off_t at = off_t(offset + int64_t(done));
+            moved = reading ? (offset < 0 ? ::read(fd, buffer.data(), piece) : ::pread(fd, buffer.data(), piece, at))
+                            : (offset < 0 ? ::write(fd, buffer.data(), piece) : ::pwrite(fd, buffer.data(), piece, at));
+        } while (moved < 0 && errno == EINTR);
+        if (moved < 0) return done ? int64_t(done) : kernel_error(host_error(errno));
+        if (reading && moved && !memory_.write(guest + done, buffer.data(), size_t(moved)))
+            return done ? int64_t(done) : kernel_error(fault);
+        done += size_t(moved);
+        if (size_t(moved) < piece) break; // End of file, or a short write.
+    }
+    return int64_t(done);
 }
 int64_t PS4Libkernel::lseek(const PS4KernelCall& c) {
     File* f = file(signed32(c.rdi));
@@ -1840,13 +1859,14 @@ int64_t PS4Libkernel::file_service(PS4KernelService service, const PS4KernelCall
     // write(fd, buffer, count) and pwrite(fd, buffer, count, offset). The
     // game's stdout and stderr (1, 2) go to the engine's standard error.
     case S::write: case S::pwrite: {
-        if (c.rdx > transfer_limit) return kernel_error(inval);
+        if (c.rdx > uint64_t(INT64_MAX)) return kernel_error(inval);
         if (service == S::pwrite && signed64(c.rcx) < 0) return kernel_error(inval);
         const size_t count = size_t(c.rdx);
-        std::vector<uint8_t> buffer(count);
-        if (count && !memory_.read(c.rsi, buffer.data(), count)) return kernel_error(fault);
         const int32_t fd = signed32(c.rdi);
         if ((fd == 1 || fd == 2) && service == S::write) {
+            if (count > transfer_limit) return kernel_error(inval);
+            std::vector<uint8_t> buffer(count);
+            if (count && !memory_.read(c.rsi, buffer.data(), count)) return kernel_error(fault);
             if (count) std::fwrite(buffer.data(), 1, count, stderr);
             // The last bytes, for the session report: a game's own message
             // usually says why it stops.
@@ -1857,27 +1877,18 @@ int64_t PS4Libkernel::file_service(PS4KernelService service, const PS4KernelCall
         File* f = file(fd);
         if (!f || !f->writable) return kernel_error(badf);
         if (f->directory) return kernel_error(isdir);
-        ssize_t put;
-        do {
-            put = service == S::write ? ::write(f->fd, buffer.data(), count) :
-                ::pwrite(f->fd, buffer.data(), count, off_t(signed64(c.rcx)));
-        } while (put < 0 && errno == EINTR);
-        return put < 0 ? kernel_error(host_error(errno)) : int64_t(put);
+        if (count && !memory_.permitted(c.rsi, count, 4)) return kernel_error(fault);
+        return count ? transfer(f->fd, c.rsi, count, service == S::write ? -1 : signed64(c.rcx), false) : 0;
     }
     // pread(fd, buffer, count, offset).
     case S::pread: {
         File* f = file(signed32(c.rdi));
         if (!f || !f->readable) return kernel_error(badf);
-        if (c.rdx > transfer_limit || signed64(c.rcx) < 0) return kernel_error(inval);
+        if (c.rdx > uint64_t(INT64_MAX) || signed64(c.rcx) < 0) return kernel_error(inval);
         const size_t count = size_t(c.rdx);
         if (count && !writable(c.rsi, count)) return kernel_error(fault);
         if (f->directory) return kernel_error(isdir);
-        std::vector<uint8_t> buffer(count);
-        ssize_t got;
-        do { got = ::pread(f->fd, buffer.data(), count, off_t(signed64(c.rcx))); } while (got < 0 && errno == EINTR);
-        if (got < 0) return kernel_error(host_error(errno));
-        if (got && !memory_.write(c.rsi, buffer.data(), size_t(got))) return kernel_error(fault);
-        return got;
+        return count ? transfer(f->fd, c.rsi, count, signed64(c.rcx), true) : 0;
     }
     case S::fsync: {
         File* f = file(signed32(c.rdi));
