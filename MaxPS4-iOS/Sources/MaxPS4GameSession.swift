@@ -562,7 +562,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
                 lock.lock(); let liveFile = liveReport; liveReport = nil; lock.unlock()
                 if let liveFile { try? FileManager.default.removeItem(at: liveFile) }
             }
-            return result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP)
+            // On screen too: the fault line is what a pasted end screen needs.
+            let summary = result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP)
+            return faultDetail.isEmpty ? summary : summary + "\n" + faultDetail
         } catch {
             let text = String(localized: "Échec : \(error.localizedDescription)", bundle: .maxps4)
             outcome = Outcome(missing: [], crashed: true, report: MaxPS4Reports.save(text, for: url))
