@@ -540,8 +540,13 @@ final class MaxPS4GameSource: @unchecked Sendable {
             // The last live report, not a new one: reading the engine now would
             // sample the main guest thread, which is this very thread.
             lock.lock(); let live = lastBeat; lock.unlock()
+            // The fault itself: the live report above was taken before it.
+            var detail = [CChar](repeating: 0, count: 8192)
+            _ = maxps4_fex_engine_fault_detail(opened, &detail, detail.count)
+            let faultDetail = String(cString: detail)
             defer {
                 let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP),
+                            faultDetail,
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
                             missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
                             "Derniers appels PS4 en échec :", failedCalls(opened), "",

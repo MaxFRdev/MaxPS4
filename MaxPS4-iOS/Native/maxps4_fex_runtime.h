@@ -151,6 +151,8 @@ uint64_t maxps4_fex_engine_videoout_requested(maxps4_fex_engine *engine);
 // how long, or how long it has run guest code since its last call. Diagnostic
 // only, lock-free, NUL-terminated and truncated to `capacity`.
 int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine *engine, char *text, size_t capacity);
+// The last run's fault line (thread, exact instruction, memory, registers), empty without one.
+int32_t maxps4_fex_engine_fault_detail(maxps4_fex_engine *engine, char *text, size_t capacity);
 // Where the main guest thread of the running image is right now, sampled by
 // a signal that lets it continue. Refused (-EBUSY) while it is inside an HLE
 // call or returned from one less than 2 s ago, -ESRCH when nothing runs. Diagnostic only. On Apple devices a thread

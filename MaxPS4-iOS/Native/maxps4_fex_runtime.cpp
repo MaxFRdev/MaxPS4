@@ -2535,12 +2535,14 @@ static std::string fault_registers(maxps4_fex_engine* engine, const std::array<u
         std::snprintf(line, sizeof line, " %s 0x%llx", names[i], (unsigned long long)gprs[i]);
         out += line;
     }
-    for (const size_t i : {size_t(3), size_t(7), size_t(14)}) {
-        uint8_t bytes[0x30];
-        if (!gprs[i] || !engine->system_memory.read(gprs[i], bytes, sizeof bytes)) continue;
+    // The stack's top (16 words) holds the return addresses of the callers.
+    for (const size_t i : {size_t(4), size_t(3), size_t(7), size_t(14)}) {
+        uint8_t bytes[0x80];
+        const size_t size = i == 4 ? sizeof bytes : 0x30;
+        if (!gprs[i] || !engine->system_memory.read(gprs[i], bytes, size)) continue;
         std::snprintf(line, sizeof line, " · [%s] :", names[i]);
         out += line;
-        for (size_t q = 0; q < sizeof bytes / 8; ++q) {
+        for (size_t q = 0; q < size / 8; ++q) {
             const uint64_t value = maxps4::ps4::get_le(bytes + 8 * q, 8);
             const bool code = value >= engine->relocation && value - engine->relocation < 0x10000000;
             std::snprintf(line, sizeof line, code ? " code+0x%llx" : " 0x%llx",
@@ -2620,6 +2622,14 @@ static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address) {
         out += line;
     }
     return out;
+}
+extern "C" int32_t maxps4_fex_engine_fault_detail(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard sampling(engine->sample_lock);
+    const size_t length = std::min(engine->last_fault_detail.size(), capacity - 1);
+    std::memcpy(text, engine->last_fault_detail.data(), length);
+    text[length] = 0;
+    return int32_t(length);
 }
 extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
