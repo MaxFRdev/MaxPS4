@@ -1452,6 +1452,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     if (!persistent_frame || !engine->frame_code_cached) engine->context->ClearCodeCache(thread, false);
     engine->frame_code_cached = persistent_frame;
     engine->last_fault = {};
+    { std::lock_guard sampling(engine->sample_lock); engine->last_fault_detail.clear(); }
     {
         // General images may create guest threads; all are joined before the
         // guard (which owns the signal handlers) goes away.
@@ -1507,9 +1508,22 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
             uint64_t id = 0;
             std::array<uint64_t, 16> gprs {};
             threads->fault_thread(id, gprs);
-            engine->last_fault_detail = fault_detail(engine, child, id, gprs);
+            std::string detail = fault_detail(engine, child, id, gprs);
+            std::lock_guard sampling(engine->sample_lock);
+            engine->last_fault_detail = std::move(detail);
         }
-        else if (signal) engine->last_fault = {signal, guard.code, guard.address, state.rip};
+        else if (signal) {
+            // The main thread (1) faulted: its exact instruction when the fault
+            // was in JIT code, and its guest registers as FEX spilled them.
+            engine->last_fault = {signal, guard.code, guard.address, guard.fault_rip ? guard.fault_rip : state.rip};
+            if (signal != SIGURG) {
+                std::array<uint64_t, 16> gprs {};
+                std::copy_n(std::begin(state.gregs), 16, gprs.begin());
+                std::string detail = fault_detail(engine, engine->last_fault, 1, gprs);
+                std::lock_guard sampling(engine->sample_lock);
+                engine->last_fault_detail = std::move(detail);
+            }
+        }
         if (signal) {
             engine->frame_code_cached = false;
             return signal == SIGURG ? (engine->stop_requested.load() ? -ECANCELED : -ETIMEDOUT) :
@@ -2620,17 +2634,18 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
     out += engine->libkernel.graphics().submit_activity();
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();
+    std::unique_lock sampling(engine->sample_lock);
     out += engine->last_fault_detail;
     if (engine->last_fault_detail.empty()) {
         // While the run stops, before the threads are gone: the live report
         // keeps it even if the app itself dies on the way.
-        std::lock_guard sampling(engine->sample_lock);
         maxps4_fex_guest_fault fault {};
         uint64_t id = 0;
         std::array<uint64_t, 16> gprs {};
         if (engine->probe.threads && engine->probe.threads->faulted(fault) && engine->probe.threads->fault_thread(id, gprs))
             out += fault_detail(engine, fault, id, gprs);
     }
+    sampling.unlock();
     {
         std::array<maxps4::PS4Libkernel::SaveCall, maxps4::PS4Libkernel::save_call_limit> calls {};
         size_t count = 0;
