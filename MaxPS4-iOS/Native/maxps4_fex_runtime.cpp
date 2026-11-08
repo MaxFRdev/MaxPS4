@@ -2822,7 +2822,7 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         size_t used = 0, peak = 0;
         engine->libkernel.mutex_usage(used, peak);
         const auto failed = engine->libkernel.mutex_failures();
-        char line[256];
+        char line[400];
         int n = std::snprintf(line, sizeof line, "Mutex : %zu en service (au plus %zu sur %zu) · échecs : lock %llu, trylock %llu, unlock %llu",
             used, peak, maxps4::PS4Threads::mutex_limit, (unsigned long long)failed.lock,
             (unsigned long long)failed.trylock, (unsigned long long)failed.unlock);
@@ -2830,6 +2830,12 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             n += std::snprintf(line + n, sizeof line - size_t(n), " · dernier %s(0x%llx) thread %llu = 0x%llx",
                 service_name(failed.last_service), (unsigned long long)failed.last_slot,
                 (unsigned long long)failed.last_thread, (unsigned long long)failed.last_result);
+        // An init over a mutex another thread holds lets two threads into its critical section.
+        uint64_t reinit_live = 0, reinit_held = 0, reinit_slot = 0;
+        engine->libkernel.mutex_reinits(reinit_live, reinit_held, reinit_slot);
+        if (reinit_live && n > 0 && size_t(n) < sizeof line)
+            n += std::snprintf(line + n, sizeof line - size_t(n), " · réinitialisés vivants %llu, dont tenus %llu (dernier 0x%llx)",
+                (unsigned long long)reinit_live, (unsigned long long)reinit_held, (unsigned long long)reinit_slot);
         out += line;
         out += "\n";
     }

@@ -233,6 +233,11 @@ Error PS4Threads::init(uint64_t slot, uint64_t attributes, uint64_t name) {
         char text[1024];
         if (!memory_.read_cstring(name, text, sizeof(text))) return fault;
     }
+    // For the report: an init over a mutex that still exists, held or not.
+    if (const Mutex* live = lookup(slot)) {
+        ++reinit_live_;
+        if (live->owner) { ++reinit_held_; reinit_held_slot_ = slot; }
+    }
     // Every init makes a new mutex, as libkernel does: a pthread_mutex_t is a
     // pointer, and the slot it was initialized in says nothing about which
     // mutex a later call means. Call of Duty initializes its mutexes in one
@@ -252,6 +257,10 @@ Error PS4Threads::init(uint64_t slot, uint64_t attributes, uint64_t name) {
 void PS4Threads::note_mutex_peak() {
     const auto used = size_t(std::count_if(mutexes_.begin(), mutexes_.end(), [](const Mutex& m) { return m.token != 0; }));
     mutex_peak_ = std::max(mutex_peak_, used);
+}
+void PS4Threads::mutex_reinits(uint64_t& live, uint64_t& held, uint64_t& held_slot) const {
+    std::lock_guard<std::mutex> lock(guard_);
+    live = reinit_live_; held = reinit_held_; held_slot = reinit_held_slot_;
 }
 void PS4Threads::mutex_usage(size_t& used, size_t& peak) const {
     std::lock_guard<std::mutex> lock(guard_);

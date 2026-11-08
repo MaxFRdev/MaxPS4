@@ -246,6 +246,7 @@ public:
     struct MutexFailures { uint64_t lock = 0, trylock = 0, unlock = 0, last_slot = 0, last_thread = 0; int64_t last_result = 0; PS4KernelService last_service{}; };
     MutexFailures mutex_failures() const { std::lock_guard<std::mutex> guard(memory_failure_lock_); return mutex_failures_; }
     void mutex_usage(size_t& used, size_t& peak) const { threads_.mutex_usage(used, peak); }
+    void mutex_reinits(uint64_t& live, uint64_t& held, uint64_t& slot) const { threads_.mutex_reinits(live, held, slot); }
     struct MemoryFailure { PS4KernelService service{}; PS4KernelCall call{}; uint64_t hint = 0; int64_t result = 0; };
     static constexpr size_t memory_failure_limit = 16;
     // The last failures, newest first; returns how many there were in all.

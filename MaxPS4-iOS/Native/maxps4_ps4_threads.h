@@ -57,6 +57,8 @@ public:
     ps4::Error destroy(uint64_t slot);
     // Mutex records in use now, and the most ever in use (for the report).
     void mutex_usage(size_t& used, size_t& peak) const;
+    // Inits over a mutex that still existed, and over one that was held (with its slot).
+    void mutex_reinits(uint64_t& live, uint64_t& held, uint64_t& held_slot) const;
     // Condition attributes (clock, process sharing) do not change waits here.
     ps4::Error cond_init(uint64_t slot, uint64_t attributes, uint64_t name);
     ps4::Error cond_destroy(uint64_t slot);
@@ -156,6 +158,7 @@ private:
     std::array<uint64_t, thread_limit> threads_{};
     std::array<Mutex, mutex_limit> mutexes_{};
     size_t mutex_peak_ = 0;
+    uint64_t reinit_live_ = 0, reinit_held_ = 0, reinit_held_slot_ = 0;
     void note_mutex_peak(); // Under guard_, after a record is taken.
     std::array<Cond, cond_limit> conds_{};
     std::array<Attr, attr_limit> attrs_{};
