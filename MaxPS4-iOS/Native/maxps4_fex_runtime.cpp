@@ -2788,6 +2788,22 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             out += line;
         }
     }
+    {
+        // A failed lock the game ignores leaves its critical section unprotected.
+        size_t used = 0, peak = 0;
+        engine->libkernel.mutex_usage(used, peak);
+        const auto failed = engine->libkernel.mutex_failures();
+        char line[256];
+        int n = std::snprintf(line, sizeof line, "Mutex : %zu en service (au plus %zu sur %zu) · échecs : lock %llu, trylock %llu, unlock %llu",
+            used, peak, maxps4::PS4Threads::mutex_limit, (unsigned long long)failed.lock,
+            (unsigned long long)failed.trylock, (unsigned long long)failed.unlock);
+        if (failed.lock || failed.trylock || failed.unlock)
+            n += std::snprintf(line + n, sizeof line - size_t(n), " · dernier %s(0x%llx) thread %llu = 0x%llx",
+                service_name(failed.last_service), (unsigned long long)failed.last_slot,
+                (unsigned long long)failed.last_thread, (unsigned long long)failed.last_result);
+        out += line;
+        out += "\n";
+    }
     const uint64_t now = ProbeAddressSpace::now_ns();
     if (const uint64_t asked = engine->probe.stop_asked_ns.load()) {
         const uint64_t told = engine->probe.stop_told_ns.load();

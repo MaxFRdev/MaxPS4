@@ -3118,6 +3118,14 @@ bool PS4Libkernel::initialize_data(PS4KernelService service, uint64_t address, u
     default: return false;
     }
 }
+int64_t PS4Libkernel::note_mutex(PS4KernelService service, uint64_t slot, uint64_t thread, int64_t result) {
+    if (!result) return 0;
+    std::lock_guard<std::mutex> guard(memory_failure_lock_);
+    auto& f = mutex_failures_;
+    ++(service == PS4KernelService::mutex_lock ? f.lock : service == PS4KernelService::mutex_trylock ? f.trylock : f.unlock);
+    f.last_slot = slot; f.last_thread = thread; f.last_result = result; f.last_service = service;
+    return result;
+}
 int64_t PS4Libkernel::invoke_service(PS4KernelService service, const PS4KernelCall& c, uint64_t thread) {
     // Thread services use only PS4Threads (its own lock): a thread blocked in
     // a lock or a wait must not hold up the thread that would release it.
@@ -3125,9 +3133,12 @@ int64_t PS4Libkernel::invoke_service(PS4KernelService service, const PS4KernelCa
     case PS4KernelService::thread_self: return threads_.known(thread) ? int64_t(thread) : kernel_error(inval);
     case PS4KernelService::mutex_init:
         return threads_.known(thread) ? kernel_error(threads_.init(c.rdi, c.rsi, c.rdx)) : kernel_error(inval);
-    case PS4KernelService::mutex_trylock: return kernel_error(threads_.trylock(c.rdi, thread));
-    case PS4KernelService::mutex_lock: return kernel_error(threads_.lock(c.rdi, thread));
-    case PS4KernelService::mutex_unlock: return kernel_error(threads_.unlock(c.rdi, thread));
+    case PS4KernelService::mutex_trylock: {
+        const Error error = threads_.trylock(c.rdi, thread);
+        return error == busy ? kernel_error(error) : note_mutex(service, c.rdi, thread, kernel_error(error));
+    }
+    case PS4KernelService::mutex_lock: return note_mutex(service, c.rdi, thread, kernel_error(threads_.lock(c.rdi, thread)));
+    case PS4KernelService::mutex_unlock: return note_mutex(service, c.rdi, thread, kernel_error(threads_.unlock(c.rdi, thread)));
     case PS4KernelService::mutex_destroy:
         return threads_.known(thread) ? kernel_error(threads_.destroy(c.rdi)) : kernel_error(inval);
     case PS4KernelService::cond_init:

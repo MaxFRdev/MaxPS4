@@ -66,6 +66,7 @@ PS4Threads::Mutex* PS4Threads::acquire(uint64_t slot, Error& error) {
         if (!fresh) { error = again; return nullptr; }
         if (!write_token(slot, fresh)) { error = fault; return nullptr; }
         mutex = {fresh, 0, slot, token == adaptive_initializer ? adaptive : error_check, 0};
+        note_mutex_peak();
         return &mutex;
     }
     error = again;
@@ -238,9 +239,19 @@ Error PS4Threads::init(uint64_t slot, uint64_t attributes, uint64_t name) {
         if (!fresh) return again;
         if (!write_token(slot, fresh)) return fault;
         mutex = {fresh, 0, slot, type, 0};
+        note_mutex_peak();
         return ok;
     }
     return again;
+}
+void PS4Threads::note_mutex_peak() {
+    const auto used = size_t(std::count_if(mutexes_.begin(), mutexes_.end(), [](const Mutex& m) { return m.token != 0; }));
+    mutex_peak_ = std::max(mutex_peak_, used);
+}
+void PS4Threads::mutex_usage(size_t& used, size_t& peak) const {
+    std::lock_guard<std::mutex> lock(guard_);
+    used = size_t(std::count_if(mutexes_.begin(), mutexes_.end(), [](const Mutex& m) { return m.token != 0; }));
+    peak = mutex_peak_;
 }
 Error PS4Threads::trylock(uint64_t slot, uint64_t thread) {
     std::lock_guard<std::mutex> lock(guard_);
