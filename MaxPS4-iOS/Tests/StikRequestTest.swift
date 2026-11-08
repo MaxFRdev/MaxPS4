@@ -15,7 +15,7 @@ struct StikRequestTest {
         var base64 = encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
         let decoded = String(data: Data(base64Encoded: base64)!, encoding: .utf8)!
-        precondition(decoded == "const MAXPS4_MAILBOX=0x100000n;const MAXPS4_NONCE=0xfedcba9876543210n;const MAXPS4_SIZES=[16384,16777216,16384];\n" + script)
+        precondition(decoded == "const MAXPS4_MAILBOX=0x100000n;const MAXPS4_NONCE=0xfedcba9876543210n;const MAXPS4_SIZES=[16384,134217728,16384];\n" + script)
         for page: UInt64 in [0, 3, 32768] {
             precondition(MaxPS4StikRequest.url(bundleID: "fr.enermax.MaxPS4", pid: 42,
                 mailbox: 0x100000, nonce: 1, pageSize: page, script: script) == nil)

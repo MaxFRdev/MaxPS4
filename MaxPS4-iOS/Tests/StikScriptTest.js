@@ -9,7 +9,7 @@ function run(failAt = '', badAllocation = '') {
     let allocation = 0;
     const context = {
         MAXPS4_MAILBOX: 0x100000n, MAXPS4_NONCE: 0x123456789abcdef0n,
-        MAXPS4_SIZES: [16384, 16777216, 16384],
+        MAXPS4_SIZES: [16384, 134217728, 16384],
         get_pid: () => 42, log: () => {},
         send_command(command) {
             commands.push(command);
@@ -33,7 +33,7 @@ function run(failAt = '', badAllocation = '') {
 }
 let test = run();
 assert.equal(test.error, undefined);
-assert.deepEqual(test.prepared.map(x => x[1]), [16384, 16777216, 16384]);
+assert.deepEqual(test.prepared.map(x => x[1]), [16384, 134217728, 16384]);
 assert.equal(test.commands[0], 'vAttach;2a');
 assert.equal(test.commands.at(-1), 'D');
 const writes = test.commands.filter(x => x.startsWith('M'));

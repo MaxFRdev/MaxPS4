@@ -45,7 +45,7 @@ no app BRK instruction and therefore no crash from a missing breakpoint script.
    documented `stikdebug://enable-jit` URL with its actual bundle ID, current PID
    and this ONE fixed script supplied through `script-data`.
 2. StikDebug must actually attach through its authorized debugserver connection.
-   It requests three RX mappings (`_M<size>,rx`): 16 KiB dispatcher, 16 MiB
+   It requests three RX mappings (`_M<size>,rx`): 16 KiB dispatcher, 128 MiB
    code cache and one host page for a native canary. Each must pass
    `prepare_memory_region` before publication. No kernel/CS flag or entitlement
    is patched. Allocation/preparation failures are reported and debugger-owned
@@ -154,7 +154,7 @@ on the actual device. Do not work around a permission denial.
    to meet the JIT criterion, regardless of debugger indicators.
 7. Repeat 20 times. Check UI responsiveness, app logs, crash reports and memory
    with authorized device tooling. Background/resume and memory pressure also
-   need testing. The reserved 16 MiB code cache should remain bounded; “Libérer
+   need testing. The reserved 128 MiB code cache should remain bounded; “Libérer
    la mémoire JIT” must release it and return subsequent tests to interpreter.
 8. Test absent signing entitlement, rejected attach, disconnected VPN, denied
    allocation/preparation/remap, stopped script and restart. Capture actual

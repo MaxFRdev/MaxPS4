@@ -7,7 +7,7 @@ enum MaxPS4StikRequest {
         guard !bundleID.isEmpty, pid > 0, mailbox != 0, mailbox % 8 == 0,
               nonce != 0, pageSize > 0, pageSize <= 16384,
               16384 % pageSize == 0, !script.isEmpty else { return nil }
-        let prefix = "const MAXPS4_MAILBOX=0x\(String(mailbox, radix: 16))n;const MAXPS4_NONCE=0x\(String(nonce, radix: 16))n;const MAXPS4_SIZES=[16384,16777216,\(pageSize)];\n"
+        let prefix = "const MAXPS4_MAILBOX=0x\(String(mailbox, radix: 16))n;const MAXPS4_NONCE=0x\(String(nonce, radix: 16))n;const MAXPS4_SIZES=[16384,134217728,\(pageSize)];\n"
         // StikDebug accepts base64url; avoid '+' ambiguity in query decoding.
         let data = Data((prefix + script).utf8).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")

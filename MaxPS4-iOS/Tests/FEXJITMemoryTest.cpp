@@ -51,7 +51,7 @@ int main() {
         CHECK(maxps4_jit_cancel() == 0);
     }
     CHECK(maxps4_jit_begin(&address, &nonce, &page) == 0);
-    const std::array sizes {size_t{16384}, size_t{16 * 1024 * 1024}, static_cast<size_t>(page)};
+    const std::array sizes {size_t{16384}, size_t{128 * 1024 * 1024}, static_cast<size_t>(page)};
     std::array<vm_address_t, 3> rx {};
     for (size_t i = 0; i < rx.size(); ++i) {
         CHECK(vm_allocate(mach_task_self(), &rx[i], sizes[i], VM_FLAGS_ANYWHERE) == KERN_SUCCESS);
