@@ -14,6 +14,8 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <functional>
+#include <atomic>
 #include <mutex>
 #include <string_view>
 
@@ -244,6 +246,11 @@ public:
     // Failed mutex lock/trylock/unlock calls (trylock's busy is not a failure):
     // a game that ignores the result runs its critical section unprotected.
     struct MutexFailures { uint64_t lock = 0, trylock = 0, unlock = 0, last_slot = 0, last_thread = 0; int64_t last_result = 0; PS4KernelService last_service{}; };
+    // Diagnostic watch on one mutex, set before the game runs: called after each
+    // successful lock (also trylock, timed lock and a condition wait's return)
+    // and unlock of that slot, with the thread and the guest caller ([rsp]).
+    using MutexWatch = std::function<void(uint64_t thread, uint64_t caller, bool unlock)>;
+    void watch_mutex(uint64_t slot, MutexWatch watch) { mutex_watch_ = std::move(watch); watched_mutex_.store(slot); }
     MutexFailures mutex_failures() const { std::lock_guard<std::mutex> guard(memory_failure_lock_); return mutex_failures_; }
     void mutex_usage(size_t& used, size_t& peak) const { threads_.mutex_usage(used, peak); }
     void mutex_reinits(uint64_t& live, uint64_t& held, uint64_t& slot) const { threads_.mutex_reinits(live, held, slot); }
@@ -279,6 +286,8 @@ private:
     std::array<MemoryFailure, memory_failure_limit> memory_failures_ {};
     size_t memory_failures_total_ = 0;
     MutexFailures mutex_failures_ {};
+    std::atomic<uint64_t> watched_mutex_ {0};
+    MutexWatch mutex_watch_;
     int64_t note_mutex(PS4KernelService service, uint64_t slot, uint64_t thread, int64_t result);
     int64_t memory_service_unrecorded(PS4KernelService service, const PS4KernelCall& call);
     PS4GuestMemory& memory_;

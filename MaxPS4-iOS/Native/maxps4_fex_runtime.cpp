@@ -40,6 +40,7 @@
 #include <unistd.h>
 #include <cerrno>
 #include <mutex>
+#include <memory>
 #include <new>
 #include <atomic>
 #include <chrono>
@@ -1196,6 +1197,113 @@ struct CPUProfile {
     }
 #endif
 };
+// Diagnostic for Call of Duty: Modern Warfare Remastered (CUSA05379). Its
+// string table (65536 entries of 8 bytes: low 18 bits the next index of a
+// circular chain, then the key) ends up with a chain that loops without its
+// head, and a lookup spins forever (default.elf 0x5b1640), though every change
+// holds one mutex and no mutex call fails. On each lock of that mutex (at most
+// every 4 ms) the table is copied and the entries pointed at by two others are
+// counted; the first time that count grows, the entries changed since the
+// previous check and the last lock/unlock calls are kept for the report.
+class StringTableWatch {
+public:
+    StringTableWatch(maxps4::PS4GuestMemory& memory, uint64_t table)
+        : memory_(memory), table_(table), start_(clock()), in_degree_(entries) {}
+    void event(uint64_t thread, uint64_t caller, bool unlock) {
+        std::lock_guard guard(lock_);
+        const uint64_t now = clock();
+        events_[next_event_++ % events_.size()] = {now, thread, caller, unlock};
+        if (unlock || captured_.load() || (checks_ && now - last_check_ < 4000000)) return;
+        last_check_ = now;
+        check(thread, caller, now);
+    }
+    std::string report() const {
+        std::lock_guard guard(lock_);
+        char line[200];
+        std::snprintf(line, sizeof line, "Table de chaînes (CoD) : %llu vérifications, %llu entrées pointées deux fois (au départ %lld)%s\n",
+            (unsigned long long)checks_, (unsigned long long)last_bad_, (long long)baseline_,
+            unreadable_ ? " · table illisible" : "");
+        return std::string(line) + capture_;
+    }
+private:
+    static constexpr size_t entries = 0x10000;
+    struct Event { uint64_t ns = 0, thread = 0, caller = 0; bool unlock = false; };
+    static uint64_t clock() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    static uint32_t word(const std::vector<uint8_t>& table, size_t index, size_t half = 0) {
+        uint32_t value;
+        std::memcpy(&value, table.data() + index * 8 + half * 4, 4);
+        return value;
+    }
+    void check(uint64_t thread, uint64_t caller, uint64_t now) {
+        current_.resize(entries * 8);
+        if (!memory_.read(table_, current_.data(), current_.size())) { ++unreadable_; return; }
+        std::fill(in_degree_.begin(), in_degree_.end(), 0);
+        uint64_t bad = 0;
+        size_t sample = 0;
+        for (size_t i = 1; i < entries; ++i) {
+            const uint32_t next = word(current_, i) & 0x3ffff;
+            if (next >= entries) { ++bad; sample = i; continue; }
+            if (next && ++in_degree_[next] == 2) { ++bad; sample = next; }
+        }
+        ++checks_;
+        last_bad_ = bad;
+        if (baseline_ < 0) baseline_ = int64_t(bad);
+        if (int64_t(bad) > baseline_ && !previous_.empty()) {
+            capture(thread, caller, now, bad, sample);
+            captured_.store(true);
+            return;
+        }
+        previous_.swap(current_);
+        previous_check_ = now;
+    }
+    void capture(uint64_t thread, uint64_t caller, uint64_t now, uint64_t bad, size_t sample) {
+        char line[256];
+        std::snprintf(line, sizeof line, "  cassée à %.2f s (vérification %llu, la précédente %.2f ms avant) : %llu entrées doubles, vu par le thread %llu en prenant le verrou depuis 0x%llx\n",
+            double(now - start_) / 1e9, (unsigned long long)checks_, double(now - previous_check_) / 1e6,
+            (unsigned long long)bad, (unsigned long long)thread, (unsigned long long)caller);
+        capture_ += line;
+        std::snprintf(line, sizeof line, "  entrée 0x%zx (mot 0x%08x clé 0x%08x) pointée par :", sample, word(current_, sample), word(current_, sample, 1));
+        capture_ += line;
+        int shown = 0;
+        for (size_t i = 1; i < entries && shown < 4; ++i)
+            if ((word(current_, i) & 0x3ffff) == sample) {
+                std::snprintf(line, sizeof line, " 0x%zx (mot 0x%08x clé 0x%08x, avant 0x%08x)", i, word(current_, i), word(current_, i, 1), word(previous_, i));
+                capture_ += line; ++shown;
+            }
+        capture_ += "\n  entrées changées depuis la vérification précédente :";
+        size_t changed = 0;
+        for (size_t i = 0; i < entries; ++i) {
+            if (std::memcmp(current_.data() + i * 8, previous_.data() + i * 8, 8) == 0) continue;
+            if (++changed <= 32) {
+                std::snprintf(line, sizeof line, " 0x%zx %08x:%08x→%08x:%08x", i, word(previous_, i), word(previous_, i, 1), word(current_, i), word(current_, i, 1));
+                capture_ += line;
+            }
+        }
+        std::snprintf(line, sizeof line, " (%zu en tout)\n  derniers appels au verrou, récents d'abord :", changed);
+        capture_ += line;
+        for (size_t k = 0; k < events_.size() && k < next_event_; ++k) {
+            const Event& e = events_[(next_event_ - 1 - k) % events_.size()];
+            std::snprintf(line, sizeof line, " t%llu %s 0x%llx (-%.2f ms)", (unsigned long long)e.thread, e.unlock ? "libère" : "prend",
+                (unsigned long long)e.caller, double(now - e.ns) / 1e6);
+            capture_ += line;
+        }
+        capture_ += "\n";
+    }
+    maxps4::PS4GuestMemory& memory_;
+    const uint64_t table_;
+    const uint64_t start_;
+    mutable std::mutex lock_;
+    std::array<Event, 48> events_ {};
+    uint64_t next_event_ = 0, checks_ = 0, last_check_ = 0, previous_check_ = 0, last_bad_ = 0, unreadable_ = 0;
+    int64_t baseline_ = -1;
+    std::atomic<bool> captured_ {false};
+    std::vector<uint8_t> current_, previous_;
+    std::vector<uint16_t> in_degree_;
+    std::string capture_;
+};
 struct maxps4_fex_engine {
     // This real FEX configuration holder installs no process signal handlers.
     // It outlives the context. Only admitted no-fault straight-line code executes.
@@ -1211,6 +1319,8 @@ struct maxps4_fex_engine {
     // The faulting child thread, its exact instruction, registers and target
     // memory, for the final report (the threads are gone by then).
     std::string last_fault_detail;
+    // Call of Duty only (see StringTableWatch): its string table, checked under its mutex.
+    std::unique_ptr<StringTableWatch> table_watch;
     uint32_t time_limit_ms = 0; // 0: no limit.
     std::atomic<bool> stop_requested{false};
     // The running main thread's guard, for sampling; guarded by sample_lock.
@@ -1430,6 +1540,23 @@ static std::string fault_detail(maxps4_fex_engine* engine, const maxps4_fex_gues
     detail += fault_memory(engine, fault.address);
     detail += fault_registers(engine, gprs);
     return detail + "\n";
+}
+// Call of Duty: Modern Warfare Remastered's string table check (StringTableWatch),
+// when its code is the one known: the lookup's lea of the table at default.elf
+// 0x5b15eb. Other games and versions keep no watch.
+static void watch_string_table(maxps4_fex_engine* engine) {
+    engine->libkernel.watch_mutex(0, {});
+    engine->table_watch.reset();
+    const uint64_t base = engine->relocation + 0x2100000; // default.elf's load address.
+    static constexpr uint8_t lookup[] = {0x4c, 0x8d, 0x25, 0x0e, 0xe9, 0x69, 0x0c};
+    uint8_t bytes[sizeof lookup] = {};
+    if (!engine->system_memory.read(base + 0x5b15eb, bytes, sizeof bytes) || std::memcmp(bytes, lookup, sizeof lookup)) return;
+    engine->table_watch = std::make_unique<StringTableWatch>(engine->system_memory, base + 0xcc4ff00);
+    StringTableWatch* watch = engine->table_watch.get();
+    const uint64_t relocation = engine->relocation;
+    engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock) {
+        watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock);
+    });
 }
 namespace {
 struct PM4Request {
@@ -1889,6 +2016,7 @@ extern "C" int32_t maxps4_fex_engine_prepare_orbis_general(maxps4_fex_engine* en
         message(status ? reason : "SCE image linked and identity-mapped; execution not attempted");
         engine->orbis_admitted = status == 0;
         if (!status) *relocation = engine->relocation = moved;
+        if (!status) watch_string_table(engine);
         return status;
     } catch (const std::bad_alloc&) { message("Orbis allocation failed"); return -ENOMEM; }
 }
@@ -2808,6 +2936,7 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             out += line;
         }
     }
+    if (engine->table_watch) out += engine->table_watch->report();
     if (maxps4_fex_code_cache_used) {
         // The iOS code buffer's fill and in-place clears (patch-fexcore-code-cache-reuse.py):
         // a clear while other threads run can leave them on stale code.

@@ -2063,6 +2063,17 @@ int64_t PS4Libkernel::invoke(PS4KernelService service, const PS4KernelCall& c, u
     bool handled = false;
     int64_t result = extended(service, c, thread, handled);
     if (!handled) result = invoke_service(service, c, thread);
+    if (const uint64_t watched = watched_mutex_.load(std::memory_order_relaxed); watched && !result) {
+        using S = PS4KernelService;
+        const bool lock = (service == S::mutex_lock || service == S::mutex_trylock || service == S::mutex_reltimedlock) && c.rdi == watched;
+        const bool wait = (service == S::cond_wait || service == S::cond_timedwait) && c.rsi == watched;
+        const bool unlock = service == S::mutex_unlock && c.rdi == watched;
+        if (lock || wait || unlock) {
+            uint8_t back[8] = {};
+            const uint64_t caller = c.rsp && memory_.read(c.rsp, back, 8) ? get_le(back, 8) : 0;
+            mutex_watch_(thread, caller, unlock);
+        }
+    }
     record_save_call(service, c, result);
     return posix ? posix_result(result, thread) : result;
 }
