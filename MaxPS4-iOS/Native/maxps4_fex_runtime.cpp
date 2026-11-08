@@ -2629,6 +2629,23 @@ static std::string fault_registers(maxps4_fex_engine* engine, const std::array<u
         std::snprintf(line, sizeof line, " %s 0x%llx", names[i], (unsigned long long)gprs[i]);
         out += line;
     }
+    // The guest call chain through saved frame pointers ([rbp] the caller's
+    // rbp, [rbp + 8] its return address), while it stays within readable memory.
+    {
+        out += " · appels (rbp) :";
+        uint64_t frame = gprs[5];
+        for (int depth = 0; depth < 12 && frame && !(frame & 7); ++depth) {
+            uint8_t pair[16];
+            if (!engine->system_memory.read(frame, pair, sizeof pair)) break;
+            const uint64_t next = maxps4::ps4::get_le(pair, 8), back = maxps4::ps4::get_le(pair + 8, 8);
+            const bool code = back >= engine->relocation && back - engine->relocation < 0x20000000;
+            if (!code) break;
+            std::snprintf(line, sizeof line, " 0x%llx", (unsigned long long)(back - engine->relocation));
+            out += line;
+            if (next <= frame) break;
+            frame = next;
+        }
+    }
     // The stack's top (16 words) holds the return addresses of the callers.
     for (const size_t i : {size_t(4), size_t(3), size_t(7), size_t(14)}) {
         uint8_t bytes[0x80];
