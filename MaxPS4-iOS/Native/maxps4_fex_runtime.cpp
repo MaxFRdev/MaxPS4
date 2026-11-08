@@ -50,6 +50,7 @@
 #include <thread>
 #include <unordered_map>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #if defined(__APPLE__)
@@ -406,6 +407,88 @@ public:
 // runs once when the limit elapses (it wakes HLE waits such as a join).
 // A child guest thread's guard has `install` false: the main run's guard owns
 // the process handlers for the whole run, this one only routes its thread.
+// Where a fault that kills the app (one no handler takes) is described, set by
+// the app for each run: the iOS crash log only shows which thread got the
+// signal back, not the host code that faulted.
+static char host_crash_note[1024] {};
+#if (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+// A return address without its pointer authentication bits.
+static uint64_t ptrauth_strip_address(uint64_t address) {
+#if defined(__APPLE__)
+#if __has_feature(ptrauth_calls)
+    return reinterpret_cast<uint64_t>(ptrauth_strip(reinterpret_cast<void*>(address), ptrauth_key_return_address));
+#endif
+#endif
+    return address & 0x0000ffffffffffffULL;
+}
+// Image and symbol of a host code address, for the note.
+static int describe_host_address(char* out, size_t size, uint64_t address) {
+    Dl_info info {};
+    if (!address || !::dladdr(reinterpret_cast<void*>(address), &info) || !info.dli_fbase)
+        return std::snprintf(out, size, " 0x%llx", (unsigned long long)address);
+    const char* image = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
+    image = image ? image + 1 : (info.dli_fname ? info.dli_fname : "?");
+    const auto base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    if (info.dli_sname && info.dli_saddr)
+        return std::snprintf(out, size, " %s+0x%llx (%s+0x%llx)", image, (unsigned long long)(address - base),
+            info.dli_sname, (unsigned long long)(address - reinterpret_cast<uintptr_t>(info.dli_saddr)));
+    return std::snprintf(out, size, " %s+0x%llx", image, (unsigned long long)(address - base));
+}
+// The app is about to die of `number`: write what faulted, its host call stack
+// (frame pointers, within this thread's stack) and the guest thread it ran.
+static void write_host_crash_note(int number, const siginfo_t* info, const ucontext_t* machine,
+                                  uint64_t guest_thread, uint64_t guest_rip) {
+    static std::atomic<bool> writing {false};
+    if (!host_crash_note[0] || writing.exchange(true)) return;
+    const int fd = ::open(host_crash_note, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    static char text[8192];
+    size_t used = 0;
+    const auto add = [&](int n) { if (n > 0) used = std::min(sizeof text - 1, used + size_t(n)); };
+#if defined(__APPLE__)
+    const auto& state = machine->uc_mcontext->__ss;
+    const uint64_t pc = state.__pc, lr = state.__lr, fp = state.__fp, sp = state.__sp;
+    const uint64_t* x = reinterpret_cast<const uint64_t*>(state.__x);
+#else
+    const auto& state = machine->uc_mcontext;
+    const uint64_t pc = state.pc, lr = state.regs[30], fp = state.regs[29], sp = state.sp;
+    const uint64_t* x = reinterpret_cast<const uint64_t*>(state.regs);
+#endif
+    add(std::snprintf(text + used, sizeof text - used,
+        "Plantage hôte : signal %d code %d adresse 0x%llx", number, info->si_code,
+        (unsigned long long)reinterpret_cast<uintptr_t>(info->si_addr)));
+    add(std::snprintf(text + used, sizeof text - used, ", thread du jeu %llu, RIP invité 0x%llx\nPC",
+        (unsigned long long)guest_thread, (unsigned long long)guest_rip));
+    add(describe_host_address(text + used, sizeof text - used, pc));
+    add(std::snprintf(text + used, sizeof text - used, "\n" "LR"));
+    add(describe_host_address(text + used, sizeof text - used, ptrauth_strip_address(lr)));
+    add(std::snprintf(text + used, sizeof text - used, "\n" "Pile :"));
+#if defined(__APPLE__)
+    const auto high = reinterpret_cast<uintptr_t>(::pthread_get_stackaddr_np(::pthread_self()));
+    const auto low = high - ::pthread_get_stacksize_np(::pthread_self());
+#else
+    const uintptr_t low = sp, high = sp + 0x100000;
+#endif
+    uint64_t frame = fp;
+    for (int i = 0; i < 24 && frame && !(frame & 7) && frame >= low && frame + 16 <= high; ++i) {
+        const auto* words = reinterpret_cast<const uint64_t*>(frame);
+        add(std::snprintf(text + used, sizeof text - used, "\n" "  "));
+        add(describe_host_address(text + used, sizeof text - used, ptrauth_strip_address(words[1])));
+        if (words[0] <= frame) break;
+        frame = words[0];
+    }
+    add(std::snprintf(text + used, sizeof text - used, "\n" "Registres :"));
+    for (int i = 0; i < 29; ++i)
+        add(std::snprintf(text + used, sizeof text - used, " x%d 0x%llx", i, (unsigned long long)x[i]));
+    add(std::snprintf(text + used, sizeof text - used, " sp 0x%llx\n", (unsigned long long)sp));
+    for (size_t done = 0; done < used;) {
+        const ssize_t n = ::write(fd, text + done, used - done);
+        if (n <= 0) break;
+        done += size_t(n);
+    }
+    ::close(fd);
+}
+#endif
 class GuestFaultGuard final {
 public:
     static constexpr bool available =
@@ -612,6 +695,14 @@ private:
             // so the watchdog's next signal is still seen.
             if (old.sa_handler == SIG_IGN || (number == SIGURG && old.sa_handler == SIG_DFL)) return;
             if (old.sa_handler == SIG_DFL) {
+#if (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+                // The default action ends the app: say where first.
+                if (number != SIGURG)
+                    // Thread 0: a host thread that runs no guest code (Metal, audio, the app).
+                    write_host_crash_note(number, info, static_cast<const ucontext_t*>(raw),
+                                          guard ? ProbeAddressSpace::guest_thread : 0,
+                                          guard ? guard->thread->CurrentFrame->State.rip : 0);
+#endif
                 ::sigaction(number, &old, nullptr);
                 ::raise(number);
             } else if (old.sa_flags & SA_SIGINFO) old.sa_sigaction(number, info, raw);
@@ -2622,6 +2713,16 @@ static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address) {
         out += line;
     }
     return out;
+}
+extern "C" void maxps4_fex_set_host_crash_note(const char* path) {
+    const size_t length = path ? std::min(std::strlen(path), sizeof host_crash_note - 1) : 0;
+    // The first byte last: a signal handler never sees a half-written path.
+    host_crash_note[0] = 0;
+    if (!length) return;
+    std::memcpy(host_crash_note + 1, path + 1, length - 1);
+    host_crash_note[length] = 0;
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+    host_crash_note[0] = path[0];
 }
 extern "C" int32_t maxps4_fex_engine_fault_detail(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;

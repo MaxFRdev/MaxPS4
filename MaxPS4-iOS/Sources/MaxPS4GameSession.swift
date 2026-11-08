@@ -508,6 +508,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             bridge = metal; ready = !stopped
             started = ProcessInfo.processInfo.systemUptime
             liveReport = MaxPS4Reports.live(for: url)
+            // A new run: the previous run's note is gone, this one's goes there.
+            let crashNote = MaxPS4Reports.hostCrash(for: url)
+            try? FileManager.default.removeItem(at: crashNote)
+            crashNote.path.withCString { maxps4_fex_set_host_crash_note($0) }
             folderListing = listing
             self.relocation = relocation
             let cancelled = stopped
