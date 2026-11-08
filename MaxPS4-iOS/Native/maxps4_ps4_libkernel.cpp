@@ -2745,7 +2745,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
             const uint64_t protection = e[24];
             switch (signed32(uint32_t(get_le(e + 28, 4)))) {
             case 0: result = memory_service(S::direct_map, {entry, length, protection, flags, offset, 0}); break;
-            case 1: result = memory_service(S::flexible_release, {start, length}); break;
+            case 1: result = kernel_error(dynamic_->unmap(start, length)); break; // Unmap.
             case 2: case 4: result = memory_service(S::mtype_protect, {start, length, e[25], protection}); break;
             case 3: result = memory_service(S::flexible_map_unnamed, {entry, length, protection, flags}); break;
             default: result = kernel_error(inval); break;
@@ -2947,7 +2947,27 @@ int64_t PS4Libkernel::memory_service_unrecorded(PS4KernelService service, const 
         if (e) return kernel_error(e);
         return write_pointer(c.rdi, mapped) ? 0 : (dynamic_->unmap(mapped, c.rsi), kernel_error(fault));
     }
-    case S::flexible_release: return kernel_error(dynamic_->unmap(c.rdi, c.rsi));
+    // ReleaseFlexibleMemory(address, length) gives the pages' memory back but
+    // keeps them mapped: they read as zero afterwards (shadPS4: madvise
+    // DONTNEED). It used to unmap, and failed (ENOMEM) on Call of Duty's
+    // ranges, whose later structures then started from stale data.
+    case S::flexible_release: {
+        constexpr uint64_t page = PS4VirtualMemory::page_size;
+        if (!c.rdi || !c.rsi || ((c.rdi | c.rsi) & (page - 1)) || c.rdi > UINT64_MAX - c.rsi) return kernel_error(inval);
+        static const std::vector<uint8_t> zeros(1 << 20, 0);
+        for (uint64_t at = c.rdi, end = c.rdi + c.rsi; at < end;) {
+            uint64_t start = 0, stop = 0;
+            uint32_t protection = 0;
+            if (!dynamic_->query(at, false, start, stop, protection)) return kernel_error(inval);
+            stop = std::min(stop, end);
+            // Writable pages are zeroed; read-only or reserved ones hold nothing to keep.
+            if (memory_.permitted(at, size_t(stop - at), 2))
+                for (uint64_t p = at; p < stop; p += zeros.size())
+                    if (!memory_.write(p, zeros.data(), size_t(std::min<uint64_t>(zeros.size(), stop - p)))) return kernel_error(fault);
+            at = stop;
+        }
+        return 0;
+    }
     // VirtualQuery(address, flags, info*, size): flags 1 finds the next
     // mapping. OrbisVirtualQueryInfo: start, end, offset (u64), protection,
     // memory type (s32), flag bits (flexible 1, direct 2, stack 4, pooled 8,

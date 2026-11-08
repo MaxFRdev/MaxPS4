@@ -115,7 +115,7 @@ int main() {
         auto mapped = [&](uint64_t bytes, uint64_t offset) {
             put_le(word, 0, 0, 8); assert(memory.write(where, word, 8));
             const int64_t result = invoke(S::direct_map, {where, bytes, 3, 0, offset, 0});
-            if (!result) { assert(memory.read(where, word, 8)); assert(invoke(S::flexible_release, {get_le(word, 8), bytes}) == 0); }
+            if (!result) { assert(memory.read(where, word, 8)); assert(invoke(S::munmap, {get_le(word, 8), bytes}) == 0); }
             return result;
         };
         assert(invoke(S::direct_allocate, {0x40000000, 1ULL << 31, 0x10000, 0, 0, phys}) == 0);
@@ -145,8 +145,22 @@ int main() {
     assert(memory.read(end_out, word, 8) && get_le(word, 8) == flexible_at + 0x8000);
     assert(memory.read(prot_out, word, 4) && get_le(word, 4) == 1); // Read only.
     assert(invoke(S::virtual_query, {flexible_at, 0, info, 0x48}) == 0 && memory.read(info, word, 8) && get_le(word, 8) == flexible_at);
+    // ReleaseFlexibleMemory keeps the pages mapped (they read as zero); munmap unmaps.
     assert(invoke(S::flexible_release, {flexible_at, 0x8000}) == 0);
+    assert(invoke(S::query_protection, {flexible_at, start_out, end_out, prot_out}) == 0);
+    assert(invoke(S::munmap, {flexible_at, 0x8000}) == 0);
     assert(invoke(S::query_protection, {flexible_at, start_out, end_out, prot_out}) == kernel_error(ps4::access));
+    assert(invoke(S::flexible_release, {flexible_at, 0x8000}) == kernel_error(inval)); // Not mapped.
+    assert(invoke(S::flexible_map_unnamed, {where, 0x8000, 3, 0}) == 0 && memory.read(where, word, 8));
+    {
+        const uint64_t rw = get_le(word, 8);
+        put_le(word, 0, 0x1122334455667788ULL, 8);
+        assert(memory.write(rw + 0x4ff8, word, 8));
+        assert(invoke(S::flexible_release, {rw, 0x8000}) == 0 && memory.permitted(rw, 0x8000, 6));
+        assert(memory.read(rw + 0x4ff8, word, 8) && get_le(word, 8) == 0);
+        assert(invoke(S::flexible_release, {rw + 0x2000, 0x4000}) == kernel_error(inval)); // Unaligned.
+        assert(invoke(S::munmap, {rw, 0x8000}) == 0);
+    }
     assert(invoke(S::sdk_version, {prot_out}) == 0 && memory.read(prot_out, word, 4) && get_le(word, 4) == 0x09008001);
     const int64_t anonymous = kernel.invoke(S::posix_mmap, {0, 0x4000, 3, 0x1002, uint64_t(-1LL), 0}, 1, true);
     assert(anonymous > 0 && memory.permitted(uint64_t(anonymous), 0x4000, 6));
@@ -166,7 +180,7 @@ int main() {
     assert(reserved % 0x8000 == 0 && !memory.permitted(reserved, 1, 4));
     assert(invoke(S::mtype_protect, {reserved, 0x4000, 3, 0x32}) == 0 && memory.permitted(reserved, 0x4000, 6));
     assert(!memory.permitted(reserved + 0x4000, 1, 4) && invoke(S::mtype_protect, {reserved, 0x4000, 3, 4}) == kernel_error(inval));
-    assert(invoke(S::flexible_release, {reserved, 0x8000}) == 0);
+    assert(invoke(S::munmap, {reserved, 0x8000}) == 0);
     // Direct allocations [0, 0x4000) and [0x10000, 0x14000): the one holding an offset, or the next.
     assert(invoke(S::direct_query, {0x2000, 0, info, 24}) == 0 && memory.read(info + 8, word, 8) && get_le(word, 8) == 0x4000);
     assert(invoke(S::direct_query, {0x8000, 0, info, 24}) == kernel_error(noent));
@@ -195,7 +209,7 @@ int main() {
     entry(0, batch_flexible, 0, 0x4000, 0x30, 4);
     assert(invoke(S::batch_map2, {entries, 1, done_out, 0}) == 0);
     assert(memory.permitted(batch_flexible, 0x4000, 6));
-    assert(!memory.permitted(batch_direct, 1, 4) && invoke(S::flexible_release, {batch_flexible, 0x4000}) == 0);
+    assert(!memory.permitted(batch_direct, 1, 4) && invoke(S::munmap, {batch_flexible, 0x4000}) == 0);
     // Memory pools: a 2 MiB reservation, committed and decommitted by 64 KiB.
     put_le(word, 0, 0, 8); assert(memory.write(where, word, 8));
     assert(invoke(S::pool_reserve, {0, 0x200000, 0, 0, where}) == 0 && memory.read(where, word, 8));
@@ -207,7 +221,7 @@ int main() {
     assert(invoke(S::pool_reserve, {0, 0x100000, 0, 0, where}) == kernel_error(inval));
     assert(invoke(S::flexible_available, {where}) == 0 && memory.read(where, word, 8));
     assert(get_le(word, 8) == 448ULL << 20);
-    assert(invoke(S::flexible_release, {pool, 0x200000}) == 0);
+    assert(invoke(S::munmap, {pool, 0x200000}) == 0);
     assert(invoke(S::pool_expand, {0, 1ULL << 30, 0x10000, 0, phys}) == 0 && memory.read(phys, word, 8));
     // BatchMap maps at the given address: outside a general image's window, refused.
     entry(0, PS4VirtualMemory::base, 0, 0x4000, 3, 3);
