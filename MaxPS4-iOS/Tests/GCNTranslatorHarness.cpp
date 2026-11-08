@@ -29,7 +29,7 @@ rt::GCNMemory window(const Arena& arena) { return {arena.bytes.data(), Arena::st
 }
 int main() {
     Arena arena;
-    loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena);
+    loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena); loadDepthCompareVS(arena);
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     // Vertex programs: one lane per vertex, against one interpreter wave.
@@ -100,6 +100,24 @@ int main() {
             for (unsigned c = 0; c < 4; ++c) assert(wave.exports[0].value[c][lane] == expected[c]);
         }
     }
+    // image_sample_c (LESS against depth 0.75), reference 0.5 * lane: 1, 1, 0, 0.
+    {
+        GCNWave wave(arena.memory, 4);
+        for (unsigned n = 0; n < 12; ++n) wave.s[n] = depthCompareSgprs[n];
+        for (unsigned lane = 0; lane < 4; ++lane) wave.v(0, lane) = lane;
+        assert(wave.run(depthCompareVS));
+        for (unsigned lane = 0; lane < 4; ++lane) {
+            rt::GCNLane L;
+            for (unsigned n = 0; n < 12; ++n) L.user[n] = depthCompareSgprs[n];
+            L.vinit[0] = lane;
+            rt::vs_depth_compare(L, M, unusedQuad);
+            const float expected = lane < 2 ? 1.0f : 0.0f;
+            for (unsigned c = 0; c < 4; ++c) {
+                assert(gcn_detail::u32(L.pos[c]) == wave.exports[0].value[c][lane]);
+                assert(wave.exports[0].value[c][lane] == bits(expected));
+            }
+        }
+    }
     // The pixel quad: four lanes on four threads in lockstep, lane 3 a helper.
     {
         GCNWave wave(arena.memory, 4);
@@ -159,5 +177,5 @@ int main() {
         assert(translated.bytes[computeImage + 4 * (8 + 1) + 2 - Arena::start] == 32);
         assert(translated.bytes[computeImage + 4 * 64 - Arena::start] == 0);
     }
-    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, pixel quad, compute stores)");
+    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, depth compare, pixel quad, compute stores)");
 }

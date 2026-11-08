@@ -38,6 +38,20 @@ struct uint4 {
 };
 struct GCNRes8 { uint d[8]; };
 struct GCNRes4 { uint d[4]; };
+// Depth-compare sampling (image_sample_c*): S# DEPTH_COMPARE_FUNC (word 0 bits
+// 12-14) between the reference the program passes and the sampled depth.
+GCN_FN bool gcn_depth_pass(uint func, float reference, float depth) {
+    switch (func & 7u) {
+    case 1u: return reference < depth;
+    case 2u: return reference == depth;
+    case 3u: return reference <= depth;
+    case 4u: return reference > depth;
+    case 5u: return reference != depth;
+    case 6u: return reference >= depth;
+    case 7u: return true;
+    default: return false;
+    }
+}
 // Guest memory as seen by translated code: one window or a table of ranges
 // (see gcn_locate).
 struct GCNMemory { const unsigned char* p; ulong base; ulong size; const ulong* ranges = nullptr; uint count = 0; };

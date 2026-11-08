@@ -753,10 +753,15 @@ private:
         const unsigned vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff;
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
         const unsigned op = i.opcode;
-        unsigned first = 0;
-        if (op == 37 || op == 38 || op == 53 || op == 54) first = 1;
-        if (op >= 48 && op < 64) first += 1;
-        if ((op >= 40 && op < 48) || (op >= 56 && op < 64)) return fail("depth-compare sampling");
+        // Address layout: [offset][bias][compare][derivatives (2D)] coordinates [lod/clamp].
+        const bool sampling = op >= 32 && op < 64;
+        const bool bias = sampling && ((op & 7) == 5 || (op & 7) == 6);
+        const bool compare = (op >= 40 && op < 48) || (op >= 56 && op < 64);
+        const bool derivatives = sampling && ((op & 7) == 2 || (op & 7) == 3);
+        unsigned first = unsigned(op >= 48 && op < 64) + unsigned(bias);
+        const unsigned reference = first;
+        if (compare) first += 1;
+        if (derivatives) first += 4;
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
         std::string call;
@@ -786,6 +791,10 @@ private:
             return out_.error.empty();
         } else return fail("unsupported image access " + in.name);
         body_ += "if (" + std::string(ex()) + ") { " + res + "float4 c = " + call + "; ";
+        if (compare) {
+            body_ += "{ float p = gcn_depth_pass(sm.d[0] >> 12, gf(" + v(vaddr + reference) +
+                     "), c[0]) ? 1.0f : 0.0f; c = float4(p, p, p, p); } ";
+        }
         for (unsigned n = 0, out = 0; n < 4; ++n)
             if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(c[" + std::to_string(n) + "]); ";
         body_ += "}";
@@ -866,6 +875,20 @@ using namespace metal;
 #define GCN_FN inline
 struct GCNRes8 { uint d[8]; };
 struct GCNRes4 { uint d[4]; };
+// Depth-compare sampling (image_sample_c*): S# DEPTH_COMPARE_FUNC (word 0 bits
+// 12-14) between the reference the program passes and the sampled depth.
+GCN_FN bool gcn_depth_pass(uint func, float reference, float depth) {
+    switch (func & 7u) {
+    case 1u: return reference < depth;
+    case 2u: return reference == depth;
+    case 3u: return reference <= depth;
+    case 4u: return reference > depth;
+    case 5u: return reference != depth;
+    case 6u: return reference >= depth;
+    case 7u: return true;
+    default: return false;
+    }
+}
 #if GCN_NATIVE_TEXTURES
 // Up to four of a draw's T#s viewed as Metal textures (a video's Y, U and V
 // planes); bit k of `enabled` marks texture k valid, bit 4 + k its Metal

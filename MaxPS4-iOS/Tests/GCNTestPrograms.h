@@ -131,4 +131,22 @@ inline void loadResinfoVS(Arena& arena) {
         0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
         0xbf810000});
 }
+// A VS exporting image_sample_c of a 2x2 float depth image (every texel 0.75)
+// with DEPTH_COMPARE_FUNC LESS: reference 0.5 * vertex index (v0), at (0.5, 0.5).
+constexpr std::uint64_t depthCompareVS = 0x11f00, depthImage = 0x17000;
+inline const std::uint32_t depthCompareSgprs[12] = {
+    0x170, (4u << 20) | (7u << 26), 1 | (1u << 14), 0x90800fac, 1u << 13, 0, 0, 0, // T#: 2x2 32 float, linear 2D
+    0x12 | (1u << 12), 0, 0x500000, 0};                                           // S#: clamp, bilinear, LESS
+inline void loadDepthCompareVS(Arena& arena) {
+    arena.code(depthCompareVS, {
+        0x7e000d00,             // v_cvt_f32_u32 v0, v0
+        0x100000f0,             // v_mul_f32 v0, 0.5, v0
+        0x7e0202f0,             // v_mov_b32 v1, 0.5
+        0x7e0402f0,             // v_mov_b32 v2, 0.5
+        0xf0a00f00, 0x00400400, // image_sample_c v[4:7], v[0:2], s[0:7], s[8:11] dmask:0xf
+        0xbf8c1f70,             // s_waitcnt vmcnt(0)
+        0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
+        0xbf810000});
+    for (unsigned n = 0; n < 4; ++n) arena.put(depthImage + 4 * n, bits(0.75f));
+}
 } // namespace gcn_test

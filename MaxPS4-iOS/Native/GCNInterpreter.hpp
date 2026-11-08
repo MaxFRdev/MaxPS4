@@ -964,12 +964,15 @@ private:
             std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);
         }
         const unsigned op = i.opcode;
-        // Address layout: [offset][bias][compare] coordinates [lod/clamp].
-        unsigned first = 0;
-        if (op == 37 || op == 38 || op == 53 || op == 54) first = 1;      // bias variants
-        if (op >= 48 && op < 64) first += 1;                              // _o: offsets first
-        if ((op >= 40 && op < 48) || (op >= 56 && op < 64)) return fail("depth-compare sampling");
+        // Address layout: [offset][bias][compare][derivatives (2D)] coordinates [lod/clamp].
         const bool sampleOp = op >= 32 && op < 64, load = op == 0 || op == 1, store = op == 8;
+        const bool bias = sampleOp && ((op & 7) == 5 || (op & 7) == 6);         // _b, _b_cl
+        const bool compare = (op >= 40 && op < 48) || (op >= 56 && op < 64);    // _c: depth compare
+        const bool derivatives = sampleOp && ((op & 7) == 2 || (op & 7) == 3);  // _d, _d_cl
+        unsigned first = unsigned(op >= 48 && op < 64) + unsigned(bias);        // _o: offsets first
+        const unsigned reference = first;
+        if (compare) first += 1;
+        if (derivatives) first += 4;
         if (!sampleOp && !load && !store) return false;
         for (unsigned lane = 0; lane < lanes_; ++lane) {
             if (!active(lane)) continue;
@@ -977,6 +980,16 @@ private:
             if (sampleOp) {
                 if (!sample(t, &s[samp], (w >> 12) & 1, gcn_detail::f32(v(vaddr + first, lane)),
                             gcn_detail::f32(v(vaddr + first + 1, lane)), c)) return false;
+                if (compare) {
+                    // The comparison with the S#'s function: 1 or 0 in every component.
+                    const float reference_value = gcn_detail::f32(v(vaddr + reference, lane));
+                    const unsigned func = (s[samp] >> 12) & 7;
+                    const float depth = c[0];
+                    const bool pass = func == 1 ? reference_value < depth : func == 2 ? reference_value == depth :
+                        func == 3 ? reference_value <= depth : func == 4 ? reference_value > depth :
+                        func == 5 ? reference_value != depth : func == 6 ? reference_value >= depth : func == 7;
+                    for (float& component : c) component = pass ? 1.0f : 0.0f;
+                }
             } else {
                 const std::uint32_t x = v(vaddr, lane), y = v(vaddr + 1, lane);
                 if (op == 1 && v(vaddr + 2, lane)) return fail("image mip level above 0");

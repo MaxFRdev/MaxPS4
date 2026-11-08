@@ -11,7 +11,7 @@ using namespace gcn_test;
 int main(int argc, char** argv) {
     assert(argc == 2);
     Arena arena;
-    loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena);
+    loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena); loadDepthCompareVS(arena);
     GCNTranslateOptions vs; vs.stage = GCNStage::vertex; vs.name = "vs_embedded";
     const auto embedded = translateGCN(arena.memory, embeddedVS, vs);
     assert(embedded && embedded.position && embedded.params == 1 && !embedded.quad);
@@ -64,6 +64,10 @@ int main(int argc, char** argv) {
     const auto resinfo = translateGCN(arena.memory, resinfoVS, sizes);
     if (!resinfo) std::printf("%s\n", resinfo.error.c_str());
     assert(resinfo && resinfo.position);
+    GCNTranslateOptions depth; depth.stage = GCNStage::vertex; depth.name = "vs_depth_compare";
+    const auto compared = translateGCN(arena.memory, depthCompareVS, depth);
+    if (!compared) std::printf("%s\n", compared.error.c_str());
+    assert(compared && compared.position);
     // Refusals: no fetch-shader address, interpolation in a vertex program,
     // unmapped code.
     GCNTranslateOptions noUser = fetch; noUser.userCount = 0;
@@ -84,6 +88,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << copied.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }
