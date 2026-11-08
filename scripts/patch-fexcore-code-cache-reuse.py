@@ -32,7 +32,8 @@ TAG = '// MaxPS4 code cache reuse restarts the cursor without deadlocking'
 FILE = 'FEXCore/Source/Interface/Core/JIT/JIT.cpp'
 
 STATE_ANCHOR = 'namespace FEXCore::CPU {\n'
-STATE = '''#include <mutex>
+STATE = '''#include <atomic>
+#include <mutex>
 namespace {
 ''' + TAG + '''
 // The in-place clears of the iOS code buffer, one at a time and with no other lock held.
@@ -40,7 +41,11 @@ std::mutex MaxPS4ReuseMutex;
 // Under CodeBufferWriteMutex: the buffer is full and waits for a clear, and that clear happened.
 bool MaxPS4ReuseFull = false;
 bool MaxPS4ReuseCleared = false;
+// For MaxPS4's report: in-place clears so far, and the code buffer's fill.
+std::atomic<uint64_t> MaxPS4ReuseCount {0}, MaxPS4CodeUsed {0};
 } // namespace
+extern "C" uint64_t maxps4_fex_code_cache_reuses() { return MaxPS4ReuseCount.load(std::memory_order_relaxed); }
+extern "C" uint64_t maxps4_fex_code_cache_used() { return MaxPS4CodeUsed.load(std::memory_order_relaxed); }
 
 '''
 
@@ -72,6 +77,7 @@ NEW = '''#if defined(__APPLE__) && TARGET_OS_IPHONE
             CTX->ClearCodeCache(ThreadState, false);
             Buffers.lock();
             MaxPS4ReuseCleared = true;
+            MaxPS4ReuseCount.fetch_add(1, std::memory_order_relaxed);
           }
         }
         InvalidationMutex.lock_shared();
@@ -98,16 +104,33 @@ NEW = '''#if defined(__APPLE__) && TARGET_OS_IPHONE
 '''
 
 
+USED_OLD = '''    SetCursorOffset(CodeBuffers.LatestOffset + TempSize);
+
+    CodeBuffers.LatestOffset = GetCursorOffset();
+  }
+'''
+USED_NEW = '''    SetCursorOffset(CodeBuffers.LatestOffset + TempSize);
+
+    CodeBuffers.LatestOffset = GetCursorOffset();
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    MaxPS4CodeUsed.store(CodeBuffers.LatestOffset, std::memory_order_relaxed);
+#endif
+  }
+'''
+
+
 def adapt(root):
     path = root / FILE
     text = path.read_text()
     if text.count(TAG) == 2:
         return
-    if text.count(STATE_ANCHOR) != 1 or text.count(START) != 1 or text.count(END) != 1:
+    if (text.count(STATE_ANCHOR) != 1 or text.count(START) != 1 or text.count(END) != 1 or
+            text.count(USED_OLD) != 1):
         raise ValueError(f'Pinned code cache reuse context diverged: {FILE}')
     start = text.index(START)
     end = text.index(END, start) + len(END)
     text = text[:start] + NEW + text[end:]
+    text = text.replace(USED_OLD, USED_NEW, 1)
     text = text.replace(STATE_ANCHOR, STATE + STATE_ANCHOR, 1)
     path.write_text(text)
 

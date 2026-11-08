@@ -411,6 +411,9 @@ public:
 // the app for each run: the iOS crash log only shows which thread got the
 // signal back, not the host code that faulted.
 static char host_crash_note[1024] {};
+// Defined by the patched iOS FEX (patch-fexcore-code-cache-reuse.py); absent elsewhere.
+extern "C" __attribute__((weak)) uint64_t maxps4_fex_code_cache_used();
+extern "C" __attribute__((weak)) uint64_t maxps4_fex_code_cache_reuses();
 #if (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
 // A return address without its pointer authentication bits.
 static uint64_t ptrauth_strip_address(uint64_t address) {
@@ -2787,6 +2790,15 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                 (unsigned long long)ajm.samples);
             out += line;
         }
+    }
+    if (maxps4_fex_code_cache_used) {
+        // The iOS code buffer's fill and in-place clears (patch-fexcore-code-cache-reuse.py):
+        // a clear while other threads run can leave them on stale code.
+        char line[160];
+        std::snprintf(line, sizeof line, "Cache JIT : %.1f Mio utilisés sur 128 · %llu vidages en place\n",
+            double(maxps4_fex_code_cache_used()) / (1024.0 * 1024.0),
+            (unsigned long long)(maxps4_fex_code_cache_reuses ? maxps4_fex_code_cache_reuses() : 0));
+        out += line;
     }
     {
         // A failed lock the game ignores leaves its critical section unprotected.
