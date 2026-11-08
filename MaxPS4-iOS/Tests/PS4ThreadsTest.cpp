@@ -28,9 +28,17 @@ int main() {
     assert(call(S::mutex_init, 0x1000) == kernel_error(fault));
     assert(kernel.invoke(S::mutex_init, {0x10000, 1}) == kernel_error(fault)); // Attribute object address.
     assert(kernel.invoke(S::mutex_init, {0x10000, 0, UINT64_MAX}) == kernel_error(fault));
-    // A slot initialized again holds a new, free mutex of the new type (never busy).
-    assert(call(S::mutex_init) == 0 && call(S::mutex_trylock) == 0);
-    assert(call(S::mutex_init) == 0 && call(S::mutex_trylock, 0x10000, second) == 0);
+    // A pthread_mutex_t is a pointer: every init makes a new mutex, whatever the
+    // slot held. Call of Duty initializes in one stack slot and copies the
+    // result into each global; the two globals must stay distinct mutexes.
+    {
+        uint8_t copy[8];
+        assert(call(S::mutex_init) == 0 && memory.read(0x10000, copy, 8) && memory.write(0x10100, copy, 8));
+        assert(call(S::mutex_init) == 0 && memory.read(0x10000, copy, 8) && memory.write(0x10108, copy, 8));
+        assert(call(S::mutex_lock, 0x10100) == 0 && call(S::mutex_trylock, 0x10108, second) == 0);
+        assert(call(S::mutex_unlock, 0x10100) == 0 && call(S::mutex_unlock, 0x10108, second) == 0);
+        assert(call(S::mutex_destroy, 0x10100) == 0 && call(S::mutex_destroy, 0x10108) == 0);
+    }
     assert(call(S::mutex_init) == 0);
     uint8_t wire[8]; assert(memory.read(0x10000, wire, sizeof(wire)));
     const auto token = get_le(wire, 8); assert(token >= 0x10000);

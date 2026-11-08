@@ -233,13 +233,12 @@ Error PS4Threads::init(uint64_t slot, uint64_t attributes, uint64_t name) {
         char text[1024];
         if (!memory_.read_cstring(name, text, sizeof(text))) return fault;
     }
-    // Initializing a slot again makes a new mutex, as libkernel does (it never
-    // answers busy): a game reuses the memory of an object it freed without
-    // destroying its mutex, and the old record's type or owner must not stay
-    // (Call of Duty's recursive lock then failed with EDEADLK, unprotected).
-    bool replaced = false;
-    for (auto& mutex : mutexes_) if (mutex.token && mutex.slot == slot) { mutex = {}; replaced = true; }
-    if (replaced) changed_.notify_all(); // Waiters on the old record return EINVAL.
+    // Every init makes a new mutex, as libkernel does: a pthread_mutex_t is a
+    // pointer, and the slot it was initialized in says nothing about which
+    // mutex a later call means. Call of Duty initializes its mutexes in one
+    // stack variable and copies the result into each global, so tying a
+    // record to its slot (EBUSY, or replacing the record) gave two globals the
+    // same mutex, or destroyed the first one's.
     for (auto& mutex : mutexes_) if (!mutex.token) {
         const uint64_t fresh = next_token();
         if (!fresh) return again;
@@ -359,7 +358,7 @@ Error PS4Threads::cond_init(uint64_t slot, uint64_t, uint64_t name) {
         char text[1024];
         if (!memory_.read_cstring(name, text, sizeof(text))) return fault;
     }
-    for (const auto& cond : conds_) if (cond.token && cond.slot == slot) return busy;
+    // A new condition every time, whatever the slot held (see init()).
     for (auto& cond : conds_) if (!cond.token) {
         const uint64_t fresh = next_token();
         if (!fresh) return again;
@@ -456,7 +455,7 @@ PS4Threads::RwLock* PS4Threads::acquire_rwlock(uint64_t slot, Error& error) {
 Error PS4Threads::rwlock_init(uint64_t slot) {
     std::lock_guard<std::mutex> lock(guard_);
     if (!writable(slot)) return fault;
-    for (const auto& existing : rwlocks_) if (existing.token && existing.slot == slot) return busy;
+    // A new rwlock every time, whatever the slot held (see init()).
     if (!write_token(slot, static_initializer)) return fault;
     Error error = ok;
     return acquire_rwlock(slot, error) ? ok : error;
