@@ -1386,6 +1386,15 @@ extern "C" int32_t maxps4_fex_engine_open(maxps4_fex_engine **out) {
 #if !defined(VIXL_SIMULATOR)
     // Read by the context created below; the simulator always runs without it.
     FEXCore::Config::Set(FEXCore::Config::CONFIG_TSOENABLED, tso_emulation.load() ? "1" : "0");
+    // Full x86 ordering, not FEX's faster defaults: vector loads/stores, REP
+    // MOVS/STOS and split-line locked operations ordered and untorn as well.
+    // Call of Duty's string references are counted by lock-free code; with the
+    // defaults it looked up a string already freed and spun forever (default.elf
+    // 0x5b1640), its table intact and every mutex call successful.
+    const char* strict = tso_emulation.load() ? "1" : "0";
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, strict);
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, strict);
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, strict);
 #endif
     // Real Darwin sysctl-based feature discovery; never fabricated features.
     const auto features = FEX::FetchHostFeatures();
