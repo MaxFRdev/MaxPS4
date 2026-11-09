@@ -1308,8 +1308,31 @@ public:
             uint8_t* const before = before_window.data() + half;
             uint8_t* const now = now_window.data() + half;
             bool have = false;
+            int last_bit = -1;
+            uint32_t last_word = 0;
             while (!stop_.load()) {
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
+                {
+                    uint8_t head[8];
+                    uint32_t word = 0;
+                    if (block_state(key, head, word)) {
+                        const int bit = key_free(key, word) ? 1 : 0;
+                        if (last_bit >= 0 && bit != last_bit) {
+                            const bool live = (head[0] | head[1]) && head[3];
+                            std::string where = who(bit && live);
+                            std::lock_guard guard(lock_);
+                            ++word_changes_;
+                            char line[200];
+                            std::snprintf(line, sizeof line, "  %.3f s : %08x -> %08x, bit %d, chaîne %02x%02x%02x%02x%s · threads",
+                                double(clock() - start_) / 1e9, last_word, word, bit, head[0], head[1], head[2], head[3],
+                                bit && live ? " LIBRE ALORS QUE VIVANTE" : "");
+                            const std::string entry = line + where;
+                            if (word_log_.size() < 6) word_log_.push_back(entry);
+                            else word_tail_[word_tail_next_++ % word_tail_.size()] = entry;
+                        }
+                        last_bit = bit; last_word = word;
+                    }
+                }
                 uint8_t base_bytes[8];
                 if (!memory_.read(pool_, base_bytes, 8)) continue;
                 uint64_t base;
@@ -1353,6 +1376,7 @@ public:
         std::lock_guard guard(lock_);
         const uint64_t now = clock();
         events_[next_event_++ % events_.size()] = {now, thread, caller, unlock};
+        check_freed(thread, caller, unlock, now);
         if (unlock || captured_.load() || (checks_ && now - last_check_ < 4000000)) return;
         last_check_ = now;
         check(thread, caller, now);
@@ -1366,13 +1390,22 @@ public:
         std::string out = std::string(line) + capture_;
         if (guard_thread_.joinable()) {
             std::snprintf(line, sizeof line, "Chaîne 0x%x surveillée : %llu changements (@ = code du jeu, ~ = dans un service)\n",
-                guard_key_, (unsigned long long)guard_changes_);
+                guard_key_.load(), (unsigned long long)guard_changes_);
             out += line;
             for (const auto& entry : guard_log_) out += entry + "\n";
             const size_t tail = std::min<size_t>(guard_tail_next_, guard_tail_.size());
             if (guard_tail_next_ > tail) out += "  …\n";
             for (size_t k = 0; k < tail; ++k)
                 out += guard_tail_[(guard_tail_next_ - tail + k) % guard_tail_.size()] + "\n";
+            std::snprintf(line, sizeof line, "  bitmap, mot 0x%x (bit de la chaîne : 1 = libre) : %llu changements de ce bit\n",
+                guard_key_.load() >> 5, (unsigned long long)word_changes_);
+            out += line;
+            for (const auto& entry : word_log_) out += entry + "\n";
+            const size_t words = std::min<size_t>(word_tail_next_, word_tail_.size());
+            if (word_tail_next_ > words) out += "  …\n";
+            for (size_t k = 0; k < words; ++k)
+                out += word_tail_[(word_tail_next_ - words + k) % word_tail_.size()] + "\n";
+            out += freed_capture_.empty() ? "  jamais vue libérée vivante\n" : freed_capture_;
         }
         return out;
     }
@@ -1516,6 +1549,45 @@ private:
         for (size_t k = 0; k < 48 && text[k]; ++k) out += (text[k] >= 32 && text[k] < 127) ? char(text[k]) : '.';
         return out + " »";
     }
+    // The pool's allocation bitmap (MT_AllocIndex, default.elf 0x5af550): a
+    // 32-bit word per 32 blocks of 16 bytes at pool + 0x400000, the first
+    // block of a word in its top bit, a set bit free.
+    bool block_state(uint32_t key, uint8_t head[8], uint32_t& word) const {
+        uint8_t base_bytes[8];
+        if (!memory_.read(pool_, base_bytes, 8)) return false;
+        uint64_t base;
+        std::memcpy(&base, base_bytes, 8);
+        uint8_t w[4];
+        if (!base || !memory_.read(base + uint64_t(key) * 16, head, 8) ||
+            !memory_.read(base + 0x400000 + uint64_t(key >> 5) * 4, w, 4)) return false;
+        std::memcpy(&word, w, 4);
+        return true;
+    }
+    static bool key_free(uint32_t key, uint32_t word) { return (word >> (31 - (key & 31))) & 1; }
+    // Under lock_: the first time the watched string is still referenced
+    // (non-zero count and length) while its block is marked free, keep who
+    // took or released the string table's lock then, and the calls before.
+    void check_freed(uint64_t thread, uint64_t caller, bool unlock, uint64_t now) {
+        const uint32_t key = guard_key_.load();
+        if (!key || !freed_capture_.empty()) return;
+        uint8_t head[8];
+        uint32_t word = 0;
+        if (!block_state(key, head, word)) return;
+        const bool live = (head[0] | head[1]) && head[3];
+        if (!live || !key_free(key, word)) return;
+        char line[200];
+        std::snprintf(line, sizeof line, "  libérée vivante à %.3f s, vu quand t%llu %s le verrou depuis 0x%llx : en-tête %02x%02x%02x%02x, mot 0x%x du bitmap = %08x\n  derniers appels au verrou, récents d'abord :",
+            double(now - start_) / 1e9, (unsigned long long)thread, unlock ? "libère" : "prend", (unsigned long long)caller,
+            head[0], head[1], head[2], head[3], key >> 5, word);
+        freed_capture_ = line;
+        for (size_t k = 0; k < events_.size() && k < next_event_; ++k) {
+            const Event& e = events_[(next_event_ - 1 - k) % events_.size()];
+            std::snprintf(line, sizeof line, " t%llu %s 0x%llx (-%.2f ms)", (unsigned long long)e.thread, e.unlock ? "libère" : "prend",
+                (unsigned long long)e.caller, double(now - e.ns) / 1e6);
+            freed_capture_ += line;
+        }
+        freed_capture_ += "\n";
+    }
     // Header in hex, then the text as characters.
     static std::string bytes_text(const uint8_t* b) {
         char line[40];
@@ -1526,7 +1598,11 @@ private:
     }
     std::atomic<bool> stop_ {false};
     std::thread guard_thread_;
-    uint32_t guard_key_ = 0;
+    std::atomic<uint32_t> guard_key_ {0};
+    std::string freed_capture_;
+    std::vector<std::string> word_log_;
+    std::array<std::string, 10> word_tail_ {};
+    uint64_t word_changes_ = 0, word_tail_next_ = 0;
     uint64_t guard_changes_ = 0, guard_tail_next_ = 0;
     std::vector<std::string> guard_log_;
     std::array<std::string, 10> guard_tail_ {};
