@@ -1051,6 +1051,38 @@ public:
 #endif
         return out;
     }
+    // Where every guest thread is right now, one sample each: its guest RIP in
+    // JIT code, else the RIP FEX last stored (in a service or FEX itself).
+    std::string where_all(uint64_t relocation) {
+        std::string out;
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+        std::lock_guard held(lock);
+        char line[64];
+        for (const Thread& t : threads) {
+            if (!t.used || t.finished || !t.guard) continue;
+            const thread_act_t port = ::pthread_mach_thread_np(t.guard->host);
+            arm_thread_state64_t state {};
+            mach_msg_type_number_t words = ARM_THREAD_STATE64_COUNT;
+            if (::thread_suspend(port) != KERN_SUCCESS) continue;
+            const bool read = ::thread_get_state(port, ARM_THREAD_STATE64,
+                reinterpret_cast<thread_state_t>(&state), &words) == KERN_SUCCESS;
+            ::thread_resume(port);
+            if (!read) continue;
+            uint64_t pc = arm_thread_state64_get_pc(state);
+#if __has_feature(ptrauth_calls)
+            pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
+#endif
+            const bool jit = t.guard->in_jit(pc);
+            uint64_t rip = jit ? t.guard->guest_rip(pc) : t.guard->stored_rip();
+            if (rip >= relocation) rip -= relocation;
+            std::snprintf(line, sizeof line, " t%llu%s0x%llx", (unsigned long long)t.id, jit ? "@" : "~", (unsigned long long)rip);
+            out += line;
+        }
+#else
+        (void)relocation;
+#endif
+        return out;
+    }
     // How a thread that is no longer running ended (false: unknown).
     bool ending_of(uint64_t id, uint64_t& rip, uint64_t& ns, int& signal, int& code, uint64_t& address,
                    std::array<uint64_t, 16>* gprs = nullptr) const {
@@ -1247,6 +1279,43 @@ class StringTableWatch {
 public:
     StringTableWatch(maxps4::PS4GuestMemory& memory, uint64_t table, uint64_t pool)
         : memory_(memory), table_(table), pool_(pool), start_(clock()), in_degree_(entries) {}
+    ~StringTableWatch() {
+        stop_ = true;
+        if (guard_thread_.joinable()) guard_thread_.join();
+    }
+    // Polls the 32 bytes of pool string `key` every 200 us; each change is kept
+    // with the bytes before and after and where every guest thread was (`who`).
+    // Call of Duty's release lookup spun on string 0x14e found zeroed while
+    // still in the table: this catches what wrote it.
+    void guard_string(uint32_t key, std::function<std::string()> who) {
+        guard_key_ = key;
+        guard_thread_ = std::thread([this, key, who = std::move(who)] {
+            uint8_t before[32] = {}, now[32] = {};
+            bool have = false;
+            while (!stop_.load()) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                uint8_t base_bytes[8];
+                if (!memory_.read(pool_, base_bytes, 8)) continue;
+                uint64_t base;
+                std::memcpy(&base, base_bytes, 8);
+                if (!base || !memory_.read(base + uint64_t(key) * 16, now, sizeof now)) continue;
+                if (have && !std::memcmp(before, now, sizeof now)) continue;
+                if (have) {
+                    std::string where = who();
+                    std::lock_guard guard(lock_);
+                    ++guard_changes_;
+                    char line[96];
+                    std::snprintf(line, sizeof line, "  %.3f s :", double(clock() - start_) / 1e9);
+                    std::string entry = line;
+                    entry += " avant " + bytes_text(before) + " · après " + bytes_text(now) + " · threads" + where;
+                    if (guard_log_.size() < 6) guard_log_.push_back(entry);
+                    else { guard_tail_[guard_tail_next_++ % guard_tail_.size()] = entry; }
+                }
+                std::memcpy(before, now, sizeof now);
+                have = true;
+            }
+        });
+    }
     void event(uint64_t thread, uint64_t caller, bool unlock) {
         std::lock_guard guard(lock_);
         const uint64_t now = clock();
@@ -1261,7 +1330,22 @@ public:
         std::snprintf(line, sizeof line, "Table de chaînes (CoD) : %llu vérifications, %llu entrées pointées deux fois (au départ %lld)%s\n",
             (unsigned long long)checks_, (unsigned long long)last_bad_, (long long)baseline_,
             unreadable_ ? " · table illisible" : "");
-        return std::string(line) + capture_;
+        std::string out = std::string(line) + capture_;
+        if (guard_thread_.joinable()) {
+            std::snprintf(line, sizeof line, "Chaîne 0x%x surveillée : %llu changements (@ = code du jeu, ~ = dans un service)
+",
+                guard_key_, (unsigned long long)guard_changes_);
+            out += line;
+            for (const auto& entry : guard_log_) out += entry + "
+";
+            const size_t tail = std::min<size_t>(guard_tail_next_, guard_tail_.size());
+            if (guard_tail_next_ > tail) out += "  …
+";
+            for (size_t k = 0; k < tail; ++k)
+                out += guard_tail_[(guard_tail_next_ - tail + k) % guard_tail_.size()] + "
+";
+        }
+        return out;
     }
     // The lookup spinning at default.elf 0x5b1640 walks a chain for an entry
     // whose second word is `key` (guest r15d; FEX keeps it in x29), now at
@@ -1403,6 +1487,20 @@ private:
         for (size_t k = 0; k < 48 && text[k]; ++k) out += (text[k] >= 32 && text[k] < 127) ? char(text[k]) : '.';
         return out + " »";
     }
+    // Header in hex, then the text as characters.
+    static std::string bytes_text(const uint8_t* b) {
+        char line[40];
+        std::snprintf(line, sizeof line, "%02x%02x%02x%02x %02x%02x%02x%02x «", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        std::string out = line;
+        for (int k = 8; k < 32 && b[k]; ++k) out += (b[k] >= 32 && b[k] < 127) ? char(b[k]) : '.';
+        return out + "»";
+    }
+    std::atomic<bool> stop_ {false};
+    std::thread guard_thread_;
+    uint32_t guard_key_ = 0;
+    uint64_t guard_changes_ = 0, guard_tail_next_ = 0;
+    std::vector<std::string> guard_log_;
+    std::array<std::string, 10> guard_tail_ {};
     const uint64_t start_;
     mutable std::mutex lock_;
     std::array<Event, 48> events_ {};
@@ -1428,8 +1526,6 @@ struct maxps4_fex_engine {
     // The faulting child thread, its exact instruction, registers and target
     // memory, for the final report (the threads are gone by then).
     std::string last_fault_detail;
-    // Call of Duty only (see StringTableWatch): its string table, checked under its mutex.
-    std::unique_ptr<StringTableWatch> table_watch;
     uint32_t time_limit_ms = 0; // 0: no limit.
     std::atomic<bool> stop_requested{false};
     // The running main thread's guard, for sampling; guarded by sample_lock.
@@ -1451,6 +1547,10 @@ struct maxps4_fex_engine {
     std::vector<std::atomic<uint32_t>> missing_reported;
     fextl::unique_ptr<FEXCore::Context::Context> context;
     int32_t stage = MAXPS4_FEX_CONTEXT_CREATED;
+    // Call of Duty only (see StringTableWatch): its string table, checked under its mutex.
+    // Last member: destroyed first, its polling thread joined while sample_lock
+    // and the guest memory it reads still exist.
+    std::unique_ptr<StringTableWatch> table_watch;
 };
 namespace {
 // FEX configuration is process-global. This adapter owns it until the last
@@ -1674,6 +1774,10 @@ static void watch_string_table(maxps4_fex_engine* engine) {
     const uint64_t relocation = engine->relocation;
     engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock) {
         watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock);
+    });
+    watch->guard_string(0x14e, [engine, relocation] {
+        std::lock_guard sampling(engine->sample_lock);
+        return engine->probe.threads ? engine->probe.threads->where_all(relocation) : std::string(" ?");
     });
 }
 namespace {
