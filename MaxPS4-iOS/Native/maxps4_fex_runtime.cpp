@@ -950,7 +950,9 @@ public:
     // 1 ms apart: the distinct guest addresses in JIT code (a spinning loop
     // shows as a few), else the host function and its caller (a thread held
     // inside FEX), and the guest RIP FEX last stored.
-    std::string sample(uint64_t id, uint64_t relocation) {
+    // `regs`, when given, receives x0-x28 of a sample taken in JIT code, and
+    // `jit_rip` that sample's guest RIP (0: no such sample).
+    std::string sample(uint64_t id, uint64_t relocation, uint64_t* regs_out = nullptr, uint64_t* jit_rip = nullptr) {
         std::string out;
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
         std::lock_guard held(lock); // Keeps the thread's guard alive.
@@ -1013,6 +1015,10 @@ public:
         std::snprintf(line, sizeof line, " · RIP FEX 0x%llx", (unsigned long long)relative(fault->stored_rip()));
         out += line;
         if (!count) out += " · illisible";
+        if (regs_out && have_regs && !rips.empty()) {
+            std::copy(std::begin(regs), std::end(regs), regs_out);
+            if (jit_rip) *jit_rip = relative(rips.front());
+        }
         if (have_regs && !rips.empty()) {
             out += " · registres hôte :";
             for (int r = 0; r < 29; ++r) {
@@ -1236,6 +1242,32 @@ public:
             (unsigned long long)checks_, (unsigned long long)last_bad_, (long long)baseline_,
             unreadable_ ? " · table illisible" : "");
         return std::string(line) + capture_;
+    }
+    // The lookup spinning at default.elf 0x5b1640 walks a chain for an entry
+    // whose second word is `key` (guest r15d; FEX keeps it in x20), now at
+    // `node` (rcx, x5): the chain it walks, and every entry holding `key`.
+    std::string explain(uint32_t key, uint32_t node) const {
+        std::vector<uint8_t> table(entries * 8);
+        if (node >= entries || !memory_.read(table_, table.data(), table.size())) return " · table illisible";
+        char line[96];
+        std::snprintf(line, sizeof line, " · recherche 0x%x, chaîne :", key);
+        std::string out = line;
+        uint32_t at = node;
+        for (int step = 0; step < 24; ++step) {
+            std::snprintf(line, sizeof line, " 0x%x[%08x:%08x]", at, word(table, at), word(table, at, 1));
+            out += line;
+            at = word(table, at) & 0x3ffff;
+            if (at >= entries || at == node) break;
+        }
+        out += " · entrées portant la clé :";
+        int found = 0;
+        for (size_t i = 0; i < entries && found < 8; ++i)
+            if (word(table, i, 1) == key) {
+                std::snprintf(line, sizeof line, " 0x%zx[%08x]", i, word(table, i));
+                out += line; ++found;
+            }
+        if (!found) out += " aucune";
+        return out;
     }
 private:
     static constexpr size_t entries = 0x10000;
@@ -3015,7 +3047,11 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             if (seconds > 1 && thread != 1) {
                 std::lock_guard sampling(engine->sample_lock);
                 if (engine->probe.threads) {
-                    out += engine->probe.threads->sample(thread, engine->relocation);
+                    uint64_t regs[29] {}, jit_rip = 0;
+                    out += engine->probe.threads->sample(thread, engine->relocation, regs, &jit_rip);
+                    // Spinning in Call of Duty's string lookup: what it looks for, and where.
+                    if (engine->table_watch && jit_rip >= 0x26b1600 && jit_rip < 0x26b1670)
+                        out += engine->table_watch->explain(uint32_t(regs[20]), uint32_t(regs[5]));
                     uint64_t rip = 0, ended_ns = 0, address = 0;
                     int signal = 0, code = 0;
                     std::array<uint64_t, 16> gprs {};
