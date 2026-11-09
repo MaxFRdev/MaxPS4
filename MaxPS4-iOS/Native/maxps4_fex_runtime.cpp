@@ -1019,6 +1019,21 @@ public:
             std::copy(std::begin(regs), std::end(regs), regs_out);
             if (jit_rip) *jit_rip = relative(rips.front());
         }
+        // The JIT code around the first sample in it: the ARM64 FEX made of the loop.
+        for (size_t k = 0; k < count; ++k) {
+            if (!fault->in_jit(pcs[k])) continue;
+            const uint64_t from = (pcs[k] & ~uint64_t(3)) - 32 * 4;
+            if (!fault->in_jit(from) || !fault->in_jit(from + 63 * 4)) continue; // Stays inside the code buffer.
+            std::snprintf(line, sizeof line, " · code JIT depuis PC-0x80 (PC 0x%llx) :", (unsigned long long)pcs[k]);
+            out += line;
+            for (int w = 0; w < 64; ++w) {
+                uint32_t word = 0;
+                std::memcpy(&word, reinterpret_cast<const void*>(from + uint64_t(w) * 4), 4);
+                std::snprintf(line, sizeof line, " %08x", word);
+                out += line;
+            }
+            break;
+        }
         if (have_regs && !rips.empty()) {
             out += " · registres hôte :";
             for (int r = 0; r < 29; ++r) {
