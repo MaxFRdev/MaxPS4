@@ -914,6 +914,51 @@ int main(int argc, char** argv) {
         maxps4_fex_engine_close(process);
         std::puts("PASS native ARM64 unaligned TSO loads/stores and LOCK ADD/CMPXCHG across cache lines, repeated execution");
     }
+    {
+        // Call of Duty's string lookup walk (default.elf 0x5b163a-0x5b165b, its exact
+        // bytes) over the two table entries an iPhone run showed it spinning on: entry
+        // 0x81 = [00049ba7:000020c0] holds key 0x20c0 (r15d) and 0x9ba7 = [00080081:00002ac1]
+        // points back to it, so a walk from 0x9ba7 has to stop at 0x81 (ebx). The table
+        // sits in the app's BSS at data+0x100.
+        auto app=orbis_execution::make(false);
+        std::vector<uint8_t> code;
+        auto emit=[&](std::initializer_list<uint8_t> op) { code.insert(code.end(),op); };
+        auto imm=[&](uint64_t n,size_t width) { for(size_t k=0;k<width;++k) code.push_back(uint8_t(n>>(8*k))); };
+        const uint64_t table=orbis_execution::data+0x100;
+        emit({0x4c,0x8d,0x25}); imm(table-(orbis_execution::entry+code.size()+4),4); // LEA R12,[RIP+table]
+        auto store=[&](uint32_t offset,uint32_t value) { emit({0x41,0xc7,0x84,0x24}); imm(offset,4); imm(value,4); };
+        store(0x81*8,0x00049ba7); store(0x81*8+4,0x20c0);
+        store(0x9ba7*8,0x00080081); store(0x9ba7*8+4,0x2ac1);
+        emit({0x41,0xbf}); imm(0x20c0,4);                  // MOV R15D,0x20C0
+        emit({0xb8}); imm(0x9ba7,4);                       // MOV EAX,0x9BA7
+        emit({0xbb}); imm(0x83,4);                         // MOV EBX,0x83
+        emit({0x48,0x89,0xc2,0x0f,0x1f,0x00,0x89,0xc1,0x89,0xde,0x89,0xc8, // default.elf 0x5b163a
+              0x41,0x8b,0x04,0xc4,0x89,0xcb,0x25,0xff,0xff,0x03,0x00,
+              0x45,0x39,0x7c,0xd4,0x04,0x48,0x89,0xc2,0x75,0xe5}); // ... JNE back to 0x5b1640
+        emit({0x89,0xd8,0xf4});                            // MOV EAX,EBX; HLT
+        std::fill(app.begin()+0x200,app.begin()+0x300,0);
+        std::copy(code.begin(),code.end(),app.begin()+0x200);
+        orbis_fixture::put(app,64+32,code.size()); orbis_fixture::put(app,64+40,code.size());
+        orbis_fixture::put(app,64+56+40,0x50000); // BSS for the table (up to entry 0x9ba7).
+        auto provider=orbis_execution::make(true);
+        const char* dependency[]={"provider.prx"};
+        const maxps4_orbis_module modules[]={
+            {"app.elf",app.data(),app.size(),orbis_execution::app_bias,dependency,1},
+            {"provider.prx",provider.data(),provider.size(),orbis_execution::provider_bias,nullptr,0}};
+        maxps4_fex_engine* process=nullptr;
+        CHECK(maxps4_fex_engine_open(&process)==0 && maxps4_fex_engine_initialize(process)==0);
+        CHECK(maxps4_fex_engine_set_time_limit(process,10000)==0);
+        char diagnostic[512]{}; uint64_t relocation=0;
+        const int prepared=maxps4_fex_engine_prepare_orbis_general(process,modules,2,"app.elf",&relocation,diagnostic,sizeof diagnostic);
+        if (prepared) std::fprintf(stderr,"prepare: %s\n",diagnostic);
+        CHECK(prepared==0);
+        uint64_t observed=0, logical_entry=0; uint32_t cpu=0;
+        const int ran=maxps4_fex_engine_run_orbis(process,&observed,&cpu,&logical_entry);
+        std::printf("Call of Duty lookup walk: run=%d found=0x%llx cpu=%u\n",ran,(unsigned long long)observed,cpu);
+        CHECK(ran==0 && observed==0x81 && cpu==MAXPS4_CPU_FEX_ARM64_JIT);
+        maxps4_fex_engine_close(process);
+        std::puts("PASS Call of Duty's string lookup walk stops at the entry holding its key under FEX");
+    }
     for (int fault = 0; fault < 2; ++fault) {
         // A child thread that never ends: when the entry exits, the run stops it
         // (no hang). One that faults while the entry joins it ends the run with
