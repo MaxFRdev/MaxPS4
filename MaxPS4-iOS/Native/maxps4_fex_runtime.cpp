@@ -961,6 +961,10 @@ public:
         std::vector<uint64_t> rips;
         const thread_act_t port = ::pthread_mach_thread_np(fault->host);
         uint64_t pcs[8] {}, lrs[8] {};
+        // Host registers of one sample: in JIT code FEX keeps the guest's
+        // registers in host registers, so they show a spinning loop's state.
+        uint64_t regs[29] {};
+        bool have_regs = false;
         size_t count = 0;
         rips.reserve(8);
         // Nothing that may lock runs while the thread is suspended.
@@ -978,6 +982,7 @@ public:
             pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
             lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(lr), ptrauth_key_return_address)));
 #endif
+            if (!have_regs) { std::copy(std::begin(state.__x), std::end(state.__x), regs); have_regs = true; }
             lrs[count] = lr; pcs[count++] = pc;
         }
         auto relative = [&](uint64_t rip) { return rip >= relocation ? rip - relocation : rip; };
@@ -1008,6 +1013,13 @@ public:
         std::snprintf(line, sizeof line, " · RIP FEX 0x%llx", (unsigned long long)relative(fault->stored_rip()));
         out += line;
         if (!count) out += " · illisible";
+        if (have_regs && !rips.empty()) {
+            out += " · registres hôte :";
+            for (int r = 0; r < 29; ++r) {
+                std::snprintf(line, sizeof line, " x%d=0x%llx", r, (unsigned long long)regs[r]);
+                out += line;
+            }
+        }
 #else
         (void)id; (void)relocation;
 #endif
