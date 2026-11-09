@@ -1420,6 +1420,7 @@ public:
                 (unsigned long long)creations_, (unsigned long long)mismatches_, (unsigned long long)unknown_releases_);
             out += line;
             for (const auto& entry : mismatch_log_) out += entry + "\n";
+            for (const auto& entry : unknown_log_) out += entry + "\n";
         }
         return out;
     }
@@ -1616,7 +1617,24 @@ private:
             }
             if (made != length) ++mismatches_;
         } else {
+            // No creation since the last release: a string released twice, or
+            // made by a path not followed.
             ++unknown_releases_;
+            if (unknown_log_.size() < 8) {
+                uint8_t base_bytes[8], text[48] = {}, w[4] = {};
+                uint64_t base = 0;
+                if (memory_.read(pool_, base_bytes, 8)) std::memcpy(&base, base_bytes, 8);
+                if (base) {
+                    (void)memory_.read(base + uint64_t(key) * 16, text, sizeof text);
+                    (void)memory_.read(base + 0x400000 + uint64_t(key >> 5) * 4, w, 4);
+                }
+                uint32_t word;
+                std::memcpy(&word, w, 4);
+                char line[220];
+                std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x jamais vue créée ou déjà libérée, longueur %u (%u blocs), mot 0x%x du bitmap = %08x · ",
+                    double(now - start_) / 1e9, (unsigned long long)thread, key, length, blocks(length), key >> 5, word);
+                unknown_log_.push_back(line + bytes_text(text) + " · octets :" + hex_bytes(text, sizeof text));
+            }
         }
         if (length + 8 <= 256 || !(key & 31)) return;
         ++bad_releases_;
@@ -1674,7 +1692,7 @@ private:
     std::string freed_capture_;
     uint64_t releases_ = 0, bad_releases_ = 0, creations_ = 0, mismatches_ = 0, unknown_releases_ = 0;
     std::vector<uint32_t> created_ = std::vector<uint32_t>(0x40000);
-    std::vector<std::string> mismatch_log_;
+    std::vector<std::string> mismatch_log_, unknown_log_;
     std::vector<std::string> bad_log_;
     std::vector<std::string> word_log_;
     std::array<std::string, 10> word_tail_ {};
