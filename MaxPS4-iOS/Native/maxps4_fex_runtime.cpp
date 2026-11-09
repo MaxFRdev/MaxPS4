@@ -1293,8 +1293,8 @@ struct CPUProfile {
 // previous check and the last lock/unlock calls are kept for the report.
 class StringTableWatch {
 public:
-    StringTableWatch(maxps4::PS4GuestMemory& memory, uint64_t table, uint64_t pool)
-        : memory_(memory), table_(table), pool_(pool), start_(clock()), in_degree_(entries) {}
+    StringTableWatch(maxps4::PS4GuestMemory& memory, uint64_t table, uint64_t pool, uint64_t relocation)
+        : memory_(memory), relocation_(relocation), table_(table), pool_(pool), start_(clock()), in_degree_(entries) {}
     ~StringTableWatch() {
         stop_ = true;
         if (guard_thread_.joinable()) guard_thread_.join();
@@ -1376,12 +1376,12 @@ public:
             }
         });
     }
-    void event(uint64_t thread, uint64_t caller, bool unlock, uint64_t r15 = 0, uint64_t r14 = 0, uint64_t r12 = 0, uint64_t rbp = 0) {
+    void event(uint64_t thread, uint64_t caller, bool unlock, uint64_t r15 = 0, uint64_t r14 = 0, uint64_t r12 = 0, uint64_t rbp = 0, uint64_t rsp = 0) {
         std::lock_guard guard(lock_);
         const uint64_t now = clock();
         events_[next_event_++ % events_.size()] = {now, thread, caller, unlock};
         note_creation(caller, unlock, uint32_t(r12), rbp);
-        note_release(thread, caller, unlock, uint32_t(r15), uint32_t(r14), now);
+        note_release(thread, caller, unlock, uint32_t(r15), uint32_t(r14), now, rbp, rsp);
         check_freed(thread, caller, unlock, now);
         if (unlock || captured_.load() || (checks_ && now - last_check_ < 4000000)) return;
         last_check_ = now;
@@ -1534,6 +1534,7 @@ private:
         capture_ += "\n";
     }
     maxps4::PS4GuestMemory& memory_;
+    const uint64_t relocation_;
     const uint64_t table_, pool_;
     // The pool string `key` names, as the game's release path reads it.
     std::string describe_string(uint32_t key) const {
@@ -1598,7 +1599,7 @@ private:
         ++creations_;
     }
     static uint32_t blocks(uint32_t length) { return (length + 8 + 15) / 16; }
-    void note_release(uint64_t thread, uint64_t caller, bool unlock, uint32_t key, uint32_t length, uint64_t now) {
+    void note_release(uint64_t thread, uint64_t caller, bool unlock, uint32_t key, uint32_t length, uint64_t now, uint64_t rbp, uint64_t rsp) {
         if (unlock || caller != 0x26b15d8) return;
         ++releases_;
         // The release must free the block size the creation allocated.
@@ -1613,7 +1614,7 @@ private:
                 char line[220];
                 std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x avec la longueur %u (%u blocs), créée avec %u (%u blocs) · ",
                     double(now - start_) / 1e9, (unsigned long long)thread, key, length, blocks(length), made, blocks(made));
-                mismatch_log_.push_back(line + bytes_text(text) + " · octets :" + hex_bytes(text, sizeof text));
+                mismatch_log_.push_back(line + bytes_text(text) + " · octets :" + hex_bytes(text, sizeof text) + release_context(rbp, rsp));
             }
             if (made != length) ++mismatches_;
         } else {
@@ -1633,7 +1634,7 @@ private:
                 char line[220];
                 std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x jamais vue créée ou déjà libérée, longueur %u (%u blocs), mot 0x%x du bitmap = %08x · ",
                     double(now - start_) / 1e9, (unsigned long long)thread, key, length, blocks(length), key >> 5, word);
-                unknown_log_.push_back(line + bytes_text(text) + " · octets :" + hex_bytes(text, sizeof text));
+                unknown_log_.push_back(line + bytes_text(text) + " · octets :" + hex_bytes(text, sizeof text) + release_context(rbp, rsp));
             }
         }
         if (length + 8 <= 256 || !(key & 31)) return;
@@ -1647,6 +1648,40 @@ private:
         std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x avec la longueur %u (%u blocs de 16 octets) · ",
             double(now - start_) / 1e9, (unsigned long long)thread, key, length, (length + 8 + 15) / 16);
         bad_log_.push_back(line + bytes_text(text) + " · suite :" + hex_bytes(text + 8, 32));
+    }
+    // Only for the bounded anomaly logs, while the caller is at the service
+    // boundary. The first key-0 release can free live strings much earlier
+    // than their eventual corrupt lookup: retain its guest callers now.
+    std::string release_context(uint64_t rbp, uint64_t rsp) const {
+        char line[120];
+        std::snprintf(line, sizeof line, " | rbp 0x%llx rsp 0x%llx | appels (rbp) :",
+            (unsigned long long)rbp, (unsigned long long)rsp);
+        std::string out = line;
+        uint64_t frame = rbp;
+        for (unsigned depth = 0; depth < 12 && frame && !(frame & 7); ++depth) {
+            if (frame > UINT64_MAX - 15) break;
+            uint8_t pair[16];
+            if (!memory_.read(frame, pair, sizeof pair)) break;
+            uint64_t next = 0, back = 0;
+            std::memcpy(&next, pair, 8); std::memcpy(&back, pair + 8, 8);
+            if (back < relocation_ || back - relocation_ >= 0x20000000) break;
+            std::snprintf(line, sizeof line, " 0x%llx", (unsigned long long)(back - relocation_));
+            out += line;
+            if (next <= frame) break;
+            frame = next;
+        }
+        out += " | pile (mots bruts, pas une trace d'appels) :";
+        for (unsigned word = 0; rsp && word < 16; ++word) {
+            const uint64_t offset = uint64_t(word) * 8;
+            if (rsp > UINT64_MAX - offset - 7) break;
+            uint8_t bytes[8];
+            if (!memory_.read(rsp + offset, bytes, sizeof bytes)) break;
+            uint64_t value = 0;
+            std::memcpy(&value, bytes, 8);
+            std::snprintf(line, sizeof line, " +0x%x=0x%llx", word * 8, (unsigned long long)value);
+            out += line;
+        }
+        return out;
     }
     static std::string hex_bytes(const uint8_t* b, size_t n) {
         std::string out;
@@ -1968,12 +2003,12 @@ static void watch_string_table(maxps4_fex_engine* engine) {
     static constexpr uint8_t lookup[] = {0x4c, 0x8d, 0x25, 0x0e, 0xe9, 0x69, 0x0c};
     uint8_t bytes[sizeof lookup] = {};
     if (!engine->system_memory.read(base + 0x5b15eb, bytes, sizeof bytes) || std::memcmp(bytes, lookup, sizeof lookup)) return;
-    engine->table_watch = std::make_unique<StringTableWatch>(engine->system_memory, base + 0xcc4ff00, base + 0xc847d28);
+    engine->table_watch = std::make_unique<StringTableWatch>(engine->system_memory, base + 0xcc4ff00, base + 0xc847d28, engine->relocation);
     StringTableWatch* watch = engine->table_watch.get();
     const uint64_t relocation = engine->relocation;
     engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock,
                                                                        const maxps4::PS4KernelCall& call) {
-        watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock, call.r15, call.r14, call.r12, call.rbp);
+        watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock, call.r15, call.r14, call.r12, call.rbp, call.rsp);
     });
     watch->guard_string(0x14e, [engine, relocation](bool registers) {
         std::lock_guard sampling(engine->sample_lock);
