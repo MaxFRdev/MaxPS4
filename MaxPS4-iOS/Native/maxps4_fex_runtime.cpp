@@ -1670,6 +1670,33 @@ private:
             if (next <= frame) break;
             frame = next;
         }
+        // This caller is the script-save reader. Its saved r15 is the
+        // MemoryFile*, and the value record is at caller rsp + 0x4c0.
+        // Snapshot only: neither the save nor guest execution is changed.
+        uint8_t returns[8];
+        uint64_t back = 0;
+        if (rbp && rbp <= UINT64_MAX - 15 && memory_.read(rbp + 8, returns, 8))
+            std::memcpy(&back, returns, 8);
+        if (back >= relocation_ && back - relocation_ == 0x2525ce8 && rbp >= 8) {
+            uint8_t saved[8], stream[64], value[12];
+            uint64_t pointer = 0;
+            if (memory_.read(rbp - 8, saved, 8)) std::memcpy(&pointer, saved, 8);
+            if (pointer && pointer <= UINT64_MAX - 63 && memory_.read(pointer, stream, sizeof stream)) {
+                uint64_t base = 0, size = 0, position = 0;
+                uint32_t mode = 0, compressed = 0;
+                std::memcpy(&base, stream, 8); std::memcpy(&size, stream + 8, 8);
+                std::memcpy(&position, stream + 24, 8);
+                std::memcpy(&mode, stream + 52, 4); std::memcpy(&compressed, stream + 56, 4);
+                std::snprintf(line, sizeof line, " | flux 0x%llx base 0x%llx taille %llu position %llu",
+                    (unsigned long long)pointer, (unsigned long long)base,
+                    (unsigned long long)size, (unsigned long long)position);
+                out += line;
+                std::snprintf(line, sizeof line, " mode %u compression %u erreur %u", mode, compressed, unsigned(stream[61]));
+                out += line;
+            }
+            if (rbp <= UINT64_MAX - 0x4db && memory_.read(rbp + 0x4d0, value, sizeof value))
+                out += " | valeur sauvegardee (8 octets puis type) :" + hex_bytes(value, sizeof value);
+        }
         out += " | pile (mots bruts, pas une trace d'appels) :";
         for (unsigned word = 0; rsp && word < 16; ++word) {
             const uint64_t offset = uint64_t(word) * 8;
