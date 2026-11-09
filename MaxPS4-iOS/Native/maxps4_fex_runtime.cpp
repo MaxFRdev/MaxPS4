@@ -207,6 +207,8 @@ public:
                 // seventh, at RSP+8 past the trampoline's return address) are
                 // readable. Bounded images keep 0, which makes them fault.
                 image->general() ? r[x86::REG_RSP] : 0};
+            call.r14 = r[x86::REG_R14];
+            call.r15 = r[x86::REG_R15];
             // POSIX pthread_* (see pthread_token): no name arguments, and an
             // absolute CLOCK_REALTIME deadline turned into the microseconds left.
             if (pthread) {
@@ -1372,10 +1374,11 @@ public:
             }
         });
     }
-    void event(uint64_t thread, uint64_t caller, bool unlock) {
+    void event(uint64_t thread, uint64_t caller, bool unlock, uint64_t r15 = 0, uint64_t r14 = 0) {
         std::lock_guard guard(lock_);
         const uint64_t now = clock();
         events_[next_event_++ % events_.size()] = {now, thread, caller, unlock};
+        note_release(thread, caller, unlock, uint32_t(r15), uint32_t(r14), now);
         check_freed(thread, caller, unlock, now);
         if (unlock || captured_.load() || (checks_ && now - last_check_ < 4000000)) return;
         last_check_ = now;
@@ -1406,6 +1409,10 @@ public:
             for (size_t k = 0; k < words; ++k)
                 out += word_tail_[(word_tail_next_ - words + k) % word_tail_.size()] + "\n";
             out += freed_capture_.empty() ? "  jamais vue libérée vivante\n" : freed_capture_;
+            std::snprintf(line, sizeof line, "  libérations de chaînes : %llu, dont %llu de plus de 256 octets sur une clé hors début de mot\n",
+                (unsigned long long)releases_, (unsigned long long)bad_releases_);
+            out += line;
+            for (const auto& entry : bad_log_) out += entry + "\n";
         }
         return out;
     }
@@ -1564,6 +1571,33 @@ private:
         return true;
     }
     static bool key_free(uint32_t key, uint32_t word) { return (word >> (31 - (key & 31))) & 1; }
+    // Under lock_. The release (default.elf 0x5b1530) takes the lock with the
+    // key in r15d and the length the caller found in r14d, then frees the
+    // block with MT_FreeIndex(key, length + 8). A block over 256 bytes is freed
+    // as whole bitmap words, so a key that is not the first of a word with
+    // such a length frees other strings: those releases are kept with the
+    // string's header and text as the lock is taken.
+    void note_release(uint64_t thread, uint64_t caller, bool unlock, uint32_t key, uint32_t length, uint64_t now) {
+        if (unlock || caller != 0x26b15d8) return;
+        ++releases_;
+        if (length + 8 <= 256 || !(key & 31)) return;
+        ++bad_releases_;
+        if (bad_log_.size() >= 8) return;
+        uint8_t base_bytes[8], text[40] = {};
+        uint64_t base = 0;
+        if (memory_.read(pool_, base_bytes, 8)) std::memcpy(&base, base_bytes, 8);
+        if (base) (void)memory_.read(base + uint64_t(key) * 16, text, sizeof text);
+        char line[200];
+        std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x avec la longueur %u (%u blocs de 16 octets) · ",
+            double(now - start_) / 1e9, (unsigned long long)thread, key, length, (length + 8 + 15) / 16);
+        bad_log_.push_back(line + bytes_text(text) + " · suite :" + hex_bytes(text + 8, 32));
+    }
+    static std::string hex_bytes(const uint8_t* b, size_t n) {
+        std::string out;
+        char line[8];
+        for (size_t k = 0; k < n; ++k) { std::snprintf(line, sizeof line, "%s%02x", k % 4 ? "" : " ", b[k]); out += line; }
+        return out;
+    }
     // Under lock_: the first time the watched string is still referenced
     // (non-zero count and length) while its block is marked free, keep who
     // took or released the string table's lock then, and the calls before.
@@ -1600,6 +1634,8 @@ private:
     std::thread guard_thread_;
     std::atomic<uint32_t> guard_key_ {0};
     std::string freed_capture_;
+    uint64_t releases_ = 0, bad_releases_ = 0;
+    std::vector<std::string> bad_log_;
     std::vector<std::string> word_log_;
     std::array<std::string, 10> word_tail_ {};
     uint64_t word_changes_ = 0, word_tail_next_ = 0;
@@ -1877,8 +1913,9 @@ static void watch_string_table(maxps4_fex_engine* engine) {
     engine->table_watch = std::make_unique<StringTableWatch>(engine->system_memory, base + 0xcc4ff00, base + 0xc847d28);
     StringTableWatch* watch = engine->table_watch.get();
     const uint64_t relocation = engine->relocation;
-    engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock) {
-        watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock);
+    engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock,
+                                                                       const maxps4::PS4KernelCall& call) {
+        watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock, call.r15, call.r14);
     });
     watch->guard_string(0x14e, [engine, relocation](bool registers) {
         std::lock_guard sampling(engine->sample_lock);

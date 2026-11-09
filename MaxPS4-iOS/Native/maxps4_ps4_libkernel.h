@@ -22,7 +22,11 @@
 namespace maxps4 {
 // Entry snapshot for PS4 x86-64 System V calls. Host function addresses must
 // never be installed directly into guest GOT/PLT slots on ARM64.
-struct PS4KernelCall { uint64_t rdi = 0, rsi = 0, rdx = 0, rcx = 0, r8 = 0, r9 = 0, rsp = 0; };
+struct PS4KernelCall {
+    uint64_t rdi = 0, rsi = 0, rdx = 0, rcx = 0, r8 = 0, r9 = 0, rsp = 0;
+    // Callee-saved registers at the call, for diagnostics only (0 when not given).
+    uint64_t r14 = 0, r15 = 0;
+};
 enum class PS4KernelService : uint32_t {
     unresolved, open, read, close, lseek, stat, fstat,
     mmap, munmap, mprotect, clock_gettime, clock_getres, gettimeofday, process_time,
@@ -249,7 +253,7 @@ public:
     // Diagnostic watch on one mutex, set before the game runs: called after each
     // successful lock (also trylock, timed lock and a condition wait's return)
     // and unlock of that slot, with the thread and the guest caller ([rsp]).
-    using MutexWatch = std::function<void(uint64_t thread, uint64_t caller, bool unlock)>;
+    using MutexWatch = std::function<void(uint64_t thread, uint64_t caller, bool unlock, const PS4KernelCall& call)>;
     void watch_mutex(uint64_t slot, MutexWatch watch) { mutex_watch_ = std::move(watch); watched_mutex_.store(slot); }
     MutexFailures mutex_failures() const { std::lock_guard<std::mutex> guard(memory_failure_lock_); return mutex_failures_; }
     void mutex_usage(size_t& used, size_t& peak) const { threads_.mutex_usage(used, peak); }

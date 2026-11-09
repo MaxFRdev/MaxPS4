@@ -2071,7 +2071,7 @@ int64_t PS4Libkernel::invoke(PS4KernelService service, const PS4KernelCall& c, u
         if (lock || wait || unlock) {
             uint8_t back[8] = {};
             const uint64_t caller = c.rsp && memory_.read(c.rsp, back, 8) ? get_le(back, 8) : 0;
-            mutex_watch_(thread, caller, unlock);
+            mutex_watch_(thread, caller, unlock, c);
         }
     }
     record_save_call(service, c, result);
