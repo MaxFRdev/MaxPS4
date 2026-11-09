@@ -950,7 +950,7 @@ public:
     // 1 ms apart: the distinct guest addresses in JIT code (a spinning loop
     // shows as a few), else the host function and its caller (a thread held
     // inside FEX), and the guest RIP FEX last stored.
-    // `regs`, when given, receives x0-x28 of a sample taken in JIT code, and
+    // `regs`, when given, receives x0-x30 of a sample taken in JIT code, and
     // `jit_rip` that sample's guest RIP (0: no such sample).
     std::string sample(uint64_t id, uint64_t relocation, uint64_t* regs_out = nullptr, uint64_t* jit_rip = nullptr) {
         std::string out;
@@ -965,7 +965,7 @@ public:
         uint64_t pcs[8] {}, lrs[8] {};
         // Host registers of one sample: in JIT code FEX keeps the guest's
         // registers in host registers, so they show a spinning loop's state.
-        uint64_t regs[29] {};
+        uint64_t regs[31] {};
         bool have_regs = false;
         size_t count = 0;
         rips.reserve(8);
@@ -984,7 +984,12 @@ public:
             pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
             lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(lr), ptrauth_key_return_address)));
 #endif
-            if (!have_regs) { std::copy(std::begin(state.__x), std::end(state.__x), regs); have_regs = true; }
+            if (!have_regs) {
+                std::copy(std::begin(state.__x), std::end(state.__x), regs);
+                regs[29] = uint64_t(arm_thread_state64_get_fp(state)); // FEX keeps guest r15 there.
+                regs[30] = lr;
+                have_regs = true;
+            }
             lrs[count] = lr; pcs[count++] = pc;
         }
         auto relative = [&](uint64_t rip) { return rip >= relocation ? rip - relocation : rip; };
@@ -1036,7 +1041,7 @@ public:
         }
         if (have_regs && !rips.empty()) {
             out += " · registres hôte :";
-            for (int r = 0; r < 29; ++r) {
+            for (int r = 0; r < 31; ++r) {
                 std::snprintf(line, sizeof line, " x%d=0x%llx", r, (unsigned long long)regs[r]);
                 out += line;
             }
@@ -1240,8 +1245,8 @@ struct CPUProfile {
 // previous check and the last lock/unlock calls are kept for the report.
 class StringTableWatch {
 public:
-    StringTableWatch(maxps4::PS4GuestMemory& memory, uint64_t table)
-        : memory_(memory), table_(table), start_(clock()), in_degree_(entries) {}
+    StringTableWatch(maxps4::PS4GuestMemory& memory, uint64_t table, uint64_t pool)
+        : memory_(memory), table_(table), pool_(pool), start_(clock()), in_degree_(entries) {}
     void event(uint64_t thread, uint64_t caller, bool unlock) {
         std::lock_guard guard(lock_);
         const uint64_t now = clock();
@@ -1259,8 +1264,11 @@ public:
         return std::string(line) + capture_;
     }
     // The lookup spinning at default.elf 0x5b1640 walks a chain for an entry
-    // whose second word is `key` (guest r15d; FEX keeps it in x20), now at
-    // `node` (rcx, x5): the chain it walks, and every entry holding `key`.
+    // whose second word is `key` (guest r15d; FEX keeps it in x29), now at
+    // `node` (rdx, x5): the chain it walks, every entry holding `key` with
+    // its own chain, and the pool string `key` names (16-byte headers at the
+    // pointer in `pool_`: u16 references, byte 3 = length + 1 mod 256, text
+    // at +8) with the bucket its length and text give.
     std::string explain(uint32_t key, uint32_t node) const {
         std::vector<uint8_t> table(entries * 8);
         if (node >= entries || !memory_.read(table_, table.data(), table.size())) return " · table illisible";
@@ -1282,6 +1290,19 @@ public:
                 out += line; ++found;
             }
         if (!found) out += " aucune";
+        for (size_t i = 0, shown = 0; i < entries && shown < 2; ++i) {
+            if (word(table, i, 1) != key || i == node) continue;
+            std::snprintf(line, sizeof line, " · chaîne de 0x%zx :", i);
+            out += line; ++shown;
+            uint32_t at = uint32_t(i);
+            for (int step = 0; step < 12; ++step) {
+                std::snprintf(line, sizeof line, " 0x%x[%08x:%08x]", at, word(table, at), word(table, at, 1));
+                out += line;
+                at = word(table, at) & 0x3ffff;
+                if (at >= entries || at == i) break;
+            }
+        }
+        out += describe_string(key);
         return out;
     }
 private:
@@ -1352,7 +1373,36 @@ private:
         capture_ += "\n";
     }
     maxps4::PS4GuestMemory& memory_;
-    const uint64_t table_;
+    const uint64_t table_, pool_;
+    // The pool string `key` names, as the game's release path reads it.
+    std::string describe_string(uint32_t key) const {
+        uint8_t base_bytes[8];
+        if (!memory_.read(pool_, base_bytes, 8)) return " · pool illisible";
+        uint64_t base;
+        std::memcpy(&base, base_bytes, 8);
+        const uint64_t at = base + uint64_t(key) * 16;
+        uint8_t head[8], text[0x400] = {};
+        if (!memory_.read(at, head, 8)) return " · chaîne illisible";
+        const bool whole = memory_.read(at + 8, text, sizeof text);
+        char line[160];
+        std::snprintf(line, sizeof line, " · chaîne 0x%x en 0x%llx : en-tête %02x%02x%02x%02x %02x%02x%02x%02x",
+            key, (unsigned long long)at, head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
+        std::string out = line;
+        if (!whole) return out + ", texte illisible";
+        // The length the release path finds (0x1882bf): byte 3 - 1 gives the
+        // low byte, the terminator decides the 256s.
+        const uint32_t low = uint8_t(head[3] - 1);
+        uint32_t length = low + 1;
+        for (uint32_t k = low; k < sizeof text && text[k]; k += 0x100) length += 0x100;
+        uint32_t hash = 0;
+        for (size_t k = 0; k < sizeof text && text[k]; ++k) hash = hash * 31 + uint32_t(int8_t(text[k]));
+        if (length >= 0x100) hash = length >> 2;
+        const uint32_t bucket = hash % 0xffff + 1;
+        std::snprintf(line, sizeof line, ", longueur %u, seau 0x%x, texte « ", length, bucket);
+        out += line;
+        for (size_t k = 0; k < 48 && text[k]; ++k) out += (text[k] >= 32 && text[k] < 127) ? char(text[k]) : '.';
+        return out + " »";
+    }
     const uint64_t start_;
     mutable std::mutex lock_;
     std::array<Event, 48> events_ {};
@@ -1619,7 +1669,7 @@ static void watch_string_table(maxps4_fex_engine* engine) {
     static constexpr uint8_t lookup[] = {0x4c, 0x8d, 0x25, 0x0e, 0xe9, 0x69, 0x0c};
     uint8_t bytes[sizeof lookup] = {};
     if (!engine->system_memory.read(base + 0x5b15eb, bytes, sizeof bytes) || std::memcmp(bytes, lookup, sizeof lookup)) return;
-    engine->table_watch = std::make_unique<StringTableWatch>(engine->system_memory, base + 0xcc4ff00);
+    engine->table_watch = std::make_unique<StringTableWatch>(engine->system_memory, base + 0xcc4ff00, base + 0xc847d28);
     StringTableWatch* watch = engine->table_watch.get();
     const uint64_t relocation = engine->relocation;
     engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock) {
@@ -3062,11 +3112,11 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             if (seconds > 1 && thread != 1) {
                 std::lock_guard sampling(engine->sample_lock);
                 if (engine->probe.threads) {
-                    uint64_t regs[29] {}, jit_rip = 0;
+                    uint64_t regs[31] {}, jit_rip = 0;
                     out += engine->probe.threads->sample(thread, engine->relocation, regs, &jit_rip);
                     // Spinning in Call of Duty's string lookup: what it looks for, and where.
                     if (engine->table_watch && jit_rip >= 0x26b1600 && jit_rip < 0x26b1670)
-                        out += engine->table_watch->explain(uint32_t(regs[20]), uint32_t(regs[5]));
+                        out += engine->table_watch->explain(uint32_t(regs[29]), uint32_t(regs[5]));
                     uint64_t rip = 0, ended_ns = 0, address = 0;
                     int signal = 0, code = 0;
                     std::array<uint64_t, 16> gprs {};
