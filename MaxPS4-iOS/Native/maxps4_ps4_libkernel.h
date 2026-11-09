@@ -25,7 +25,7 @@ namespace maxps4 {
 struct PS4KernelCall {
     uint64_t rdi = 0, rsi = 0, rdx = 0, rcx = 0, r8 = 0, r9 = 0, rsp = 0;
     // Callee-saved registers at the call, for diagnostics only (0 when not given).
-    uint64_t r14 = 0, r15 = 0;
+    uint64_t r14 = 0, r15 = 0, r12 = 0, rbp = 0;
 };
 enum class PS4KernelService : uint32_t {
     unresolved, open, read, close, lseek, stat, fstat,

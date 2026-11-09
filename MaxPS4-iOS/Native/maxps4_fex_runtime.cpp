@@ -209,6 +209,8 @@ public:
                 image->general() ? r[x86::REG_RSP] : 0};
             call.r14 = r[x86::REG_R14];
             call.r15 = r[x86::REG_R15];
+            call.r12 = r[x86::REG_R12];
+            call.rbp = r[x86::REG_RBP];
             // POSIX pthread_* (see pthread_token): no name arguments, and an
             // absolute CLOCK_REALTIME deadline turned into the microseconds left.
             if (pthread) {
@@ -1374,10 +1376,11 @@ public:
             }
         });
     }
-    void event(uint64_t thread, uint64_t caller, bool unlock, uint64_t r15 = 0, uint64_t r14 = 0) {
+    void event(uint64_t thread, uint64_t caller, bool unlock, uint64_t r15 = 0, uint64_t r14 = 0, uint64_t r12 = 0, uint64_t rbp = 0) {
         std::lock_guard guard(lock_);
         const uint64_t now = clock();
         events_[next_event_++ % events_.size()] = {now, thread, caller, unlock};
+        note_creation(caller, unlock, uint32_t(r12), rbp);
         note_release(thread, caller, unlock, uint32_t(r15), uint32_t(r14), now);
         check_freed(thread, caller, unlock, now);
         if (unlock || captured_.load() || (checks_ && now - last_check_ < 4000000)) return;
@@ -1413,6 +1416,10 @@ public:
                 (unsigned long long)releases_, (unsigned long long)bad_releases_);
             out += line;
             for (const auto& entry : bad_log_) out += entry + "\n";
+            std::snprintf(line, sizeof line, "  créations suivies : %llu · libérations d'une chaîne suivie avec une autre longueur : %llu · libérations non suivies : %llu\n",
+                (unsigned long long)creations_, (unsigned long long)mismatches_, (unsigned long long)unknown_releases_);
+            out += line;
+            for (const auto& entry : mismatch_log_) out += entry + "\n";
         }
         return out;
     }
@@ -1577,9 +1584,40 @@ private:
     // as whole bitmap words, so a key that is not the first of a word with
     // such a length frees other strings: those releases are kept with the
     // string's header and text as the lock is taken.
+    // Under lock_. A new string (default.elf 0x5b0dad..0x5b0df3) unlocks with
+    // its key in r12d and its length with the terminator at [rbp - 0x48]: the
+    // size MT_AllocIndex got, kept to check each release against.
+    void note_creation(uint64_t caller, bool unlock, uint32_t key, uint64_t rbp) {
+        if (!unlock || caller != 0x26b0df8 || key >= created_.size() || !rbp) return;
+        uint8_t n[4];
+        if (!memory_.read(rbp - 0x48, n, 4)) return;
+        uint32_t length;
+        std::memcpy(&length, n, 4);
+        created_[key] = length ? length : 1;
+        ++creations_;
+    }
+    static uint32_t blocks(uint32_t length) { return (length + 8 + 15) / 16; }
     void note_release(uint64_t thread, uint64_t caller, bool unlock, uint32_t key, uint32_t length, uint64_t now) {
         if (unlock || caller != 0x26b15d8) return;
         ++releases_;
+        // The release must free the block size the creation allocated.
+        if (key < created_.size() && created_[key]) {
+            const uint32_t made = created_[key];
+            created_[key] = 0;
+            if (made != length && mismatch_log_.size() < 8) {
+                uint8_t base_bytes[8], text[48] = {};
+                uint64_t base = 0;
+                if (memory_.read(pool_, base_bytes, 8)) std::memcpy(&base, base_bytes, 8);
+                if (base) (void)memory_.read(base + uint64_t(key) * 16, text, sizeof text);
+                char line[220];
+                std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x avec la longueur %u (%u blocs), créée avec %u (%u blocs) · ",
+                    double(now - start_) / 1e9, (unsigned long long)thread, key, length, blocks(length), made, blocks(made));
+                mismatch_log_.push_back(line + bytes_text(text) + " · octets :" + hex_bytes(text, sizeof text));
+            }
+            if (made != length) ++mismatches_;
+        } else {
+            ++unknown_releases_;
+        }
         if (length + 8 <= 256 || !(key & 31)) return;
         ++bad_releases_;
         if (bad_log_.size() >= 8) return;
@@ -1634,7 +1672,9 @@ private:
     std::thread guard_thread_;
     std::atomic<uint32_t> guard_key_ {0};
     std::string freed_capture_;
-    uint64_t releases_ = 0, bad_releases_ = 0;
+    uint64_t releases_ = 0, bad_releases_ = 0, creations_ = 0, mismatches_ = 0, unknown_releases_ = 0;
+    std::vector<uint32_t> created_ = std::vector<uint32_t>(0x40000);
+    std::vector<std::string> mismatch_log_;
     std::vector<std::string> bad_log_;
     std::vector<std::string> word_log_;
     std::array<std::string, 10> word_tail_ {};
@@ -1915,7 +1955,7 @@ static void watch_string_table(maxps4_fex_engine* engine) {
     const uint64_t relocation = engine->relocation;
     engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock,
                                                                        const maxps4::PS4KernelCall& call) {
-        watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock, call.r15, call.r14);
+        watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock, call.r15, call.r14, call.r12, call.rbp);
     });
     watch->guard_string(0x14e, [engine, relocation](bool registers) {
         std::lock_guard sampling(engine->sample_lock);
