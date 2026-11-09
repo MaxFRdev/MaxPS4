@@ -7,7 +7,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <algorithm>
 #include <array>
+#include <vector>
 #include <csignal>
 #include <pthread.h>
 #include <fcntl.h>
@@ -205,6 +207,46 @@ int main() {
         CHECK(maxps4_fex_engine_run_elf(first, elf.data(), elf.size(), 3,
             &probe_result, &probe_backend, &elf_entry) == 0);
         CHECK(elf_entry == 0x1000 && probe_result == 123 && probe_backend == MAXPS4_CPU_FEX_ARM64_JIT);
+        {
+            // Call of Duty's string lookup walk (default.elf 0x5b163a-0x5b165b, its exact
+            // bytes) over the two table entries an iPhone run showed it spinning on: entry
+            // 0x81 = [00049ba7:000020c0] holds key 0x20c0 (r15d) and 0x9ba7 = [00080081:00002ac1]
+            // points back to it, so a walk from 0x9ba7 has to stop at 0x81 (ebx).
+            const std::vector<uint8_t> code = {
+                0x49, 0xbc, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,       // mov r12, 0x100000
+                0x41, 0xc7, 0x84, 0x24, 0x08, 0x04, 0x00, 0x00, 0xa7, 0x9b, 0x04, 0x00, // [r12+0x81*8] = 0x49ba7
+                0x41, 0xc7, 0x84, 0x24, 0x0c, 0x04, 0x00, 0x00, 0xc0, 0x20, 0x00, 0x00, // [r12+0x81*8+4] = 0x20c0
+                0x41, 0xc7, 0x84, 0x24, 0x38, 0xdd, 0x04, 0x00, 0x81, 0x00, 0x08, 0x00, // [r12+0x9ba7*8] = 0x80081
+                0x41, 0xc7, 0x84, 0x24, 0x3c, 0xdd, 0x04, 0x00, 0xc1, 0x2a, 0x00, 0x00, // [r12+0x9ba7*8+4] = 0x2ac1
+                0x41, 0xbf, 0xc0, 0x20, 0x00, 0x00,                               // mov r15d, 0x20c0
+                0xb8, 0xa7, 0x9b, 0x00, 0x00,                                     // mov eax, 0x9ba7
+                0xbb, 0x83, 0x00, 0x00, 0x00,                                     // mov ebx, 0x83
+                0x48, 0x89, 0xc2, 0x0f, 0x1f, 0x00, 0x89, 0xc1, 0x89, 0xde, 0x89, 0xc8, // default.elf 0x5b163a
+                0x41, 0x8b, 0x04, 0xc4, 0x89, 0xcb, 0x25, 0xff, 0xff, 0x03, 0x00,
+                0x45, 0x39, 0x7c, 0xd4, 0x04, 0x48, 0x89, 0xc2, 0x75, 0xe5,       // ... jne back to 0x5b1640
+                0x89, 0xd8,                                                       // mov eax, ebx
+                0xf4};                                                            // hlt
+            std::vector<uint8_t> walk(184 + code.size() + 1, 0);
+            const uint8_t ident[] = {0x7F, 'E', 'L', 'F', 2, 1, 1};
+            std::copy(std::begin(ident), std::end(ident), walk.begin());
+            guest_test::put(walk, 2, 16, 2); guest_test::put(walk, 62, 18, 2); guest_test::put(walk, 1, 20, 4);
+            guest_test::put(walk, 0x1000, 24, 8); guest_test::put(walk, 64, 32, 8); guest_test::put(walk, 64, 52, 2);
+            guest_test::put(walk, 56, 54, 2); guest_test::put(walk, 2, 56, 2);
+            guest_test::put(walk, 1, 64, 4); guest_test::put(walk, 5, 68, 4); guest_test::put(walk, 184, 72, 8);
+            guest_test::put(walk, 0x1000, 80, 8); guest_test::put(walk, code.size(), 96, 8);
+            guest_test::put(walk, code.size(), 104, 8); guest_test::put(walk, 1, 112, 8);
+            guest_test::put(walk, 1, 120, 4); guest_test::put(walk, 6, 124, 4); guest_test::put(walk, 184 + code.size(), 128, 8);
+            guest_test::put(walk, 0x100000, 136, 8); guest_test::put(walk, 1, 152, 8);
+            guest_test::put(walk, 0x50000, 160, 8); guest_test::put(walk, 1, 168, 8);
+            std::copy(code.begin(), code.end(), walk.begin() + 184);
+            uint64_t found = 0, walk_entry = 0;
+            uint32_t walk_backend = 0;
+            const int32_t walked = maxps4_fex_engine_run_elf(first, walk.data(), walk.size(), 3, &found, &walk_backend, &walk_entry);
+            std::printf("Call of Duty lookup walk: status %d, found 0x%llx, backend %u\n", walked,
+                (unsigned long long)found, walk_backend);
+            CHECK(walked == 0 && found == 0x81 && walk_backend == MAXPS4_CPU_FEX_ARM64_JIT);
+            std::puts("PASS Call of Duty's string lookup walk stops at the entry holding its key under FEX");
+        }
         auto pm4_elf = guest_test::elf(40, 2, true);
         pm4_elf.resize(207);
         guest_test::put(pm4_elf, 12, 152, 8);
