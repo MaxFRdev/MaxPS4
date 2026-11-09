@@ -1332,18 +1332,14 @@ public:
             unreadable_ ? " · table illisible" : "");
         std::string out = std::string(line) + capture_;
         if (guard_thread_.joinable()) {
-            std::snprintf(line, sizeof line, "Chaîne 0x%x surveillée : %llu changements (@ = code du jeu, ~ = dans un service)
-",
+            std::snprintf(line, sizeof line, "Chaîne 0x%x surveillée : %llu changements (@ = code du jeu, ~ = dans un service)\n",
                 guard_key_, (unsigned long long)guard_changes_);
             out += line;
-            for (const auto& entry : guard_log_) out += entry + "
-";
+            for (const auto& entry : guard_log_) out += entry + "\n";
             const size_t tail = std::min<size_t>(guard_tail_next_, guard_tail_.size());
-            if (guard_tail_next_ > tail) out += "  …
-";
+            if (guard_tail_next_ > tail) out += "  …\n";
             for (size_t k = 0; k < tail; ++k)
-                out += guard_tail_[(guard_tail_next_ - tail + k) % guard_tail_.size()] + "
-";
+                out += guard_tail_[(guard_tail_next_ - tail + k) % guard_tail_.size()] + "\n";
         }
         return out;
     }
