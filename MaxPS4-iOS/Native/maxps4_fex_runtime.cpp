@@ -1053,7 +1053,7 @@ public:
     }
     // Where every guest thread is right now, one sample each: its guest RIP in
     // JIT code, else the RIP FEX last stored (in a service or FEX itself).
-    std::string where_all(uint64_t relocation) {
+    std::string where_all(uint64_t relocation, bool registers = false) {
         std::string out;
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
         std::lock_guard held(lock);
@@ -1077,6 +1077,18 @@ public:
             if (rip >= relocation) rip -= relocation;
             std::snprintf(line, sizeof line, " t%llu%s0x%llx", (unsigned long long)t.id, jit ? "@" : "~", (unsigned long long)rip);
             out += line;
+            // In JIT code the host registers hold the guest's (x4 rax, x5 rdx,
+            // x6 rbx, x7 rcx, x8 rsp, x9 rbp, x10 rsi, x11 rdi, x12-x17 r8-r13,
+            // x19 r14, x29 r15 in this FEX build).
+            if (registers && jit) {
+                out += " [";
+                for (int r : {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 29}) {
+                    const uint64_t v = r == 29 ? uint64_t(arm_thread_state64_get_fp(state)) : state.__x[r];
+                    std::snprintf(line, sizeof line, "%sx%d=0x%llx", r == 4 ? "" : " ", r, (unsigned long long)v);
+                    out += line;
+                }
+                out += "]";
+            }
         }
 #else
         (void)relocation;
@@ -1287,10 +1299,14 @@ public:
     // with the bytes before and after and where every guest thread was (`who`).
     // Call of Duty's release lookup spun on string 0x14e found zeroed while
     // still in the table: this catches what wrote it.
-    void guard_string(uint32_t key, std::function<std::string()> who) {
+    void guard_string(uint32_t key, std::function<std::string(bool)> who) {
         guard_key_ = key;
         guard_thread_ = std::thread([this, key, who = std::move(who)] {
-            uint8_t before[32] = {}, now[32] = {};
+            // The string's 32 bytes sit at offset `half` of a 4 KiB window.
+            constexpr size_t window = 4096, half = 2048;
+            std::vector<uint8_t> before_window(window), now_window(window);
+            uint8_t* const before = before_window.data() + half;
+            uint8_t* const now = now_window.data() + half;
             bool have = false;
             while (!stop_.load()) {
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
@@ -1298,20 +1314,37 @@ public:
                 if (!memory_.read(pool_, base_bytes, 8)) continue;
                 uint64_t base;
                 std::memcpy(&base, base_bytes, 8);
-                if (!base || !memory_.read(base + uint64_t(key) * 16, now, sizeof now)) continue;
-                if (have && !std::memcmp(before, now, sizeof now)) continue;
+                const uint64_t at = base + uint64_t(key) * 16;
+                if (!base || !memory_.read(at - half, now_window.data(), window)) continue;
+                if (have && !std::memcmp(before, now, 32)) { std::memcpy(before_window.data(), now_window.data(), window); continue; }
                 if (have) {
-                    std::string where = who();
+                    // A string wiped (its length byte gone): the writer's registers too.
+                    const bool wiped = before[3] && !now[3];
+                    std::string where = who(wiped);
+                    // The changed span of the window and how much of it is now zero.
+                    size_t first = window, last = 0, zero = 0;
+                    for (size_t k = 0; k < window; ++k)
+                        if (before_window[k] != now_window[k]) {
+                            first = std::min(first, k); last = k;
+                            if (!now_window[k]) ++zero;
+                        }
                     std::lock_guard guard(lock_);
                     ++guard_changes_;
-                    char line[96];
+                    char line[200];
                     std::snprintf(line, sizeof line, "  %.3f s :", double(clock() - start_) / 1e9);
                     std::string entry = line;
-                    entry += " avant " + bytes_text(before) + " · après " + bytes_text(now) + " · threads" + where;
+                    entry += " avant " + bytes_text(before) + " · après " + bytes_text(now);
+                    if (first < window) {
+                        std::snprintf(line, sizeof line, " · fenêtre 0x%llx : changé de 0x%llx à 0x%llx (%zu octets dont %zu à zéro)",
+                            (unsigned long long)(at - half), (unsigned long long)(at - half + first),
+                            (unsigned long long)(at - half + last + 1), last + 1 - first, zero);
+                        entry += line;
+                    }
+                    entry += " · threads" + where;
                     if (guard_log_.size() < 6) guard_log_.push_back(entry);
                     else { guard_tail_[guard_tail_next_++ % guard_tail_.size()] = entry; }
                 }
-                std::memcpy(before, now, sizeof now);
+                std::memcpy(before_window.data(), now_window.data(), window);
                 have = true;
             }
         });
@@ -1771,9 +1804,9 @@ static void watch_string_table(maxps4_fex_engine* engine) {
     engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock) {
         watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock);
     });
-    watch->guard_string(0x14e, [engine, relocation] {
+    watch->guard_string(0x14e, [engine, relocation](bool registers) {
         std::lock_guard sampling(engine->sample_lock);
-        return engine->probe.threads ? engine->probe.threads->where_all(relocation) : std::string(" ?");
+        return engine->probe.threads ? engine->probe.threads->where_all(relocation, registers) : std::string(" ?");
     });
 }
 namespace {
