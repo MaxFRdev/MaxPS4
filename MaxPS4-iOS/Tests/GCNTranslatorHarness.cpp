@@ -33,6 +33,25 @@ int main() {
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     {
+        arena.code(0x11c00,{0xd2460021,0x000100c1,0xd2480022,0x000242c1,0xf8001801,0x22,0xbf810000});
+        GCNWave wave(arena.memory,64);
+        assert(wave.run(0x11c00));
+        for (unsigned lane=0;lane<64;++lane) {
+            rt::GCNLane L; L.simdLane=lane;
+            rt::ps_mbcnt(L,M,unusedQuad);
+            assert(bits(L.color[0][0])==lane);
+            assert(wave.exports[0].value[0][lane]==lane);
+            for (uint32_t mask : {0u,1u,0x80000000u,0x55555555u,0xffffffffu}) {
+                for (bool high : {false,true}) {
+                    unsigned expected=0;
+                    for (unsigned bit=0;bit<32;++bit)
+                        if ((mask&(1u<<bit)) && bit+(high ? 32u : 0u)<lane) ++expected;
+                    assert(rt::gcn_mbcnt(mask,7,lane,high)==expected+7);
+                }
+            }
+        }
+    }
+    {
         arena.code(0x11b00,{0xebf33000,0x80030f01,0xf80008cf,0x1211100f,0xbf810000});
         const float values[4]={1.25f,-2.5f,3.75f,1.0f};
         for (unsigned n=0;n<4;++n) arena.put(0x15230+4*n,bits(values[n]));

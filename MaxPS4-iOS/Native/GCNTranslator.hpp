@@ -43,7 +43,7 @@ struct GCNTranslation {
     std::uint32_t attributes = 0, flat = 0; // pixel: attributes read, of which flat
     std::uint8_t colors = 0;     // pixel: MRTs exported
     bool position = false, quad = false, mayKill = false, depth = false;
-    bool stores = false;         // compute: writes guest memory
+    bool stores = false, laneIndex = false; // requires a native SIMD lane index
     // pixel: the scalar loads, each with `2 + count` words at `offset` of the
     // draw's table of scalar values (address, then words: gcn_site_hit).
     std::vector<GCNScalarSite> sites;
@@ -596,6 +596,11 @@ private:
         case 288: expr = "gu(fa * gf(" + hex(i.literal) + ") + fb)"; break;
         case 289: expr = "gu(fa * fb + gf(" + hex(i.literal) + "))"; break;
         case 290: expr = "gcn_popcount(a) + b"; break;
+        case 291: case 292:
+            if (options_.stage == GCNStage::vertex) return fail("masked bit count in vertex program unsupported");
+            out_.laneIndex = true;
+            expr = "gcn_mbcnt(a, b, L.simdLane, " + std::string(op == 292 ? "true" : "false") + ")";
+            break;
         case 293: carry = "ulong t = ulong(a) + ulong(b); r = uint(t); co = uint(t >> 32);"; break;
         case 294: carry = "r = a - b; co = b > a ? 1u : 0u;"; break;
         case 295: carry = "r = b - a; co = a > b ? 1u : 0u;"; break;
@@ -899,7 +904,7 @@ inline GCNTranslation translateGCN(const GCNMemory& memory, std::uint64_t entry,
 // which follow the user SGPRs, and the thread id components beyond x.
 inline std::string gcnMetalComputeEntry(const std::string& name) {
     return "struct GCNDispatchState { ulong base; ulong size; uint user[16]; uint userCount; uint rsrc2; uint rangeCount; uint pad; ulong ranges[48]; };\n"
-           "kernel void gcn_compute(uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]],\n"
+           "kernel void gcn_compute(uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]], uint simdLane [[thread_index_in_simdgroup]],\n"
            "    device uchar* mem [[buffer(0)]], constant GCNDispatchState& D [[buffer(1)]]) {\n"
            "    GCNLane L; gcn_lane_init(L);\n"
            "    uint n = min(D.userCount, 16u);\n"
@@ -907,7 +912,7 @@ inline std::string gcnMetalComputeEntry(const std::string& name) {
            "    if ((D.rsrc2 & 0x80u) != 0u && n < 20u) L.user[n++] = group.x;\n"
            "    if ((D.rsrc2 & 0x100u) != 0u && n < 20u) L.user[n++] = group.y;\n"
            "    if ((D.rsrc2 & 0x200u) != 0u && n < 20u) L.user[n++] = group.z;\n"
-           "    L.vinit[0] = local.x; L.vinit[1] = local.y; L.vinit[2] = local.z;\n"
+           "    L.simdLane = simdLane; L.vinit[0] = local.x; L.vinit[1] = local.y; L.vinit[2] = local.z;\n"
            "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u };\n"
            "    " + name + "(L, M, Q);\n}\n";
 }
@@ -994,7 +999,7 @@ GCN_FN device const uchar* gcn_at(GCNMemory M, ulong o) {
 }
 struct GCNQuad { uint unused; };
 struct GCNLane {
-    uint user[20]; uint vinit[24]; bool exec; uint quadLane;
+    uint user[20]; uint vinit[24]; bool exec; uint quadLane; uint simdLane;
     float4 attr[GCN_ATTRS];
     float4 pos; float4 param[GCN_PARAMS]; float4 color[GCN_COLORS]; uint colorWritten; bool killed; float depth;
 };
@@ -1004,7 +1009,7 @@ GCN_FN void gcn_clear(thread GCNLane& L) {
     for (uint k = 0u; k < GCN_ATTRS; ++k) L.attr[k] = float4(0.0f);
     for (uint k = 0u; k < GCN_PARAMS; ++k) L.param[k] = float4(0.0f);
     for (uint k = 0u; k < GCN_COLORS; ++k) L.color[k] = float4(0.0f);
-    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false; L.depth = 0.0f;
+    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.simdLane = 0u; L.colorWritten = 0u; L.killed = false; L.depth = 0.0f;
 }
 // gcn_clear without attr/param/color: zeroing those arrays for every pixel
 // was most of a full-screen draw's GPU time (GCNShaderCostMetalTest). Entry
@@ -1012,7 +1017,7 @@ GCN_FN void gcn_clear(thread GCNLane& L) {
 GCN_FN void gcn_lane_init(thread GCNLane& L) {
     for (uint k = 0u; k < 20u; ++k) L.user[k] = 0u;
     for (uint k = 0u; k < 24u; ++k) L.vinit[k] = 0u;
-    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false; L.depth = 0.0f;
+    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.simdLane = 0u; L.colorWritten = 0u; L.killed = false; L.depth = 0.0f;
 }
 // Per-draw state at buffer(1): guest memory at buffer(0) is either one window
 // starting at guest address `base` (rangeCount 0) or rangeCount copied ranges
@@ -1244,6 +1249,7 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     s += "};\n";
     s += std::string("fragment ")+(structured ? "GCNFragment" : "float4")+
          " gcn_fragment(GCNVaryings in [[stage_in]], uint sampleCoverage [[sample_mask]],\n"
+         + std::string(ps.laneIndex ? "    uint simdLane [[thread_index_in_simdgroup]],\n" : "") +
          "    " + std::string(ps.sites.empty() ? "" : "constant uint* U [[buffer(4)]], ") +
          "device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]] GCN_SLOT_PARAMS) {\n"
          // Incoming raster coverage is independent of later fragment kills.
@@ -1255,6 +1261,7 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
          "    L.depth = in.position.z;\n"
          "    L.exec = covered;\n"
          "    L.quadLane = (uint(in.position.x) & 1u) | ((uint(in.position.y) & 1u) << 1);\n";
+    if (ps.laneIndex) s += "    L.simdLane = simdLane;\n";
     for (unsigned a = 0; a < 32; ++a) {
         if (!((ps.attributes >> a) & 1)) continue;
         const std::uint32_t cntl = inputCntl[a];

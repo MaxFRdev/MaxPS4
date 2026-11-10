@@ -21,6 +21,13 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    arena.code(0x11c00,{0xd2480022,0x000100c1,0xbf810000});
+    const auto exactMbcnt=translateGCN(arena.memory,0x11c00,ps);
+    assert(exactMbcnt && exactMbcnt.laneIndex);
+    arena.code(0x11c00,{0xd2460021,0x000100c1,0xd2480022,0x000242c1,0xf8001801,0x22,0xbf810000});
+    GCNTranslateOptions countOptions=ps; countOptions.name="ps_mbcnt";
+    const auto counted=translateGCN(arena.memory,0x11c00,countOptions);
+    assert(counted && counted.laneIndex);
     arena.code(0x11b00,{0xebf33000,0x80030f01,0xf80008cf,0x1211100f,0xbf810000});
     GCNTranslateOptions typedOptions; typedOptions.stage=GCNStage::vertex; typedOptions.name="vs_typed";
     const auto typedProgram=translateGCN(arena.memory,0x11b00,typedOptions);
@@ -137,6 +144,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

@@ -61,6 +61,7 @@ struct GCNLane {
     uint vinit[24] = {};   // initial VGPRs (vertex ids; pixel input layout)
     bool exec = true;      // this lane starts active (not a helper lane)
     uint quadLane = 0;     // 0-3: (x & 1) + 2 * (y & 1)
+    uint simdLane = 0;
     GCNPlane plane[32][4] = {};
     float4 pos, param[32], color[8];
     uint colorWritten = 0; // MRT bits

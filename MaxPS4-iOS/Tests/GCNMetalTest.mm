@@ -259,5 +259,37 @@ int main() {
         for (unsigned n=0;n<width*height;++n)
             assert(pixels[4*n]==0 && pixels[4*n+1]==255 && pixels[4*n+2]==0 && pixels[4*n+3]==255);
         std::puts("PASS typed vertex fetch on Metal: instruction format overrides descriptor at every pixel");
+        arena.code(0x11c00,{
+            0xd2460021,0x000100c1,0xd2480022,0x000242c1,
+            0x7e440d22,0x104444ff,0x3c800000, // integer lane -> float / 64
+            0xf8001801,0x22,0xbf810000});
+        const auto mbcntPS=translateGCN(arena.memory,0x11c00,psOptions);
+        assert(mbcntPS && mbcntPS.laneIndex);
+        const std::string mbcntSource=gcnMetalPrelude()+typedVS.source+mbcntPS.source+
+            gcnMetalEntryPoints(typedVS,mbcntPS,"vs_program","ps_program",0,inputCntl)+
+            "fragment float4 mbcnt_reference(GCNVaryings in [[stage_in]], uint lane [[thread_index_in_simdgroup]]) { return float4(float(lane)/64.0f,0.0f,0.0f,1.0f); }";
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:mbcntSource.c_str()] options:options error:&error];
+        if (!library) { std::printf("mbcnt MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        auto renderCount=[&](NSString* function,std::uint8_t* output) {
+            pipelineDescriptor.vertexFunction=[library newFunctionWithName:@"gcn_vertex"];
+            pipelineDescriptor.fragmentFunction=[library newFunctionWithName:function];
+            pipeline=[device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+            if (!pipeline) { std::printf("mbcnt pipeline: %s\n",error.localizedDescription.UTF8String); std::abort(); }
+            id<MTLCommandBuffer> cb=[queue commandBuffer];
+            id<MTLRenderCommandEncoder> enc=[cb renderCommandEncoderWithDescriptor:pass];
+            [enc setRenderPipelineState:pipeline];
+            [enc setVertexBuffer:memory offset:0 atIndex:0]; [enc setFragmentBuffer:memory offset:0 atIndex:0];
+            [enc setVertexBytes:&state length:sizeof state atIndex:1]; [enc setFragmentBytes:&state length:sizeof state atIndex:1];
+            [enc setVertexBytes:indices length:sizeof indices atIndex:2];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            assert(cb.status==MTLCommandBufferStatusCompleted && !cb.error);
+            [image getBytes:output bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        };
+        std::uint8_t nativeCount[sizeof pixels]={};
+        renderCount(@"gcn_fragment",pixels);
+        renderCount(@"mbcnt_reference",nativeCount);
+        for (unsigned n=0;n<sizeof pixels;++n) assert(std::abs(int(pixels[n])-int(nativeCount[n]))<=1);
+        std::puts("PASS mbcnt low/high on Metal matches native SIMD lane index at every pixel");
     }
 }

@@ -6,6 +6,11 @@
 #include "GCNBC1Shared.inc"
 #undef GCN_BC1_SOURCE
 GCN_SHARED_SOURCE(
+GCN_FN uint gcn_mbcnt(uint mask, uint add, uint lane, bool high) {
+    uint n = high ? (lane > 32u ? lane - 32u : 0u) : lane;
+    uint before = n >= 32u ? 0xffffffffu : (n == 0u ? 0u : (1u << n) - 1u);
+    return gcn_popcount(mask & before) + add;
+}
 GCN_FN uint gcn_f16rtz(float f) {
     uint x = gu(f); uint sign = (x >> 16) & 0x8000u; uint biased = (x >> 23) & 0xffu; uint mant = x & 0x7fffffu;
     if (biased == 0xffu) return sign | 0x7c00u | (mant != 0u ? 0x200u : 0u);
