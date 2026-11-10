@@ -56,7 +56,9 @@ function(maxps4_complete_fexcore_linkage)
     target_compile_features(maxps4-darwin-writer-wake-test PRIVATE cxx_std_23)
     target_include_directories(maxps4-darwin-writer-wake-test PRIVATE
       "${CMAKE_SOURCE_DIR}/FEXCore/include" "${CMAKE_BINARY_DIR}/include")
-    target_link_libraries(maxps4-darwin-writer-wake-test PRIVATE FEXCore FEXCore_Base fmt::fmt)
+    # The header's assertion helpers pull LogManager from Base; its allocator
+    # implementation is in Core, so retain that static archive order.
+    target_link_libraries(maxps4-darwin-writer-wake-test PRIVATE FEXCore_Base FEXCore fmt::fmt)
   endif()
 endfunction()
 cmake_language(DEFER CALL maxps4_complete_fexcore_linkage)
