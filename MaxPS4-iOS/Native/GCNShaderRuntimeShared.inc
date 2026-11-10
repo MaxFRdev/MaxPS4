@@ -355,6 +355,26 @@ GCN_FN void gcn_image_store(GCNMemory M, GCNRes8 t, uint x, uint y, uint4 value,
 }
 // image_get_resinfo: width, height, depth (3D) or slices, and mip levels
 // of T# `t` at mip level `lod`, as integers.
+// Isotropic 2D LOD from a quad's texture-coordinate gradients. No texel fetch.
+GCN_FN float4 gcn_image_lod_2d(GCNRes8 t, GCNRes4 s, bool unorm,
+                              float ux, float vx, float uy, float vy) {
+    uint base = (t.d[3] >> 12) & 15u, last = (t.d[3] >> 16) & 15u;
+    uint w = ((t.d[2] & 0x3fffu) + 1u) >> base;
+    uint h = (((t.d[2] >> 14) & 0x3fffu) + 1u) >> base;
+    if (!unorm) {
+        ux *= float(w > 0u ? w : 1u); uy *= float(w > 0u ? w : 1u);
+        vx *= float(h > 0u ? h : 1u); vy *= float(h > 0u ? h : 1u);
+    }
+    float rho2 = gcn_fmax(ux * ux + vx * vx, uy * uy + vy * vy);
+    int bias = int(s.d[2] & 0x3fffu);
+    if (bias >= 8192) bias -= 16384;
+    float raw = 0.5f * gcn_log2(rho2) + float(bias) / 256.0f;
+    float low = float(s.d[1] & 0xfffu) / 256.0f;
+    float high = float((s.d[1] >> 12) & 0xfffu) / 256.0f;
+    float clamped = gcn_fmin(gcn_fmax(raw, low), high);
+    clamped = gcn_fmin(gcn_fmax(clamped, 0.0f), float(last >= base ? last - base : 0u));
+    return float4(clamped, raw, 0.0f, 0.0f);
+}
 GCN_FN uint4 gcn_image_resinfo(GCNRes8 t, uint lod) {
     uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u; uint d = (t.d[4] & 0x1fffu) + 1u;
     uint base = (t.d[3] >> 12) & 15u; uint last = (t.d[3] >> 16) & 15u; uint type = t.d[3] >> 28;

@@ -153,5 +153,45 @@ int main() {
         // Known values: red = texel x * 16, green = 8 * ddx(u) = 0.5, alpha 1.
         assert(pixels[4 * 5 + 2] == 80 && std::abs(int(pixels[1]) - 128) <= 1 && pixels[3] == 255);
         std::printf("PASS GCN programs translated to Metal match the software renderer (worst channel difference %d)\n", worst);
+        // GET_LOD at the movie-to-3D transition: analytic footprint of eight
+        // texels per pixel, so both results are 3 (displayed divided by eight).
+        arena.code(pixelProgram, {
+            0x100004ff,0x3d000000, // v0 = POS_X / 32
+            0x100206ff,0x3d800000, // v1 = POS_Y / 16
+            0xf1800300,0x00400a00, // image_get_lod v[10:11], v0, s[0:7], s[8:11]
+            0x101414ff,0x3e000000, // v10 *= 1/8
+            0x101616ff,0x3e000000, // v11 *= 1/8
+            0x7e1a02f2,            // v13 = 1
+            0xf800180f,0x0d0c0b0a,0xbf810000});
+        const auto lodPS=translateGCN(arena.memory,pixelProgram,psOptions);
+        assert(lodPS && lodPS.quad);
+        const std::string lodSource=gcnMetalPrelude()+vs.source+lodPS.source+
+            gcnMetalEntryPoints(vs,lodPS,"vs_program","ps_program",psInputAddr,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:lodSource.c_str()] options:options error:&error];
+        if (!library) { std::printf("LOD MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        pipelineDescriptor.vertexFunction=[library newFunctionWithName:@"gcn_vertex"];
+        pipelineDescriptor.fragmentFunction=[library newFunctionWithName:@"gcn_fragment"];
+        pipeline=[device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+        if (!pipeline) { std::printf("LOD pipeline: %s\n",error.localizedDescription.UTF8String); return 1; }
+        state.psUser[2]=255u | (127u<<14);
+        state.psUser[3]=0x90070000;
+        state.psUser[9]=0xfff000;
+        buffer=[queue commandBuffer]; encoder=[buffer renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:pipeline];
+        [encoder setVertexBuffer:memory offset:0 atIndex:0];
+        [encoder setFragmentBuffer:memory offset:0 atIndex:0];
+        [encoder setVertexBytes:&state length:sizeof state atIndex:1];
+        [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
+        [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding]; [buffer commit]; [buffer waitUntilCompleted];
+        assert(buffer.status==MTLCommandBufferStatusCompleted && !buffer.error);
+        [image getBytes:pixels bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        for (unsigned n=0;n<width*height;++n) {
+            assert(std::abs(int(pixels[4*n+2])-96)<=1);
+            assert(std::abs(int(pixels[4*n+1])-96)<=1);
+            assert(pixels[4*n+3]==255);
+        }
+        std::puts("PASS image_get_lod on Metal: clamped and raw 2D LOD = 3 in every pixel");
     }
 }

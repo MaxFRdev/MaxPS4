@@ -21,6 +21,20 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    // The exact device instruction is GET_LOD (0x60), not a reserved MIMG.
+    arena.code(coverageProgram,{0xf1800100,0x00e40a08,0xbf810000});
+    const auto deviceLOD = translateGCN(arena.memory, coverageProgram, ps);
+    assert(deviceLOD && deviceLOD.quad);
+    assert(std::string(gcn_detail::mimg(96)) == "image_get_lod");
+    assert(gcn_detail::mimg(66) == nullptr && gcn_detail::mimg(90) == nullptr);
+    assert(std::string(gcn_detail::mimg(68)) == "image_gather4_l");
+    assert(std::string(gcn_detail::mimg(92)) == "image_gather4_c_l_o");
+    arena.code(coverageProgram,{0xf1800300,0x00400a00,0xf800180f,0x0d0c0b0a,0xbf810000});
+    GCNTranslateOptions lodOptions=ps; lodOptions.name="ps_lod";
+    const auto lodProgram=translateGCN(arena.memory,coverageProgram,lodOptions);
+    assert(lodProgram && lodProgram.quad && lodProgram.colors == 1);
+    GCNTranslateOptions lodVertex=lodOptions; lodVertex.stage=GCNStage::vertex;
+    assert(!translateGCN(arena.memory,coverageProgram,lodVertex));
     // Unknown MIMG operations must retain their raw encoding in device reports.
     arena.code(coverageProgram,{0xf07c0f00,0x00030201,0xbf810000}); // reserved opcode 31
     const auto unknownImage = translateGCN(arena.memory, coverageProgram, ps);
@@ -95,6 +109,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

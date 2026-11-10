@@ -772,7 +772,28 @@ private:
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
         std::string call;
-        if (op >= 32 && op < 64) {
+        if (op == 96) {
+            if (options_.stage != GCNStage::pixel) return fail("image_get_lod outside a pixel program");
+            if (dmask & ~3u) return fail("image_get_lod result mask outside xy");
+            out_.quad = true;
+            res += "GCNRes4 sm = {{" + s(samp) + ", " + s(samp + 1) + ", " + s(samp + 2) + ", " + s(samp + 3) + "}}; ";
+            // Every quad lane participates, including helper lanes. Capture all
+            // coordinates before writing vdata, which may alias vaddr.
+            body_ += "{ " + res;
+            for (unsigned c = 0; c < 2; ++c)
+                for (unsigned lane = 0; lane < 4; ++lane)
+                    body_ += "float q" + std::to_string(c) + std::to_string(lane) +
+                        " = gf(gcn_quad_shuffle(Q, L, " + v(vaddr + c) + ", " + std::to_string(lane) + "u)); ";
+            body_ += "float4 lod = gcn_image_lod_2d(t, sm, " + std::string((w & 0x1000) ? "true" : "false") +
+                ", (L.quadLane & 2u) != 0u ? q03-q02 : q01-q00, (L.quadLane & 2u) != 0u ? q13-q12 : q11-q10, "
+                "(L.quadLane & 1u) != 0u ? q03-q01 : q02-q00, (L.quadLane & 1u) != 0u ? q13-q11 : q12-q10); ";
+            body_ += "if (" + std::string(ex()) + ") { ";
+            for (unsigned n = 0, out = 0; n < 2; ++n)
+                if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(lod[" + std::to_string(n) + "]); ";
+            body_ += "} }";
+            sregs_.insert(126);
+            return out_.error.empty();
+        } else if (op >= 32 && op < 64) {
             res += "GCNRes4 sm = {{" + s(samp) + ", " + s(samp + 1) + ", " + s(samp + 2) + ", " + s(samp + 3) + "}}; ";
             call = "gcn_sample(M, t, sm, " + std::string(((w >> 12) & 1) ? "true" : "false") + ", gf(" + v(vaddr + first) + "), gf(" +
                    v(vaddr + first + 1) + "))";

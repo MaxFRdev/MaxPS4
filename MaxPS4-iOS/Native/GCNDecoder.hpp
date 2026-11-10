@@ -151,11 +151,11 @@ MAXPS4_GCN_TABLE(mtbuf)
     "image_sample_c_lz", "image_sample_o", "image_sample_cl_o", "image_sample_d_o", "image_sample_d_cl_o", \
     "image_sample_l_o", "image_sample_b_o", "image_sample_b_cl_o", "image_sample_lz_o", "image_sample_c_o", \
     "image_sample_c_cl_o", "image_sample_c_d_o", "image_sample_c_d_cl_o", "image_sample_c_l_o", \
-    "image_sample_c_b_o", "image_sample_c_b_cl_o", "image_sample_c_lz_o", "image_gather4", "image_gather4_cl", \
+    "image_sample_c_b_o", "image_sample_c_b_cl_o", "image_sample_c_lz_o", "image_gather4", "image_gather4_cl", nullptr, nullptr, \
     "image_gather4_l", "image_gather4_b", "image_gather4_b_cl", "image_gather4_lz", "image_gather4_c", \
-    "image_gather4_c_cl", "image_gather4_c_l", "image_gather4_c_b", "image_gather4_c_b_cl", "image_gather4_c_lz", \
-    "image_gather4_o", "image_gather4_cl_o", "image_gather4_l_o", "image_gather4_b_o", "image_gather4_b_cl_o", \
-    "image_gather4_lz_o", "image_gather4_c_o", "image_gather4_c_cl_o", "image_gather4_c_l_o", \
+    "image_gather4_c_cl", nullptr, nullptr, "image_gather4_c_l", "image_gather4_c_b", "image_gather4_c_b_cl", "image_gather4_c_lz", \
+    "image_gather4_o", "image_gather4_cl_o", nullptr, nullptr, "image_gather4_l_o", "image_gather4_b_o", "image_gather4_b_cl_o", \
+    "image_gather4_lz_o", "image_gather4_c_o", "image_gather4_c_cl_o", nullptr, nullptr, "image_gather4_c_l_o", \
     "image_gather4_c_b_o", "image_gather4_c_b_cl_o", "image_gather4_c_lz_o", "image_get_lod" }
 MAXPS4_GCN_TABLE(mimg)
 #undef MAXPS4_GCN_ENTRIES

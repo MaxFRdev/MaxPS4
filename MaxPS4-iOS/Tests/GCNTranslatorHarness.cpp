@@ -32,6 +32,37 @@ int main() {
     loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena); loadDepthCompareVS(arena);
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
+    // Analytic 2D footprint: eight texels per pixel gives log2(8) = 3.
+    // Exercise the generated shader, all four lanes and the real quad exchange.
+    {
+        rt::GCNQuad Q;
+        rt::GCNLane lanes[4];
+        std::thread workers[4];
+        for (unsigned lane=0; lane<4; ++lane) {
+            auto& L=lanes[lane]; L.quadLane=lane;
+            L.user[2]=255u | (127u << 14);
+            L.user[3]=0x90070000; // 2D, levels 0..7
+            L.user[9]=0xfff000; // max LOD 15.996
+            L.vinit[0]=bits(float(lane & 1u)/32.0f);
+            L.vinit[1]=bits(float(lane >> 1)/16.0f);
+            workers[lane]=std::thread([&,lane] { rt::ps_lod(lanes[lane], M, Q); });
+        }
+        for (auto& worker:workers) worker.join();
+        for (const auto& L:lanes) assert(L.color[0][0]==3.0f && L.color[0][1]==3.0f);
+        rt::GCNRes8 t{{0,0,255u | (127u << 14),0x90070000,0,0,0,0}};
+        rt::GCNRes4 s{{0,0xfff000,0,0}};
+        auto value=rt::gcn_image_lod_2d(t,s,false,1.0f/32,0,0,1.0f/16);
+        assert(value[0]==3.0f && value[1]==3.0f);
+        s.d[1]=512u | (1024u<<12); // min 2, max 4
+        value=rt::gcn_image_lod_2d(t,s,true,32,0,0,32);
+        assert(value[0]==4.0f && value[1]==5.0f);
+        s.d[2]=0x3f00; // signed bias -1
+        value=rt::gcn_image_lod_2d(t,s,true,8,0,0,8);
+        assert(value[0]==2.0f && value[1]==2.0f);
+        s.d[1]=0xfff000; s.d[2]=0;
+        value=rt::gcn_image_lod_2d(t,s,false,0,0,0,0);
+        assert(value[0]==0 && std::isinf(value[1]) && value[1]<0);
+    }
     // Vertex programs: one lane per vertex, against one interpreter wave.
     {
         GCNWave wave(arena.memory, 3);
