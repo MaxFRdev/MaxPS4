@@ -51,6 +51,12 @@ function(maxps4_complete_fexcore_linkage)
       "${MAXPS4_ROOT}/MaxPS4-iOS/Tests/PS4FEXLinkedExecutionTest.cpp")
     target_compile_features(maxps4-ps4-linked-test PRIVATE cxx_std_23)
     target_link_libraries(maxps4-ps4-linked-test PRIVATE MaxPS4FEXRuntime)
+    add_executable(maxps4-darwin-writer-wake-test
+      "${MAXPS4_ROOT}/MaxPS4-iOS/Tests/FEXDarwinWriterWakeTest.cpp")
+    target_compile_features(maxps4-darwin-writer-wake-test PRIVATE cxx_std_23)
+    target_include_directories(maxps4-darwin-writer-wake-test PRIVATE
+      "${CMAKE_SOURCE_DIR}/FEXCore/include" "${CMAKE_BINARY_DIR}/include")
+    target_link_libraries(maxps4-darwin-writer-wake-test PRIVATE FEXCore FEXCore_Base fmt::fmt)
   endif()
 endfunction()
 cmake_language(DEFER CALL maxps4_complete_fexcore_linkage)

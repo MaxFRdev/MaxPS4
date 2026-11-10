@@ -35,6 +35,7 @@ if [[ "${3:-}" == --host-runtime ]]; then
   SDK=$(xcrun --sdk macosx --show-sdk-path)
   SYSTEM=Darwin
   DEPLOYMENT=15.0
+  TARGETS+=(maxps4-darwin-writer-wake-test)
 fi
 python3 -B "$ROOT/MaxPS4-iOS/Tests/FEXDispatcherInitPatchTest.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-dispatcher-init.py" "$FEX"
@@ -42,6 +43,8 @@ python3 -B "$ROOT/MaxPS4-iOS/Tests/FEXJITProviderPatchTest.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-jit-provider.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-lookup-cache.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-code-cache-reuse.py" "$FEX"
+python3 -B "$ROOT/MaxPS4-iOS/Tests/FEXDarwinWakePatchTest.py" "$FEX"
+python3 -B "$ROOT/scripts/patch-fexcore-darwin-wake.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-ios-code-size.py" "$FEX"
 python3 -B "$ROOT/scripts/patch-fexcore-ps4-cpuid.py" "$FEX"
 # Patch only the disposable dependency checkout. No replacement symbols are defined.
@@ -132,6 +135,7 @@ if [[ "$RUNTIME" == ON ]]; then
     exit 1
   fi
   if [[ "$SYSTEM" == Darwin ]]; then
+    python3 "$ROOT/scripts/run-bounded.py" 30 "$OUT/darwin-writer-wake-tests.txt" "$OUT/Bin/maxps4-darwin-writer-wake-test"
     python3 "$ROOT/scripts/run-bounded.py" 60 "$OUT/ps4-linked-tests.txt" "$OUT/Bin/maxps4-ps4-linked-test"
     python3 "$ROOT/scripts/run-bounded.py" 10 "$OUT/fixture-export.txt" "$OUT/Bin/maxps4-ps4-linked-test" \
       "$OUT/ps4-libkernel-demo.elf" "$OUT/ps4-libkernel-combined.elf"
