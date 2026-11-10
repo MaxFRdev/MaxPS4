@@ -227,5 +227,37 @@ int main() {
         const int gatherBGRA[4]={80,144,128,64};
         for (unsigned n=0;n<width*height*4;++n) assert(std::abs(int(pixels[n])-gatherBGRA[n%4])<=1);
         std::puts("PASS image_gather4_lz_o on Metal: channel, tap order and signed offset at every pixel");
+        // Real typed vertex fetch. The descriptor deliberately says RGBA8;
+        // the exact device instruction must instead load FLOAT32x4 positions.
+        arena.code(0x11b00,{0x7e020300,0xebf33000,0x80030f01,0xf80008cf,0x1211100f,0xbf810000});
+        arena.code(0x11b80,{0x7e080280,0x7e0a02f2,0xf800180f,0x05040504,0xbf810000});
+        const auto typedVS=translateGCN(arena.memory,0x11b00,vsOptions);
+        const auto greenPS=translateGCN(arena.memory,0x11b80,psOptions);
+        assert(typedVS && greenPS);
+        const std::string typedSource=gcnMetalPrelude()+typedVS.source+greenPS.source+
+            gcnMetalEntryPoints(typedVS,greenPS,"vs_program","ps_program",0,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:typedSource.c_str()] options:options error:&error];
+        if (!library) { std::printf("typed MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        pipelineDescriptor.vertexFunction=[library newFunctionWithName:@"gcn_vertex"];
+        pipelineDescriptor.fragmentFunction=[library newFunctionWithName:@"gcn_fragment"];
+        pipeline=[device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+        if (!pipeline) { std::printf("typed pipeline: %s\n",error.localizedDescription.UTF8String); return 1; }
+        std::memcpy(memory.contents,arena.bytes.data(),arena.bytes.size());
+        state.vsUser[12]=0x10e00; state.vsUser[13]=16u<<16;
+        state.vsUser[14]=3; state.vsUser[15]=0x50fac;
+        buffer=[queue commandBuffer]; encoder=[buffer renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:pipeline];
+        [encoder setVertexBuffer:memory offset:0 atIndex:0];
+        [encoder setFragmentBuffer:memory offset:0 atIndex:0];
+        [encoder setVertexBytes:&state length:sizeof state atIndex:1];
+        [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
+        [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding]; [buffer commit]; [buffer waitUntilCompleted];
+        assert(buffer.status==MTLCommandBufferStatusCompleted && !buffer.error);
+        [image getBytes:pixels bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        for (unsigned n=0;n<width*height;++n)
+            assert(pixels[4*n]==0 && pixels[4*n+1]==255 && pixels[4*n+2]==0 && pixels[4*n+3]==255);
+        std::puts("PASS typed vertex fetch on Metal: instruction format overrides descriptor at every pixel");
     }
 }

@@ -281,7 +281,7 @@ private:
         case GCNEncoding::vop1: case GCNEncoding::vop2: case GCNEncoding::vopc: case GCNEncoding::vop3: return vector(in);
         case GCNEncoding::vintrp: return vintrp(in);
         case GCNEncoding::ds: return ds(in);
-        case GCNEncoding::mubuf: return mubuf(in);
+        case GCNEncoding::mubuf: case GCNEncoding::mtbuf: return mubuf(in);
         case GCNEncoding::mimg: return mimg(in);
         case GCNEncoding::exp: return exportOp(in);
         default: return false;
@@ -714,6 +714,9 @@ private:
         const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
         if ((w >> 15) & 1) return fail("addr64 buffer access");
         const unsigned op = i.opcode;
+        const bool typed = i.encoding == GCNEncoding::mtbuf;
+        if (typed && op > 3) return fail("typed buffer stores unsupported");
+        if (typed && (w1 & 0x800000)) return fail("typed buffer fault-status return unsupported");
         unsigned count;
         const bool store = (op >= 4 && op <= 7) || op == 24 || op == 26 || (op >= 28 && op <= 31);
         if (op <= 3) count = op + 1;
@@ -722,7 +725,13 @@ private:
         else if (op == 13 || op == 29) count = 2; else if (op == 14 || op == 30) count = 4; else if (op == 15 || op == 31) count = 3;
         else return fail("unsupported buffer access");
         if (store && options_.stage != GCNStage::compute) return fail("buffer store outside a compute program");
-        const std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + s(rsrc + 3) + "}}; ";
+        std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + s(rsrc + 3) + "}}; ";
+        if (typed) {
+            const unsigned dfmt=(w>>19)&15, nfmt=(w>>23)&7;
+            if (!(dfmt==1 || dfmt==2 || dfmt==3 || dfmt==4 || dfmt==5 || (dfmt>=10 && dfmt<=14)))
+                return fail("typed buffer data format " + std::to_string(dfmt));
+            res += "r.d[3] = (r.d[3] & ~0x7f000u) | " + std::to_string((dfmt<<15)|(nfmt<<12)) + "u; ";
+        }
         const std::string index = idxen ? v(vaddr) : "0u", voffset = offen ? v(vaddr + (idxen ? 1 : 0)) : "0u";
         const std::string args = index + ", " + voffset + ", " + scalar(w1 >> 24, i) + ", " + std::to_string(w & 0xfff) + "u, " +
                                  (idxen ? "true" : "false") + ", " + (offen ? "true" : "false");

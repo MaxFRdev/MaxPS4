@@ -21,6 +21,18 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    arena.code(0x11b00,{0xebf33000,0x80030f01,0xf80008cf,0x1211100f,0xbf810000});
+    GCNTranslateOptions typedOptions; typedOptions.stage=GCNStage::vertex; typedOptions.name="vs_typed";
+    const auto typedProgram=translateGCN(arena.memory,0x11b00,typedOptions);
+    assert(typedProgram && typedProgram.position);
+    for (unsigned op=0;op<4;++op) {
+        arena.code(0x11b40,{0xebf03000|(op<<16),0x80030f01,0xbf810000});
+        assert(translateGCN(arena.memory,0x11b40,typedOptions));
+    }
+    arena.code(0x11b40,{0xe8040000,0x80030f01,0xbf810000});
+    assert(!translateGCN(arena.memory,0x11b40,typedOptions)); // typed stores remain refused
+    arena.code(0x11b40,{0xebf33000,0x80830f01,0xbf810000});
+    assert(!translateGCN(arena.memory,0x11b40,typedOptions)); // TFE adds a status result, still unsupported
     arena.code(0x11a00,{0xf8001881,0x01010100,0xbf810000});
     GCNTranslateOptions depthExportOptions=ps; depthExportOptions.name="ps_depth_export";
     const auto depthExport=translateGCN(arena.memory,0x11a00,depthExportOptions);
@@ -125,6 +137,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

@@ -255,7 +255,7 @@ private:
         case GCNEncoding::vop2: case GCNEncoding::vop1: case GCNEncoding::vopc: case GCNEncoding::vop3: return vector(i);
         case GCNEncoding::vintrp: return vintrp(i);
         case GCNEncoding::ds: return ds(i);
-        case GCNEncoding::mubuf: return mubuf(i);
+        case GCNEncoding::mubuf: case GCNEncoding::mtbuf: return mubuf(i);
         case GCNEncoding::mimg: return mimg(i);
         case GCNEncoding::exp: return exportOp(i);
         default: return false;
@@ -705,7 +705,11 @@ private:
         const std::uint32_t stride = (d[1] >> 16) & 0x3fff, records = d[2];
         const std::uint32_t soffset = scalar(w1 >> 24, i), instOffset = w & 0xfff;
         const unsigned dst_sel[4] = {d[3] & 7, (d[3] >> 3) & 7, (d[3] >> 6) & 7, (d[3] >> 9) & 7};
-        const unsigned nfmt = (d[3] >> 12) & 7, dfmt = (d[3] >> 15) & 15;
+        const bool typed = i.encoding == GCNEncoding::mtbuf;
+        if (typed && i.opcode > 3) return fail("typed buffer stores unsupported");
+        if (typed && (w1 & 0x800000)) return fail("typed buffer fault-status return unsupported");
+        const unsigned nfmt = typed ? (w >> 23) & 7 : (d[3] >> 12) & 7;
+        const unsigned dfmt = typed ? (w >> 19) & 15 : (d[3] >> 15) & 15;
         const unsigned op = i.opcode;
         const bool format = op <= 7, store = (op >= 4 && op <= 7) || (op >= 24 && op <= 31);
         unsigned count;

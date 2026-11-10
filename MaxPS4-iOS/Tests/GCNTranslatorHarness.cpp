@@ -33,6 +33,29 @@ int main() {
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     {
+        arena.code(0x11b00,{0xebf33000,0x80030f01,0xf80008cf,0x1211100f,0xbf810000});
+        const float values[4]={1.25f,-2.5f,3.75f,1.0f};
+        for (unsigned n=0;n<4;++n) arena.put(0x15230+4*n,bits(values[n]));
+        rt::GCNLane L;
+        GCNWave wave(arena.memory,1);
+        L.user[12]=wave.s[12]=0x15200;
+        L.user[13]=wave.s[13]=32u<<16;
+        L.user[14]=wave.s[14]=2;
+        L.user[15]=wave.s[15]=0x50fac; // descriptor says RGBA8; instruction overrides FLOAT32x4
+        L.vinit[1]=wave.v(1,0)=1;
+        L.vinit[2]=wave.v(2,0)=16;
+        assert(wave.run(0x11b00));
+        rt::vs_typed(L,M,unusedQuad);
+        for (unsigned n=0;n<4;++n) {
+            assert(L.pos[n]==values[n]);
+            assert(gcn_detail::f32(wave.exports[0].value[n][0])==values[n]);
+        }
+        assert(wave.s[15]==0x50fac); // instruction must not modify the resource descriptor
+        L.vinit[1]=2; // descriptor bounds, no access to a third record
+        rt::vs_typed(L,M,unusedQuad);
+        for (unsigned n=0;n<4;++n) assert(L.pos[n]==0);
+    }
+    {
         rt::GCNLane L;
         L.vinit[0]=bits(0.95f);
         rt::ps_depth_export(L,M,unusedQuad);
