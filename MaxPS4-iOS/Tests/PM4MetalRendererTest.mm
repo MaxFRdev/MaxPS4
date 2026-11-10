@@ -307,6 +307,29 @@ int main() {
             };
             const std::uint8_t green[4] = {0, 255, 0, 255}, red[4] = {0, 0, 255, 255};
             {
+                // Raster depth 0.6 would hide the following red draw at 0.9.
+                // Explicit MRTZ depth 0.95 must instead let red pass LESS.
+                Scene scene;
+                constexpr uint64_t exportedDepthPS=0x10400;
+                scene.arena.code(exportedDepthPS,{0x7e0002ff,bits(0.95f),0xf8001881,0x01010100,0xbf810000});
+                scene.depthBufferOn();
+                scene.st.set(0x69,0x200,{2|4|(1<<4)});
+                scene.st.set(0x69,0x8e,{0});
+                scene.ps(exportedDepthPS); scene.triangle(0.2f,forward);
+                scene.st.set(0x69,0x8e,{0xf});
+                scene.ps(redPS); scene.triangle(0.8f,forward);
+                check("shader depth export in depth-only pass",scene,red,2,1);
+                // Also exercise colour and explicit depth from the same shader.
+                Scene coloured;
+                coloured.arena.code(exportedDepthPS,{0x7e0002ff,bits(0.95f),0xf8000081,0x01010100,
+                    0x7e080280,0x7e0a02f2,0xf800180f,0x05040504,0xbf810000});
+                coloured.depthBufferOn();
+                coloured.st.set(0x69,0x200,{2|4|(1<<4)});
+                coloured.ps(exportedDepthPS); coloured.triangle(0.2f,forward);
+                coloured.ps(redPS); coloured.triangle(0.8f,forward);
+                check("shader colour and depth export",coloured,red,2,0);
+            }
+            {
                 // A near triangle hides a far one drawn after it (LESS, written).
                 Scene scene;
                 scene.depthBufferOn();

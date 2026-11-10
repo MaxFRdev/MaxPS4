@@ -65,6 +65,7 @@ struct GCNLane {
     float4 pos, param[32], color[8];
     uint colorWritten = 0; // MRT bits
     bool killed = false;
+    float depth = 0;
 };
 // Lockstep exchange among the four lanes of a quad, each on its own thread.
 struct GCNQuad {

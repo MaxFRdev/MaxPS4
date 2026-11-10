@@ -116,8 +116,8 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
     NSError* failure = nil;
     descriptor.depthAttachmentPixelFormat = depth;
-    // Without colour, the pixel program only matters when it may discard.
-    const bool fragment = d.colour || ps.mayKill;
+    // Depth-only shaders may explicitly replace the rasterized depth.
+    const bool fragment = d.colour || ps.mayKill || ps.depth;
     MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
     color.pixelFormat = format;
     color.writeMask = ((d.mask & 1) ? MTLColorWriteMaskRed : 0) | ((d.mask & 2) ? MTLColorWriteMaskGreen : 0) |

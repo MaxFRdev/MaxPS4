@@ -21,6 +21,16 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    arena.code(0x11a00,{0xf8001881,0x01010100,0xbf810000});
+    GCNTranslateOptions depthExportOptions=ps; depthExportOptions.name="ps_depth_export";
+    const auto depthExport=translateGCN(arena.memory,0x11a00,depthExportOptions);
+    assert(depthExport && depthExport.depth && !depthExport.colors);
+    const uint32_t emptyInputs[32]={};
+    const auto depthEntry=gcnMetalEntryPoints(embedded,depthExport,"vs_embedded","ps_depth_export",0,emptyInputs);
+    assert(depthEntry.find("float depth [[depth(any)]]")!=std::string::npos);
+    assert(depthEntry.find("float4 color [[color(0)]]")==std::string::npos);
+    arena.code(0x11a20,{0xf8001883,0x01010100,0xbf810000});
+    assert(!translateGCN(arena.memory,0x11a20,depthExportOptions)); // stencil remains unsupported
     arena.code(0x11900,{0xf15c0200,0x0040040c,0xf800180f,0x07060504,0xbf810000});
     GCNTranslateOptions gatherOptions=ps; gatherOptions.name="ps_gather_lz";
     const auto gatherProgram=translateGCN(arena.memory,0x11900,gatherOptions);
@@ -115,6 +125,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

@@ -33,6 +33,16 @@ int main() {
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     {
+        rt::GCNLane L;
+        L.vinit[0]=bits(0.95f);
+        rt::ps_depth_export(L,M,unusedQuad);
+        assert(L.depth==0.95f && L.colorWritten==0 && !L.killed);
+        rt::GCNLane inactive; inactive.exec=false; inactive.depth=0.4f;
+        inactive.vinit[0]=bits(0.95f);
+        rt::ps_depth_export(inactive,M,unusedQuad);
+        assert(inactive.depth==0.4f && inactive.killed);
+    }
+    {
         // Exact device operation: green component, signed x offset -1.
         arena.code(0x11900,{0xf15c0200,0x0040040c,0xf800180f,0x07060504,0xbf810000});
         for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)

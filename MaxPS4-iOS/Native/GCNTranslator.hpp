@@ -42,7 +42,7 @@ struct GCNTranslation {
     std::uint32_t params = 0;    // vertex: parameters exported (bit N)
     std::uint32_t attributes = 0, flat = 0; // pixel: attributes read, of which flat
     std::uint8_t colors = 0;     // pixel: MRTs exported
-    bool position = false, quad = false, mayKill = false;
+    bool position = false, quad = false, mayKill = false, depth = false;
     bool stores = false;         // compute: writes guest memory
     // pixel: the scalar loads, each with `2 + count` words at `offset` of the
     // draw's table of scalar values (address, then words: gcn_site_hit).
@@ -861,6 +861,12 @@ private:
             body_ += "if (" + E + ") { L.color[" + std::to_string(target) + "] = " + value + "; L.colorWritten |= " +
                      std::to_string(1u << target) + "u; }";
             if (done) body_ += " else L.killed = true;";
+        } else if (target == 8) {
+            if (options_.stage != GCNStage::pixel || compressed || enable != 1)
+                return fail("unsupported depth/stencil export mask");
+            out_.depth = true;
+            body_ += "if (" + E + ") L.depth = gf(" + r[0] + ");";
+            if (done) body_ += " else L.killed = true;";
         } else if (target == 9) {
             if (done) body_ += "if (!" + E + ") L.killed = true;";
         } else if (target == 12) { out_.position = true; body_ += "L.pos = " + value + ";"; }
@@ -981,7 +987,7 @@ struct GCNQuad { uint unused; };
 struct GCNLane {
     uint user[20]; uint vinit[24]; bool exec; uint quadLane;
     float4 attr[GCN_ATTRS];
-    float4 pos; float4 param[GCN_PARAMS]; float4 color[GCN_COLORS]; uint colorWritten; bool killed;
+    float4 pos; float4 param[GCN_PARAMS]; float4 color[GCN_COLORS]; uint colorWritten; bool killed; float depth;
 };
 GCN_FN void gcn_clear(thread GCNLane& L) {
     for (uint k = 0u; k < 20u; ++k) L.user[k] = 0u;
@@ -989,7 +995,7 @@ GCN_FN void gcn_clear(thread GCNLane& L) {
     for (uint k = 0u; k < GCN_ATTRS; ++k) L.attr[k] = float4(0.0f);
     for (uint k = 0u; k < GCN_PARAMS; ++k) L.param[k] = float4(0.0f);
     for (uint k = 0u; k < GCN_COLORS; ++k) L.color[k] = float4(0.0f);
-    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false;
+    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false; L.depth = 0.0f;
 }
 // gcn_clear without attr/param/color: zeroing those arrays for every pixel
 // was most of a full-screen draw's GPU time (GCNShaderCostMetalTest). Entry
@@ -997,7 +1003,7 @@ GCN_FN void gcn_clear(thread GCNLane& L) {
 GCN_FN void gcn_lane_init(thread GCNLane& L) {
     for (uint k = 0u; k < 20u; ++k) L.user[k] = 0u;
     for (uint k = 0u; k < 24u; ++k) L.vinit[k] = 0u;
-    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false;
+    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false; L.depth = 0.0f;
 }
 // Per-draw state at buffer(1): guest memory at buffer(0) is either one window
 // starting at guest address `base` (rangeCount 0) or rangeCount copied ranges
@@ -1219,9 +1225,15 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         if ((vs.params >> p) & 1) s += "        o.p" + std::to_string(p) + " = got[1].p" + std::to_string(p) + " + got[2].p" + std::to_string(p) + " - got[0].p" + std::to_string(p) + ";\n";
     s += "    }\n"
          "    if ((D.flags & GCN_DRAW_FLIP_Y) != 0u) o.position.y = -o.position.y;\n"
-         "    return o;\n}\n"
-         "struct GCNFragment { float4 color [[color(0)]]; uint coverage [[sample_mask]]; };\n";
-    s += std::string("fragment ")+(ps.mayKill ? "GCNFragment" : "float4")+
+         "    return o;\n}\n";
+    const bool structured = ps.mayKill || ps.depth;
+    const bool fragmentColor = !ps.depth || (ps.colors & 1);
+    s += "struct GCNFragment { ";
+    if (fragmentColor) s += "float4 color [[color(0)]]; ";
+    if (ps.mayKill) s += "uint coverage [[sample_mask]]; ";
+    if (ps.depth) s += "float depth [[depth(any)]]; ";
+    s += "};\n";
+    s += std::string("fragment ")+(structured ? "GCNFragment" : "float4")+
          " gcn_fragment(GCNVaryings in [[stage_in]], uint sampleCoverage [[sample_mask]],\n"
          "    " + std::string(ps.sites.empty() ? "" : "constant uint* U [[buffer(4)]], ") +
          "device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]] GCN_SLOT_PARAMS) {\n"
@@ -1231,6 +1243,7 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     for (unsigned c = 0; c < 8; ++c)
         if (c == 0 || ((ps.colors >> c) & 1)) s += "    L.color[" + std::to_string(c) + "] = float4(0.0f);\n";
     s += "    for (uint k = 0u; k < 17u; ++k) L.user[k] = D.psUser[k];\n"
+         "    L.depth = in.position.z;\n"
          "    L.exec = covered;\n"
          "    L.quadLane = (uint(in.position.x) & 1u) | ((uint(in.position.y) & 1u) << 1);\n";
     for (unsigned a = 0; a < 32; ++a) {
@@ -1262,8 +1275,13 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     s += "    " + psName + "(L, M, Q);\n";
     // An ordinary shader's saved-EXEC/WQM/restore sequence cannot kill a
     // covered pixel. Do not ask Metal to suppress helpers again at export.
-    s += ps.mayKill ? "    return { L.color[0], L.killed ? 0u : 0xffffffffu };\n}\n"
-                    : "    return L.color[0];\n}\n";
+    if (structured) {
+        s += "    return { ";
+        if (fragmentColor) s += "L.color[0], ";
+        if (ps.mayKill) s += "L.killed ? 0u : 0xffffffffu, ";
+        if (ps.depth) s += "L.depth, ";
+        s += "};\n}\n";
+    } else s += "    return L.color[0];\n}\n";
     if (nativeTextures) {
         auto replace = [&](const std::string& from, const std::string& to) {
             for (std::size_t at = 0; (at = s.find(from, at)) != std::string::npos; at += to.size()) s.replace(at, from.size(), to);
