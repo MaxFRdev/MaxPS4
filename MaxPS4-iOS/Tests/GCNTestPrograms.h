@@ -27,6 +27,20 @@ struct Arena {
 };
 inline std::uint32_t bits(float f) { std::uint32_t v; std::memcpy(&v, &f, 4); return v; }
 
+constexpr std::uint64_t privateLDSPs=0x1a000;
+inline void loadPrivateLDSPs(Arena& arena) {
+    // Two lane-private dwords, live across a branch and a rebuilt address.
+    arena.code(privateLDSPs,{
+        0xbefc03ff,65536,
+        0xd2480002,0x000100c1,0x460404c1,0x34040482,
+        0xd8340000,0x00000002,0xd8340100,0x00000102,
+        0xbf820001,0xbf800000,
+        0xd2480003,0x000100c1,0x460606c1,0x34060682,
+        0xbefc03ff,65536,
+        0xd8d80000,0x04000003,0xd8d80100,0x05000003,
+        0xf8001803,0x00000504,0xbf810000});
+}
+
 // shadPS4's embedded full-screen VS (one lane per vertex id).
 constexpr std::uint64_t embeddedVS = 0x10000;
 inline void loadEmbeddedVS(Arena& arena) {

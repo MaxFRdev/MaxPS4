@@ -21,6 +21,23 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    loadPrivateLDSPs(arena);
+    GCNTranslateOptions privateOptions=ps; privateOptions.name="ps_private_lds";
+    const auto privateLDS=translateGCN(arena.memory,privateLDSPs,privateOptions);
+    assert(privateLDS && privateLDS.source.find("privateLDS0")!=std::string::npos && privateLDS.source.find("privateLDS1")!=std::string::npos);
+    for (const auto& mutation : std::vector<std::pair<unsigned,uint32_t>>{
+        {5,0x34040483}, // address stride 8 can alias another slot
+        {8,0xd8340104}, // unproved LDS offset
+        {1,512},       // different M0 limit
+        {17,512},      // different limit before reads
+        {6,0xd8d80000}, // read before the entry-block store
+        {6,0xd8360000}  // GDS flag
+    }) {
+        loadPrivateLDSPs(arena);
+        arena.put(privateLDSPs+4*mutation.first,mutation.second);
+        assert(!translateGCN(arena.memory,privateLDSPs,privateOptions));
+    }
+    loadPrivateLDSPs(arena);
     arena.code(0x11c00,{0xd2480022,0x000100c1,0xbf810000});
     const auto exactMbcnt=translateGCN(arena.memory,0x11c00,ps);
     assert(exactMbcnt && exactMbcnt.laneIndex);
@@ -144,6 +161,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source << privateLDS.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

@@ -11,8 +11,8 @@
 // Execution model (see GCNShaderRuntime.hpp): one lane per invocation with
 // local scalar registers; lane masks keep this lane's bit in bit 0; branches
 // on VCC/EXEC, WQM and SCC of 64-bit mask operations are decided per 2x2
-// quad. Not translated, reported as errors: LDS (other than ds_swizzle in
-// quad mode), memory stores outside compute programs, lane counts of masks,
+// quad. Not translated, reported as errors: general LDS (except proved
+// lane-private scratch and quad swizzles), memory stores outside compute programs, lane counts of masks,
 // s_getpc. A compute program runs one lane per thread: user SGPRs, then the
 // enabled thread group ids, in L.user; thread ids in v0-v2.
 #include "GCNDecoder.hpp"
@@ -70,6 +70,7 @@ public:
                       (i.encoding==GCNEncoding::sopp && i.opcode==0))) break;
                 pc+=4*i.size;
             }
+            preparePrivateLDS(entry);
             emit(entry);
             out_.mayKill=execMayKill_ || (restoresEntryExec_ &&
                 (scalarWrites_[savedEntryExec_]!=1 || scalarWrites_[savedEntryExec_+1]!=1));
@@ -98,6 +99,97 @@ private:
     std::map<std::uint64_t, Known> incoming_;
     std::map<std::array<std::uint32_t, 6>, std::uint32_t> loads_; // Same load, same site.
     bool inOrder_ = false;
+    unsigned privateLDSSlots_ = 0;
+    // Conservative VGPR def tracking for the lane-address proof. Unknown or
+    // multi-result operations may invalidate a candidate, never prove one.
+    static bool writesVGPR(const GCNInstruction& i, unsigned reg) {
+        const auto range=[reg](unsigned first,unsigned count) { return reg>=first && reg-first<count; };
+        const auto name=gcnMnemonic(i);
+        if(name.find("movrel")!=std::string::npos) return true;
+        const unsigned width=name.empty() || name.find("64")!=std::string::npos ? 2u : 1u;
+        switch(i.encoding) {
+        case GCNEncoding::sop1: case GCNEncoding::sop2: case GCNEncoding::sopk:
+        case GCNEncoding::sopc: case GCNEncoding::sopp: case GCNEncoding::smrd:
+        case GCNEncoding::vopc: case GCNEncoding::exp: return false;
+        case GCNEncoding::vop1: return i.opcode!=2 && range((i.word0>>17)&255,width);
+        case GCNEncoding::vop2: return i.opcode!=1 && range((i.word0>>17)&255,width);
+        case GCNEncoding::vop3: return i.opcode>=256 && i.opcode!=386 && range(i.word0&255,width);
+        case GCNEncoding::vintrp: return range((i.word0>>18)&255,1);
+        case GCNEncoding::mubuf: case GCNEncoding::mtbuf:
+            return i.opcode<=15 && !(i.opcode>=4 && i.opcode<=7) && range((i.word1>>8)&255,4);
+        case GCNEncoding::mimg: return !(i.opcode>=8 && i.opcode<=11) && range((i.word1>>8)&255,4);
+        case GCNEncoding::ds: return i.opcode!=13 && range(i.word1>>24,4);
+        default: return true;
+        }
+    }
+    bool laneByteAddress(std::uint64_t pc,unsigned reg) const {
+        auto upper=leaders_.upper_bound(pc);
+        if (upper==leaders_.begin()) return false;
+        const auto start=*--upper;
+        unsigned step=0;
+        auto it=code_.lower_bound(pc);
+        while(it!=code_.begin()) {
+            --it;
+            if(it->first<start) break;
+            const auto& i=it->second.i;
+            // No change to EXEC may revive an address that this lane did not set.
+            if ((i.encoding==GCNEncoding::sop1 || i.encoding==GCNEncoding::sop2 || i.encoding==GCNEncoding::sopk) &&
+                ((i.word0>>16)&127)>=126) return false;
+            if ((i.encoding==GCNEncoding::vopc || (i.encoding==GCNEncoding::vop3 && i.opcode<256)) &&
+                ((i.opcode>>4)&1)) return false;
+            if (!writesVGPR(i,reg)) continue;
+            if (step==0 && i.encoding==GCNEncoding::vop2 &&
+                i.word0==(0x34000000u|(reg<<17)|(reg<<9)|130u)) { ++step; continue; }
+            if (step==1 && i.encoding==GCNEncoding::vop2 &&
+                i.word0==(0x46000000u|(reg<<17)|(reg<<9)|193u)) { ++step; continue; }
+            return step==2 && i.word0==(0xd2480000u|reg) && i.word1==0x000100c1u;
+        }
+        return false;
+    }
+    bool fullLDSLimit(std::uint64_t pc) const {
+        auto upper=leaders_.upper_bound(pc);
+        if(upper==leaders_.begin()) return false;
+        const auto start=*--upper;
+        auto it=code_.lower_bound(pc);
+        while(it!=code_.begin()) {
+            --it; if(it->first<start) break;
+            const auto& i=it->second.i;
+            const auto name=gcnMnemonic(i);
+            if(name.find("movrel")!=std::string::npos) return false;
+            unsigned dst=128,count=1;
+            if(i.encoding==GCNEncoding::sop1 || i.encoding==GCNEncoding::sop2 || i.encoding==GCNEncoding::sopk) {
+                dst=(i.word0>>16)&127; count=name.find("64")!=std::string::npos ? 2 : 1;
+            } else if(i.encoding==GCNEncoding::smrd) {
+                dst=(i.word0>>15)&127; count=16; // conservative for all scalar load widths
+            } else if((i.encoding==GCNEncoding::vop1 && i.opcode==2) ||
+                      (i.encoding==GCNEncoding::vop2 && i.opcode==1)) dst=(i.word0>>17)&127;
+            else if(i.encoding==GCNEncoding::vop3 && i.opcode==386) dst=i.word0&127;
+            else if(i.encoding==GCNEncoding::vop3 && i.opcode<256) { dst=(i.word0>>8)&127; count=2; }
+            if(dst<=124 && 124-dst<count)
+                return i.word0==0xbefc03ffu && i.literal==65536u;
+        }
+        return false;
+    }
+    void preparePrivateLDS(std::uint64_t entry) {
+        unsigned stored=0,used=0;
+        const auto next=leaders_.upper_bound(entry);
+        const auto entryEnd=next==leaders_.end() ? ~std::uint64_t(0) : *next;
+        for (const auto& item:code_) {
+            const auto pc=item.first; const auto& i=item.second.i;
+            if(i.encoding!=GCNEncoding::ds || (i.opcode==53 && (i.word0&0x8000))) continue;
+            const unsigned offset=i.word0&0xffff;
+            if(options_.stage!=GCNStage::pixel || (i.opcode!=13 && i.opcode!=54) || (i.word0&0x30000) ||
+                (offset!=0 && offset!=256) || !laneByteAddress(pc,i.word1&255) || !fullLDSLimit(pc)) return;
+            const unsigned bit=offset==0 ? 1u : 2u;
+            if(i.opcode==13) {
+                // Stores before the entry block's first branch dominate all reads.
+                if(pc<entry || pc>=entryEnd) return;
+                stored|=bit;
+            } else if(!(stored&bit)) return;
+            used|=bit;
+        }
+        privateLDSSlots_=used;
+    }
     void flowTo(std::uint64_t target) {
         const auto found = incoming_.find(target);
         if (found == incoming_.end()) { incoming_[target] = known_; return; }
@@ -261,6 +353,8 @@ private:
         }
         for (const auto n : vregs_)
             head += "    uint v" + std::to_string(n) + " = " + (n < 24 ? "L.vinit[" + std::to_string(n) + "]" : std::string("0u")) + ";\n";
+        for(unsigned slot=0;slot<2;++slot) if(privateLDSSlots_&(1u<<slot))
+            head += "    uint privateLDS"+std::to_string(slot)+" = 0u;\n";
         // Blocks are numbered by address: a fetch shader below the program
         // comes first, so execution starts at the entry's own block.
         head += "    bool scc = false; uint pc = " + std::to_string(index(entry)) + "u; bool running = true;\n"
@@ -280,7 +374,7 @@ private:
         case GCNEncoding::smrd: return smrd(in);
         case GCNEncoding::vop1: case GCNEncoding::vop2: case GCNEncoding::vopc: case GCNEncoding::vop3: return vector(in);
         case GCNEncoding::vintrp: return vintrp(in);
-        case GCNEncoding::ds: return ds(in);
+        case GCNEncoding::ds: return ds(in,pc);
         case GCNEncoding::mubuf: case GCNEncoding::mtbuf: return mubuf(in);
         case GCNEncoding::mimg: return mimg(in);
         case GCNEncoding::exp: return exportOp(in);
@@ -699,9 +793,17 @@ private:
         sregs_.insert(126);
         return true;
     }
-    bool ds(const Inst& in) {
+    bool ds(const Inst& in, std::uint64_t pc) {
         const GCNInstruction& i = in.i;
         const unsigned offset = i.word0 & 0xffff;
+        if(privateLDSSlots_ && (i.opcode==13 || i.opcode==54) && laneByteAddress(pc,i.word1&255)) {
+            const std::string slot="privateLDS"+std::to_string(offset==0 ? 0 : 1);
+            body_ += std::string("if (")+ex()+") ";
+            if(i.opcode==13) body_ += slot+" = "+v((i.word1>>8)&255)+";";
+            else body_ += v(i.word1>>24)+" = "+slot+";";
+            sregs_.insert(126);
+            return true;
+        }
         if (i.opcode != 53 || !(offset & 0x8000)) return fail("LDS access other than a quad swizzle");
         if (options_.stage != GCNStage::pixel) return fail("quad swizzle outside a pixel program");
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;

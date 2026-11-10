@@ -291,5 +291,24 @@ int main() {
         renderCount(@"mbcnt_reference",nativeCount);
         for (unsigned n=0;n<sizeof pixels;++n) assert(std::abs(int(pixels[n])-int(nativeCount[n]))<=1);
         std::puts("PASS mbcnt low/high on Metal matches native SIMD lane index at every pixel");
+        loadPrivateLDSPs(arena);
+        std::uint32_t privateWords[25]={};
+        assert(arena.memory.read(privateLDSPs,privateWords,sizeof privateWords));
+        arena.code(pixelProgram,{0x100000ff,bits(1.0f/width),0x100202ff,bits(1.0f/height)});
+        for(unsigned n=0;n<25;++n) arena.put(pixelProgram+16+4*n,privateWords[n]);
+        const auto privatePS=translateGCN(arena.memory,pixelProgram,psOptions);
+        assert(privatePS && privatePS.source.find("privateLDS0")!=std::string::npos);
+        const std::string privateSource=gcnMetalPrelude()+typedVS.source+privatePS.source+
+            gcnMetalEntryPoints(typedVS,privatePS,"vs_program","ps_program",0x300,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:privateSource.c_str()] options:options error:&error];
+        if(!library) { std::printf("private LDS MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        renderCount(@"gcn_fragment",pixels);
+        for(unsigned y=0;y<height;++y) for(unsigned x=0;x<width;++x) {
+            const unsigned at=4*(y*width+x);
+            assert(std::abs(int(pixels[at+2])-int(std::lround(255.0f*(float(x)+0.5f)/width)))<=1);
+            assert(std::abs(int(pixels[at+1])-int(std::lround(255.0f*(float(y)+0.5f)/height)))<=1);
+            assert(pixels[at]==0 && pixels[at+3]==255);
+        }
+        std::puts("PASS proved lane-private LDS on Metal: two slots survive branch and rebuilt addresses at every pixel");
     }
 }

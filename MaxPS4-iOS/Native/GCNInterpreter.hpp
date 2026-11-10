@@ -170,6 +170,7 @@ public:
     void reset() {
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
+        lds_.clear(); // retain capacity; initialize only if this wave uses LDS
         attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false; scalarLoad = {};
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
@@ -198,6 +199,7 @@ public:
 private:
     const GCNMemory& memory_;
     unsigned lanes_;
+    std::vector<std::uint8_t> lds_; // one interpreted wave; allocated only when used
     GCNCodeCache* cache_;
     std::vector<std::uint32_t> v_;
 
@@ -657,7 +659,21 @@ private:
         return true;
     }
     bool ds(const GCNInstruction& i) {
-        if (i.opcode != 53) return false; // only ds_swizzle_b32 (no LDS is modelled)
+        if(i.opcode==13 || i.opcode==54) {
+            if(i.word0&0x30000) return fail("GDS/reserved DS flags unsupported");
+            if(lds_.empty()) lds_.resize(65536);
+            const unsigned addr=i.word1&255, data=(i.word1>>8)&255, dst=i.word1>>24;
+            const std::uint64_t limit=std::min<std::uint32_t>(s[124],65536u);
+            for(unsigned lane=0;lane<lanes_;++lane) {
+                if(!active(lane)) continue;
+                const std::uint64_t at=std::uint64_t(v(addr,lane))+(i.word0&0xffff);
+                if((at&3) || at>limit || limit-at<4) return fail("LDS dword range/alignment");
+                if(i.opcode==13) { const auto value=v(data,lane); std::memcpy(lds_.data()+at,&value,4); }
+                else std::memcpy(&v(dst,lane),lds_.data()+at,4);
+            }
+            return true;
+        }
+        if (i.opcode != 53) return false; // other LDS operations remain unsupported
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
         const unsigned offset = i.word0 & 0xffff;
         std::array<std::uint32_t, 64> r{};

@@ -33,6 +33,27 @@ int main() {
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     {
+        loadPrivateLDSPs(arena);
+        GCNWave wave(arena.memory,64);
+        for(unsigned lane=0;lane<64;++lane) {
+            wave.v(0,lane)=bits(float(lane)+0.25f);
+            wave.v(1,lane)=bits(float(lane)+0.5f);
+        }
+        assert(wave.run(privateLDSPs));
+        for(unsigned lane=0;lane<64;++lane) {
+            rt::GCNLane L; L.simdLane=lane;
+            L.vinit[0]=bits(float(lane)+0.25f); L.vinit[1]=bits(float(lane)+0.5f);
+            rt::ps_private_lds(L,M,unusedQuad);
+            assert(L.color[0][0]==float(lane)+0.25f && L.color[0][1]==float(lane)+0.5f);
+            assert(bits(L.color[0][0])==wave.exports[0].value[0][lane]);
+            assert(bits(L.color[0][1])==wave.exports[0].value[1][lane]);
+        }
+        // LDS bounds are checked in the independent interpreted memory model.
+        arena.code(0x1a100,{0xd8d80000,0x04000002,0xbf810000});
+        wave.reset(); wave.s[124]=4; wave.v(2,0)=4;
+        assert(!wave.run(0x1a100) && wave.error.find("LDS dword range")!=std::string::npos);
+    }
+    {
         arena.code(0x11c00,{0xd2460021,0x000100c1,0xd2480022,0x000242c1,0xf8001801,0x22,0xbf810000});
         GCNWave wave(arena.memory,64);
         assert(wave.run(0x11c00));
