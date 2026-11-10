@@ -95,8 +95,19 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     if (d.ps || d.colour) ps = translateGCN(code_, d.ps, psOptions);
     else ps.source = "GCN_FN void ps_program(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) { (void)L; (void)M; (void)Q; }\n";
     compiling = 0;
-    if (!vs) { fail("VS translation: " + vs.error); return nil; }
-    if (!ps) { fail("PS translation: " + ps.error); return nil; }
+    if (!vs) {
+        if (costly_.insert(d.vs).second)
+            programListings += programWords("VS refuse", d.vs, d.vsUser, d.vsUserCount);
+        fail("VS translation: " + vs.error); return nil;
+    }
+    if (!ps) {
+        // The first-draw listings are capped and often omit the failing shader.
+        // Keep its bounded raw words, including code beyond an early ENDPGM,
+        // so LDS writes can be studied with their reads and synchronization.
+        if (costly_.insert(d.ps).second)
+            programListings += programWords("PS refuse", d.ps, d.psUser, d.psUserCount);
+        fail("PS translation: " + ps.error); return nil;
+    }
     {
         ScalarSites& sites = scalarSites_[d.ps];
         sites.list = ps.sites; sites.words = ps.siteWords;
