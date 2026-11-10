@@ -36,6 +36,21 @@ int main() {
     // Exercise the generated shader, all four lanes and the real quad exchange.
     {
         rt::GCNQuad Q;
+        arena.code(0x11800,{0xf1800300,0x00400a00,0xf800180f,0x0d0c0b0a,0xbf810000});
+        GCNWave lodWave(arena.memory,4);
+        lodWave.s[2]=255u | (127u<<14); lodWave.s[3]=0x90070000; lodWave.s[9]=0xfff000;
+        for (unsigned lane=0;lane<4;++lane) {
+            lodWave.v(0,lane)=bits(float(lane&1u)/32.0f);
+            lodWave.v(1,lane)=bits(float(lane>>1)/16.0f);
+        }
+        assert(lodWave.run(0x11800));
+        for (unsigned lane=0;lane<4;++lane) {
+            assert(gcn_detail::f32(lodWave.exports[0].value[0][lane])==3.0f);
+            assert(gcn_detail::f32(lodWave.exports[0].value[1][lane])==3.0f);
+        }
+        GCNWave scanWave(arena.memory,1);
+        scanWave.s=lodWave.s;
+        assert(scanWave.run(0x11800)); // resource scans continue beyond GET_LOD
         rt::GCNLane lanes[4];
         std::thread workers[4];
         for (unsigned lane=0; lane<4; ++lane) {

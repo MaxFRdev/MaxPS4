@@ -901,6 +901,35 @@ private:
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
         if (rsrc > s.size() - 8) return fail("image resource register range");
         const std::uint32_t* d = &s[rsrc];
+        if (i.opcode == 96) {
+            if (samp > s.size()-4 || (dmask & ~3u)) return fail("image_get_lod operand range");
+            std::array<float,64> u{}, vv{};
+            for (unsigned lane=0;lane<lanes_;++lane) {
+                u[lane]=gcn_detail::f32(v(vaddr,lane)); vv[lane]=gcn_detail::f32(v(vaddr+1,lane));
+            }
+            const unsigned base=(d[3]>>12)&15, last=(d[3]>>16)&15;
+            const float width=float(std::max(1u,((d[2]&0x3fff)+1)>>base));
+            const float height=float(std::max(1u,(((d[2]>>14)&0x3fff)+1)>>base));
+            int bias=int(s[samp+2]&0x3fff); if (bias>=8192) bias-=16384;
+            for (unsigned lane=0;lane<lanes_;++lane) {
+                if (!active(lane)) continue;
+                float ux=0,vx=0,uy=0,vy=0;
+                const unsigned quad=lane&~3u, row=lane&~1u, col=quad+(lane&1u);
+                // The resource scanner uses one lane: a constant-coordinate
+                // footprint lets it continue collecting later shader resources.
+                if (quad+3<lanes_) {
+                    ux=u[row+1]-u[row]; vx=vv[row+1]-vv[row];
+                    uy=u[col+2]-u[col]; vy=vv[col+2]-vv[col];
+                }
+                if (!(w&0x1000)) { ux*=width; uy*=width; vx*=height; vy*=height; }
+                const float raw=0.5f*std::log2(std::fmax(ux*ux+vx*vx,uy*uy+vy*vy))+float(bias)/256;
+                float clamp=std::fmin(std::fmax(raw,float(s[samp+1]&0xfff)/256),float((s[samp+1]>>12)&0xfff)/256);
+                clamp=std::fmin(std::fmax(clamp,0.0f),float(last>=base ? last-base : 0));
+                const float result[2]={clamp,raw};
+                for (unsigned n=0,out=0;n<2;++n) if ((dmask>>n)&1) v(vdata+out++,lane)=gcn_detail::u32(result[n]);
+            }
+            return true;
+        }
         if (i.opcode == 14) {
             // image_get_resinfo: width, height, depth (3D) or slices, and mip
             // levels at the lane's mip level, as integers; any image type.
