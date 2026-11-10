@@ -19,3 +19,9 @@ retains decodable code after early ENDPGM instructions for branch targets.
 
 This is a diagnostic improvement. It does not implement LDS or resolve the
 reported stop. A new device report is required to study the complete shader.
+
+The first diagnostic build still returned the previous immutable report when
+submit exited on translation failure. The bridge now publishes a fresh report
+on that error path and on compute-barrier failure. A regression submits valid
+draws, then a shader containing the exact refused LDS write, and checks the
+public bridge report immediately for the shader address, raw words and error.

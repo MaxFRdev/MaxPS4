@@ -302,8 +302,12 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                 s.programCosts += text;
             }
         }
-        if (barrierFailure) return -EIO;
-        if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }
+        if (barrierFailure) { self.lastReport = s.report(); return -EIO; }
+        if (s.stats.failed != failed) {
+            s.error = s.stats.error;
+            self.lastReport = s.report(); // Preserve the failing shader, not the previous successful batch.
+            return -ENOTSUP;
+        }
         const double encoding = elapsedMs(encodingStarted);
         const bool hasRenderWork = segmentEncoded || s.stats.rendered != rendered;
         if (hasRenderWork) {

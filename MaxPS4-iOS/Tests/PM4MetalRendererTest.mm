@@ -741,6 +741,26 @@ int main() {
         assert([bridge submit:killed.words.data() count:killed.words.size()]==0);
         readback([bridge copyTargetAtAddress:targetB width:width height:height],after);
         assert(std::memcmp(green,after,sizeof green)==0);
+        {
+            // Reproduce the device failure after earlier successful draws.
+            // The public immutable report must include the newly refused shader.
+            MaxPS4GameMetalBridge* refused=[[MaxPS4GameMetalBridge alloc] initWithDevice:device
+                reader:^BOOL(uint64_t address,void* destination,size_t count) {
+                    return reader->memory.read(address,destination,count);
+                }];
+            assert(refused && [refused submit:s.words.data() count:s.words.size()]==0);
+            constexpr uint64_t ldsPS=0x11d00;
+            arena.code(ldsPS,{0xd8340000,0x00002022,0xbf810000});
+            Stream broken;
+            broken.set(0x76,0x08,{std::uint32_t(ldsPS>>8),0,0,0});
+            broken.words.insert(broken.words.end(),{0xc0012d00U,3,2});
+            assert([refused submit:broken.words.data() count:broken.words.size()]!=0);
+            assert([refused.failure containsString:@"LDS access"]);
+            assert([refused.report containsString:@"PS refuse 0x11d00"]);
+            assert([refused.report containsString:@"d8340000 00002022"]);
+            assert([refused.report containsString:@"LDS access"]);
+            std::puts("PASS failed shader capture reaches the public Metal report immediately");
+        }
         // A diagnostic read cannot wait behind a submission holding the renderer
         // lock. The simulated slow reader is released even on a timeout.
         auto entered = dispatch_semaphore_create(0), release = dispatch_semaphore_create(0);
