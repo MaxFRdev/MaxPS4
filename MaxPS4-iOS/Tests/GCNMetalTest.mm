@@ -193,5 +193,39 @@ int main() {
             assert(pixels[4*n+3]==255);
         }
         std::puts("PASS image_get_lod on Metal: clamped and raw 2D LOD = 3 in every pixel");
+        // Exact failing gather operation: four distinct green texels, offset -1.
+        arena.code(pixelProgram,{
+            0x7e1802ff,63,0x7e1a02ff,0x3ec00000,0x7e1c02ff,0x3ec00000,
+            0xf15c0200,0x0040040c,0xf800180f,0x07060504,0xbf810000});
+        const auto gatherPS=translateGCN(arena.memory,pixelProgram,psOptions);
+        assert(gatherPS);
+        const std::string gatherSource=gcnMetalPrelude()+vs.source+gatherPS.source+
+            gcnMetalEntryPoints(vs,gatherPS,"vs_program","ps_program",psInputAddr,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:gatherSource.c_str()] options:options error:&error];
+        if (!library) { std::printf("gather MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        pipelineDescriptor.vertexFunction=[library newFunctionWithName:@"gcn_vertex"];
+        pipelineDescriptor.fragmentFunction=[library newFunctionWithName:@"gcn_fragment"];
+        pipeline=[device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+        if (!pipeline) { std::printf("gather pipeline: %s\n",error.localizedDescription.UTF8String); return 1; }
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            arena.put(0x15000+4*(4*y+x),0xff000000u|((4*y+x)*16u<<8));
+        std::memcpy(memory.contents,arena.bytes.data(),arena.bytes.size());
+        state.psUser[0]=0x150; state.psUser[1]=10u<<20;
+        state.psUser[2]=3u|(3u<<14); state.psUser[3]=0x90800fac;
+        state.psUser[4]=3u<<13; state.psUser[9]=0;
+        buffer=[queue commandBuffer]; encoder=[buffer renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:pipeline];
+        [encoder setVertexBuffer:memory offset:0 atIndex:0];
+        [encoder setFragmentBuffer:memory offset:0 atIndex:0];
+        [encoder setVertexBytes:&state length:sizeof state atIndex:1];
+        [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
+        [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding]; [buffer commit]; [buffer waitUntilCompleted];
+        assert(buffer.status==MTLCommandBufferStatusCompleted && !buffer.error);
+        [image getBytes:pixels bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        const int gatherBGRA[4]={80,144,128,64};
+        for (unsigned n=0;n<width*height*4;++n) assert(std::abs(int(pixels[n])-gatherBGRA[n%4])<=1);
+        std::puts("PASS image_gather4_lz_o on Metal: channel, tap order and signed offset at every pixel");
     }
 }

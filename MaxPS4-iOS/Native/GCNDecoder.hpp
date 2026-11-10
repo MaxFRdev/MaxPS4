@@ -447,6 +447,7 @@ inline std::string gcnDisassemble(const GCNInstruction& i) {
         const unsigned dmask = (w >> 8) & 15;
         unsigned count = 0;
         for (unsigned b = 0; b < 4; ++b) count += (dmask >> b) & 1;
+        if (name.compare(0,12,"image_gather")==0) count=4;
         arg(range('v', (w1 >> 8) & 0xff, count ? count : 1));
         arg(operand(256 + (w1 & 0xff), i));
         arg(range('s', ((w1 >> 16) & 0x1f) * 4, (w & 0x8000) ? 4 : 8));

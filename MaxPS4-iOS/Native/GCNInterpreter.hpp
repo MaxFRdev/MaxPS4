@@ -994,6 +994,37 @@ private:
         }
         const unsigned op = i.opcode;
         // Address layout: [offset][bias][compare][derivatives (2D)] coordinates [lod/clamp].
+        if (op==71 || op==87) {
+            if (!dmask || (dmask&(dmask-1)) || samp>s.size()-4) return fail("image_gather4 operand range");
+            unsigned component=0; while (!((dmask>>component)&1)) ++component;
+            const unsigned coord=vaddr+(op==87 ? 1 : 0);
+            const bool un=(w&0x1000) || (s[samp]&0x8000);
+            for (unsigned lane=0;lane<lanes_;++lane) {
+                if (!active(lane)) continue;
+                const unsigned packed=op==87 ? v(vaddr,lane) : 0;
+                int ox=int(packed&63), oy=int((packed>>8)&63);
+                if (ox>=32) ox-=64;
+                if (oy>=32) oy-=64;
+                const float x=gcn_detail::f32(v(coord,lane))*(un ? 1.0f : float(t.width));
+                const float y=gcn_detail::f32(v(coord+1,lane))*(un ? 1.0f : float(t.height));
+                const int ix=int(std::floor(x-0.5f))+ox, iy=int(std::floor(y-0.5f))+oy;
+                float result[4];
+                for (unsigned n=0;n<4;++n) {
+                    bool bx,by;
+                    const int ax=address(ix+int(n==1 || n==2),int(t.width),s[samp]&7,bx);
+                    const int ay=address(iy+int(n<2),int(t.height),(s[samp]>>3)&7,by);
+                    float c[4]={0,0,0,0};
+                    if (bx || by) {
+                        const unsigned border=s[samp+3]>>30;
+                        if (border==1) c[3]=1;
+                        else if (border==2) for (auto& value:c) value=1;
+                    } else if (!texel(t,ax,ay,c)) return false;
+                    result[n]=c[component];
+                }
+                for (unsigned n=0;n<4;++n) v(vdata+n,lane)=gcn_detail::u32(result[n]);
+            }
+            return true;
+        }
         const bool sampleOp = op >= 32 && op < 64, load = op == 0 || op == 1, store = op == 8;
         const bool bias = sampleOp && ((op & 7) == 5 || (op & 7) == 6);         // _b, _b_cl
         const bool compare = (op >= 40 && op < 48) || (op >= 56 && op < 64);    // _c: depth compare

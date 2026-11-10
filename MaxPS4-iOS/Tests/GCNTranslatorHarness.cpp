@@ -32,6 +32,38 @@ int main() {
     loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena); loadDepthCompareVS(arena);
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
+    {
+        // Exact device operation: green component, signed x offset -1.
+        arena.code(0x11900,{0xf15c0200,0x0040040c,0xf800180f,0x07060504,0xbf810000});
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            arena.put(0x15000+4*(4*y+x),0xff000000u | ((4*y+x)*16u<<8));
+        const uint32_t descriptor[8]={0x150,10u<<20,3u|(3u<<14),0x90800fac,3u<<13,0,0,0};
+        GCNWave wave(arena.memory,1);
+        rt::GCNLane L;
+        for (unsigned n=0;n<8;++n) L.user[n]=wave.s[n]=descriptor[n];
+        L.user[8]=wave.s[8]=0x12; // clamp-to-edge
+        L.vinit[12]=wave.v(12,0)=63; // -1 in signed six-bit encoding
+        L.vinit[13]=wave.v(13,0)=bits(0.375f);
+        L.vinit[14]=wave.v(14,0)=bits(0.375f);
+        assert(wave.run(0x11900));
+        rt::ps_gather_lz(L,M,unusedQuad);
+        const unsigned expected[4]={128,144,80,64};
+        for (unsigned n=0;n<4;++n) {
+            const float value=float(expected[n])/255;
+            assert(std::abs(L.color[0][n]-value)<0.00001f);
+            assert(std::abs(gcn_detail::f32(wave.exports[0].value[n][0])-value)<0.00001f);
+        }
+        rt::GCNRes8 t{}; for (unsigned n=0;n<8;++n) t.d[n]=descriptor[n];
+        rt::GCNRes4 sampler{{0x12,0,0x500000,0}}; // filtering must not blend gather taps
+        auto got=rt::gcn_gather_lz(M,t,sampler,false,0.375f,0.375f,63,1);
+        for (unsigned n=0;n<4;++n) assert(std::abs(got[n]-float(expected[n])/255)<0.00001f);
+        sampler.d[0]=0x8000|0x12;
+        got=rt::gcn_gather_lz(M,t,sampler,false,1.5f,1.5f,63,1);
+        for (unsigned n=0;n<4;++n) assert(std::abs(got[n]-float(expected[n])/255)<0.00001f);
+        sampler.d[0]=4u|(4u<<3); sampler.d[3]=2u<<30;
+        got=rt::gcn_gather_lz(M,t,sampler,true,-20,-20,0,1);
+        for (unsigned n=0;n<4;++n) assert(got[n]==1); // white border
+    }
     // Analytic 2D footprint: eight texels per pixel gives log2(8) = 3.
     // Exercise the generated shader, all four lanes and the real quad exchange.
     {

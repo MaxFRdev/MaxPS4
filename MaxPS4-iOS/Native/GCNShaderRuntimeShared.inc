@@ -335,6 +335,24 @@ GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u,
     }
     return gcn_sample_at(M, t, s, unorm, u, v, resolved, offset);
 }
+// Four unfiltered values of one swizzled component, lower-left then CCW.
+// Packed offsets are signed six-bit values in bytes 0 and 1 of VADDR.
+GCN_FN float4 gcn_gather_lz(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm,
+                            float u, float v, uint packed, uint component) {
+    int ox=int(packed & 63u), oy=int((packed >> 8) & 63u);
+    if (ox>=32) ox-=64;
+    if (oy>=32) oy-=64;
+    bool un=unorm || ((s.d[0] >> 15) & 1u)!=0u;
+    float x=un ? u : u*float((t.d[2]&0x3fffu)+1u);
+    float y=un ? v : v*float(((t.d[2]>>14)&0x3fffu)+1u);
+    int ix=int(gcn_floor(x-0.5f))+ox, iy=int(gcn_floor(y-0.5f))+oy;
+    float4 result=float4(0.0f,0.0f,0.0f,0.0f);
+    for (uint n=0u;n<4u;++n) {
+        float4 texel=gcn_fetch(M,t,s,ix+((n==1u || n==2u) ? 1 : 0),iy+(n<2u ? 1 : 0));
+        result[n]=texel[component];
+    }
+    return result;
+}
 // image_store to a linear 2D image (tiling index 8): components in channel
 // order, those outside `dmask` stored as 0. Other formats and tilings: none.
 GCN_FN void gcn_image_store(GCNMemory M, GCNRes8 t, uint x, uint y, uint4 value, uint dmask) {

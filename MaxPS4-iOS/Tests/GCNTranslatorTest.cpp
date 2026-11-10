@@ -21,6 +21,12 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    arena.code(0x11900,{0xf15c0200,0x0040040c,0xf800180f,0x07060504,0xbf810000});
+    GCNTranslateOptions gatherOptions=ps; gatherOptions.name="ps_gather_lz";
+    const auto gatherProgram=translateGCN(arena.memory,0x11900,gatherOptions);
+    assert(gatherProgram && gatherProgram.colors==1);
+    arena.code(0x11920,{0xf15c0300,0x0040040c,0xbf810000});
+    assert(!translateGCN(arena.memory,0x11920,gatherOptions)); // component selection must be singular
     // The exact device instruction is GET_LOD (0x60), not a reserved MIMG.
     arena.code(coverageProgram,{0xf1800100,0x00e40a08,0xbf810000});
     const auto deviceLOD = translateGCN(arena.memory, coverageProgram, ps);
@@ -109,6 +115,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

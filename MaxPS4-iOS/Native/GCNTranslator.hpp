@@ -772,7 +772,18 @@ private:
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
         std::string call;
-        if (op == 96) {
+        if (op == 71 || op == 87) {
+            if (!dmask || (dmask & (dmask-1))) return fail("image_gather4 requires one component");
+            const unsigned coord=vaddr+(op==87 ? 1 : 0);
+            unsigned component=0; while (!((dmask>>component)&1)) ++component;
+            res += "GCNRes4 sm = {{" + s(samp) + ", " + s(samp+1) + ", " + s(samp+2) + ", " + s(samp+3) + "}}; ";
+            body_ += "if (" + std::string(ex()) + ") { " + res + "float4 gathered = gcn_gather_lz(M, t, sm, " +
+                std::string((w&0x1000) ? "true" : "false") + ", gf(" + v(coord) + "), gf(" + v(coord+1) + "), " +
+                (op==87 ? v(vaddr) : std::string("0u")) + ", " + std::to_string(component) + "u); ";
+            for (unsigned n=0;n<4;++n) body_ += v(vdata+n)+" = gu(gathered["+std::to_string(n)+"]); ";
+            body_ += "}"; sregs_.insert(126);
+            return out_.error.empty();
+        } else if (op == 96) {
             if (options_.stage != GCNStage::pixel) return fail("image_get_lod outside a pixel program");
             if (dmask & ~3u) return fail("image_get_lod result mask outside xy");
             out_.quad = true;
