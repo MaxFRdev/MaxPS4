@@ -232,7 +232,14 @@ private:
                 bool ended = false;
                 if (!instruction(found->second, pc, ended)) {
                     if (out_.error.empty()) fail("unsupported " + found->second.name);
-                    char at[32]; std::snprintf(at, sizeof at, " at 0x%llx", (unsigned long long)pc);
+                    // Unknown opcodes have no mnemonic. Preserve the encoded
+                    // instruction so a device-only shader failure is actionable.
+                    const auto& failed = found->second.i;
+                    char at[160];
+                    std::snprintf(at, sizeof at,
+                        " at 0x%llx [encoding %u opcode %u words %08x %08x size %u]",
+                        (unsigned long long)pc, unsigned(failed.encoding), unsigned(failed.opcode),
+                        unsigned(failed.word0), unsigned(failed.word1), unsigned(failed.size));
                     out_.error += at;
                     return;
                 }

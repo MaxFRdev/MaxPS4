@@ -21,6 +21,13 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    // Unknown MIMG operations must retain their raw encoding in device reports.
+    arena.code(coverageProgram,{0xf07c0f00,0x00030201,0xbf810000}); // reserved opcode 31
+    const auto unknownImage = translateGCN(arena.memory, coverageProgram, ps);
+    assert(!unknownImage);
+    assert(unknownImage.error.find("unsupported image access") != std::string::npos);
+    assert(unknownImage.error.find("opcode 31 words f07c0f00 00030201 size 2") != std::string::npos);
+    assert(unknownImage.error.find("at 0x11800") != std::string::npos);
     arena.code(coverageProgram,{0xbeeb03ff,7,0xbe94047e,0xbefe0a7e,0xbefe0414,0xf800180f,0,0xbf810000});
     const auto prologue=translateGCN(arena.memory,coverageProgram,ps);
     assert(prologue && !prologue.mayKill);
