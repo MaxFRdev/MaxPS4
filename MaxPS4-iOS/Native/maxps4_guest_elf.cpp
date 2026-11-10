@@ -441,8 +441,11 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
                 bytes[entry_at + 21 + b] = uint8_t(exit_function >> (8 * b));
             }
             for (auto& module : copy.modules) for (auto& segment : module.image.segments)
-                if ((segment.header.flags & 5) == 5 && !segment.header.address)
+                if ((segment.header.flags & 5) == 5 && !segment.header.address) {
                     orbisRelocateFixedLayout(segment.bytes.data(), size_t(segment.header.fileSize), heap_low, heap_window);
+                    if (module.path == root)
+                        orbisUseLiteralSaveStrings(segment.bytes.data(), size_t(segment.header.fileSize));
+                }
         }
         // Local-exec read through FS must stay inside the blocks or the TCB.
         auto tls_readable = [&](int64_t displacement, uint64_t bytes) {

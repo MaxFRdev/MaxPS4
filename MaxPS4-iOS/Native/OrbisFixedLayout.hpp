@@ -44,4 +44,42 @@ inline bool orbisRelocateFixedLayout(uint8_t* text, size_t size, uint64_t window
     }
     return true;
 }
+namespace detail {
+struct OrbisCodeFingerprint { size_t offset, size; uint64_t hash; };
+inline uint64_t orbisCodeFingerprint(const uint8_t* bytes, size_t size) {
+    uint64_t hash = 14695981039346656037ULL;
+    for (size_t i = 0; i < size; ++i) hash = (hash ^ bytes[i]) * 1099511628211ULL;
+    return hash;
+}
+// Validate every region before a one-byte, same-width branch replacement.
+// This is a build identity check, not a cryptographic authenticity check.
+inline bool orbisGuardedBranchPatch(uint8_t* text, size_t size, size_t branch,
+    uint8_t before, uint8_t after, const OrbisCodeFingerprint* fingerprints, size_t count) {
+    if (!text || !fingerprints || !count || branch >= size || size - branch < 2 || text[branch] != before)
+        return false;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& f = fingerprints[i];
+        if (!f.size || f.offset > size || f.size > size - f.offset ||
+            orbisCodeFingerprint(text + f.offset, f.size) != f.hash) return false;
+    }
+    text[branch] = after;
+    return true;
+}
+}
+// CUSA05379's MemFile_WriteCString supports both cached references (type 2)
+// and complete literals (type 3). Saves produced in the observed runtime
+// contain cache IDs that precede their definitions. Use the existing literal
+// path for nonempty strings; null/empty encodings and outer compression stay
+// unchanged. The reader already accepts type 3. This avoids cache references
+// in newly written saves; it does not repair an existing save or establish
+// the underlying cause of the cache inconsistency.
+inline bool orbisUseLiteralSaveStrings(uint8_t* text, size_t size) {
+    constexpr detail::OrbisCodeFingerprint fingerprints[] = {
+        {0x626c50, 0x130, 0x00905cbff8ec2f67ULL}, // Complete writer, including its branch.
+        {0x626d80, 0x1a0, 0x36e31060e3b337d5ULL}}; // Reader including literal acceptance.
+    // JA +0x61 -> JMP +0x61: an already supported format, same instruction size.
+    return detail::orbisGuardedBranchPatch(text, size, 0x626c9c, 0x77, 0xeb,
+        fingerprints, sizeof fingerprints / sizeof fingerprints[0]);
+}
+
 }

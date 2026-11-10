@@ -14,6 +14,35 @@ static uint64_t value(const Linker::Image& image, uint64_t address) {
     uint64_t v = 0; for (size_t i=0;i<8;++i) v |= uint64_t(p[i])<<(i*8); return v;
 }
 int main(int argc, char** argv) {
+    {   // The compatibility branch patch is transactional and build-specific.
+        using namespace maxps4::detail;
+        std::vector<uint8_t> text(64, 0x90); text[16] = 0x77; text[17] = 0x61;
+        const auto original = text;
+        OrbisCodeFingerprint fingerprints[] = {
+            {8, 24, orbisCodeFingerprint(text.data() + 8, 24)},
+            {48, 16, orbisCodeFingerprint(text.data() + 48, 16)}};
+        auto patch = [&](uint8_t* p, size_t n) {
+            return orbisGuardedBranchPatch(p, n, 16, 0x77, 0xeb, fingerprints, 2);
+        };
+        check(!patch(nullptr, text.size()), "null compatibility image");
+        check(!patch(text.data(), 16) && text == original, "branch outside image");
+        check(!patch(text.data(), 17) && text == original, "truncated branch");
+        check(!patch(text.data(), 63) && text == original, "truncated reader is transactional");
+        text[63] ^= 1; const auto wrongReader = text;
+        check(!patch(text.data(), text.size()) && text == wrongReader, "reader mismatch leaves writer untouched");
+        text = original; text[8] ^= 1; const auto wrongWriter = text;
+        check(!patch(text.data(), text.size()) && text == wrongWriter, "writer mismatch leaves image untouched");
+        text = original;
+        check(patch(text.data(), text.size()), "matching writer and reader patched");
+        check(text[16] == 0xeb && text[17] == 0x61, "branch retains displacement and width");
+        for (size_t i = 0; i < text.size(); ++i)
+            check(text[i] == (i == 16 ? 0xeb : original[i]), "only branch opcode changes");
+        const auto patched = text;
+        check(!patch(text.data(), text.size()) && text == patched, "already patched image unchanged");
+        fingerprints[1] = {SIZE_MAX, 16, 0}; text = original;
+        check(!patch(text.data(), text.size()) && text == original, "fingerprint range cannot wrap");
+        check(!maxps4::orbisUseLiteralSaveStrings(text.data(), text.size()) && text == original, "unrelated build unchanged");
+    }
     {   // Call of Duty's fixed layout moves into the window, all or nothing.
         const std::pair<size_t, uint64_t> sites[] = {{0x558ae4,0x1000000000},{0x558b23,0x1080000000},{0x558b69,0x1100000000},
             {0x558b73,0x1180000000},{0x558bc0,0x1200000000},{0x558c23,0x400000000},{0x558c2d,0x1600200000},
