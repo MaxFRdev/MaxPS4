@@ -118,7 +118,8 @@ private:
         case GCNEncoding::mubuf: case GCNEncoding::mtbuf:
             return i.opcode<=15 && !(i.opcode>=4 && i.opcode<=7) && range((i.word1>>8)&255,4);
         case GCNEncoding::mimg: return !(i.opcode>=8 && i.opcode<=11) && range((i.word1>>8)&255,4);
-        case GCNEncoding::ds: return i.opcode!=13 && range(i.word1>>24,4);
+        case GCNEncoding::ds:
+            return i.opcode!=13 && range(i.word1>>24,(i.opcode==53 || i.opcode==54) ? 1 : 4);
         default: return true;
         }
     }
@@ -171,21 +172,24 @@ private:
         return false;
     }
     void preparePrivateLDS(std::uint64_t entry) {
-        unsigned stored=0,used=0;
-        const auto next=leaders_.upper_bound(entry);
-        const auto entryEnd=next==leaders_.end() ? ~std::uint64_t(0) : *next;
+        privateLDSSlots_=0;
+        unsigned storedOnEntry=0,used=0;
+        std::array<std::uint64_t,8> lastStoreBlock;
+        lastStoreBlock.fill(~std::uint64_t(0));
         for (const auto& item:code_) {
             const auto pc=item.first; const auto& i=item.second.i;
             if(i.encoding!=GCNEncoding::ds || (i.opcode==53 && (i.word0&0x8000))) continue;
             const unsigned offset=i.word0&0xffff;
             if(options_.stage!=GCNStage::pixel || (i.opcode!=13 && i.opcode!=54) || (i.word0&0x30000) ||
-                (offset!=0 && offset!=256) || !laneByteAddress(pc,i.word1&255) || !fullLDSLimit(pc)) return;
-            const unsigned bit=offset==0 ? 1u : 2u;
+                (offset&255) || offset>=8*256 || !laneByteAddress(pc,i.word1&255) || !fullLDSLimit(pc)) return;
+            const unsigned slot=offset/256, bit=1u<<slot;
+            const auto block=*std::prev(leaders_.upper_bound(pc));
             if(i.opcode==13) {
-                // Stores before the entry block's first branch dominate all reads.
-                if(pc<entry || pc>=entryEnd) return;
-                stored|=bit;
-            } else if(!(stored&bit)) return;
+                if(block==entry) storedOnEntry|=bit;
+                lastStoreBlock[slot]=block;
+            } else if(!(storedOnEntry&bit) && lastStoreBlock[slot]!=block) return;
+            // Entry stores dominate the whole program. A store earlier in the
+            // same basic block dominates that read even after a branch/join.
             used|=bit;
         }
         privateLDSSlots_=used;
@@ -353,7 +357,7 @@ private:
         }
         for (const auto n : vregs_)
             head += "    uint v" + std::to_string(n) + " = " + (n < 24 ? "L.vinit[" + std::to_string(n) + "]" : std::string("0u")) + ";\n";
-        for(unsigned slot=0;slot<2;++slot) if(privateLDSSlots_&(1u<<slot))
+        for(unsigned slot=0;slot<8;++slot) if(privateLDSSlots_&(1u<<slot))
             head += "    uint privateLDS"+std::to_string(slot)+" = 0u;\n";
         // Blocks are numbered by address: a fetch shader below the program
         // comes first, so execution starts at the entry's own block.
@@ -797,14 +801,14 @@ private:
         const GCNInstruction& i = in.i;
         const unsigned offset = i.word0 & 0xffff;
         if(privateLDSSlots_ && (i.opcode==13 || i.opcode==54) && laneByteAddress(pc,i.word1&255)) {
-            const std::string slot="privateLDS"+std::to_string(offset==0 ? 0 : 1);
+            const std::string slot="privateLDS"+std::to_string(offset/256);
             body_ += std::string("if (")+ex()+") ";
             if(i.opcode==13) body_ += slot+" = "+v((i.word1>>8)&255)+";";
             else body_ += v(i.word1>>24)+" = "+slot+";";
             sregs_.insert(126);
             return true;
         }
-        if (i.opcode != 53 || !(offset & 0x8000)) return fail("LDS access other than a quad swizzle");
+        if (i.opcode != 53 || !(offset & 0x8000)) return fail("LDS access outside proved lane-private scratch or quad swizzle");
         if (options_.stage != GCNStage::pixel) return fail("quad swizzle outside a pixel program");
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
         // Every lane takes part (inactive ones contribute 0), so quads stay converged.

@@ -33,6 +33,27 @@ int main() {
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     {
+        loadJoinedLDSPs(arena);
+        for(unsigned path=0;path<2;++path) {
+            GCNWave wave(arena.memory,64); wave.s[10]=path;
+            for(unsigned lane=0;lane<64;++lane) {
+                wave.v(0,lane)=bits(float(lane)+0.25f);
+                wave.v(1,lane)=bits(float(lane)+0.5f);
+                wave.v(6,lane)=bits(float(lane)+0.75f);
+            }
+            assert(wave.run(joinedLDSPs));
+            for(unsigned lane=0;lane<64;++lane) {
+                rt::GCNLane L; L.simdLane=lane; L.user[10]=path;
+                L.vinit[0]=bits(float(lane)+0.25f); L.vinit[1]=bits(float(lane)+0.5f); L.vinit[6]=bits(float(lane)+0.75f);
+                rt::ps_joined_lds(L,M,unusedQuad);
+                for(unsigned c=0;c<3;++c) {
+                    assert(L.color[0][c]==float(lane)+0.25f*float(c+1));
+                    assert(bits(L.color[0][c])==wave.exports[0].value[c][lane]);
+                }
+            }
+        }
+    }
+    {
         loadPrivateLDSPs(arena);
         GCNWave wave(arena.memory,64);
         for(unsigned lane=0;lane<64;++lane) {

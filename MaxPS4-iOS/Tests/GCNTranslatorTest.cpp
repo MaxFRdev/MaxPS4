@@ -22,6 +22,21 @@ int main(int argc, char** argv) {
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
     loadPrivateLDSPs(arena);
+    loadJoinedLDSPs(arena);
+    GCNTranslateOptions joinedOptions=ps; joinedOptions.name="ps_joined_lds";
+    const auto joinedLDS=translateGCN(arena.memory,joinedLDSPs,joinedOptions);
+    assert(joinedLDS && joinedLDS.source.find("privateLDS2")!=std::string::npos);
+    arena.put(joinedLDSPs+4*16,0x02000002); // first read overwrites the address VGPR
+    assert(!translateGCN(arena.memory,joinedLDSPs,joinedOptions));
+    loadJoinedLDSPs(arena);
+    // A branch can bypass this store; rebuilding the address at the join does
+    // not make the store dominate the read. It must remain refused.
+    arena.code(0x1a400,{
+        0xbefc03ff,65536,0xd2480002,0x000100c1,0x460404c1,0x34040482,
+        0xbf850002,0xd8340000,0x00000002,
+        0xbefc03ff,65536,0xd2480003,0x000100c1,0x460606c1,0x34060682,
+        0xd8d80000,0x04000003,0xbf810000});
+    assert(!translateGCN(arena.memory,0x1a400,joinedOptions));
     GCNTranslateOptions privateOptions=ps; privateOptions.name="ps_private_lds";
     const auto privateLDS=translateGCN(arena.memory,privateLDSPs,privateOptions);
     assert(privateLDS && privateLDS.source.find("privateLDS0")!=std::string::npos && privateLDS.source.find("privateLDS1")!=std::string::npos);
@@ -161,6 +176,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source << privateLDS.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source << privateLDS.source << joinedLDS.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

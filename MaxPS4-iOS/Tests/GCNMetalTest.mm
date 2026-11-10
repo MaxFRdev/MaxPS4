@@ -310,5 +310,27 @@ int main() {
             assert(pixels[at]==0 && pixels[at+3]==255);
         }
         std::puts("PASS proved lane-private LDS on Metal: two slots survive branch and rebuilt addresses at every pixel");
+        loadJoinedLDSPs(arena);
+        std::uint32_t joinedWords[24]={};
+        assert(arena.memory.read(joinedLDSPs,joinedWords,sizeof joinedWords));
+        arena.code(pixelProgram,{0x100000ff,bits(1.0f/width),0x100202ff,bits(1.0f/height),0x7e0c02ff,bits(0.75f)});
+        for(unsigned n=0;n<24;++n) arena.put(pixelProgram+24+4*n,joinedWords[n]);
+        const auto joinedPS=translateGCN(arena.memory,pixelProgram,psOptions);
+        assert(joinedPS && joinedPS.source.find("privateLDS2")!=std::string::npos);
+        const std::string joinedSource=gcnMetalPrelude()+typedVS.source+joinedPS.source+
+            gcnMetalEntryPoints(typedVS,joinedPS,"vs_program","ps_program",0x300,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:joinedSource.c_str()] options:options error:&error];
+        if(!library) { std::printf("joined LDS MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        for(unsigned path=0;path<2;++path) {
+            state.psUser[10]=path;
+            renderCount(@"gcn_fragment",pixels);
+            for(unsigned y=0;y<height;++y) for(unsigned x=0;x<width;++x) {
+                const unsigned at=4*(y*width+x);
+                assert(std::abs(int(pixels[at+2])-int(std::lround(255.0f*(float(x)+0.5f)/width)))<=1);
+                assert(std::abs(int(pixels[at+1])-int(std::lround(255.0f*(float(y)+0.5f)/height)))<=1);
+                assert(std::abs(int(pixels[at])-191)<=1 && pixels[at+3]==255);
+            }
+        }
+        std::puts("PASS three private LDS slots after a branch join on Metal: both paths match at every pixel");
     }
 }

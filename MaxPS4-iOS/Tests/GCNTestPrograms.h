@@ -40,6 +40,16 @@ inline void loadPrivateLDSPs(Arena& arena) {
         0xd8d80000,0x04000003,0xd8d80100,0x05000003,
         0xf8001803,0x00000504,0xbf810000});
 }
+constexpr std::uint64_t joinedLDSPs=0x1a200;
+inline void loadJoinedLDSPs(Arena& arena) {
+    arena.code(joinedLDSPs,{
+        0xbf06800a,0xbf850001,0xbf800000, // two paths join before all LDS operations
+        0xbefc03ff,65536,
+        0xd2480002,0x000100c1,0x460404c1,0x34040482,
+        0xd8340000,0x00000002,0xd8340100,0x00000102,0xd8340200,0x00000602,
+        0xd8d80000,0x04000002,0xd8d80100,0x05000002,0xd8d80200,0x06000002,
+        0xf8001807,0x00060504,0xbf810000});
+}
 
 // shadPS4's embedded full-screen VS (one lane per vertex id).
 constexpr std::uint64_t embeddedVS = 0x10000;
