@@ -105,6 +105,7 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
         }
     }
     private func present(_ frame: PendingFrame, in view: MTKView) {
+        guard let source else { return }
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else {
             pendingFrame = frame // Retry on the next draw cycle.
             return
@@ -120,10 +121,13 @@ private final class GameMetalDisplay: NSObject, MTKViewDelegate {
         MaxPS4VideoOutMetal.encode(encoder: encoder, pipeline: pipeline, texture: frame.texture,
             output: view.drawableSize, fill: scaling == "fill", stretch: scaling == "stretch")
         encoder.endEncoding()
-        command.addCompletedHandler { [weak self] buffer in
+        command.addCompletedHandler { [weak self, weak view, source] buffer in
             guard buffer.status != .completed || buffer.error != nil else { return }
             let reason = buffer.error?.localizedDescription ?? "statut \(buffer.status.rawValue)"
-            DispatchQueue.main.async { self?.failed("Présentation Metal : échec de la commande GPU (\(reason)).") }
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let view, self.source === source, !view.isPaused else { return }
+                self.failed("Présentation Metal : échec de la commande GPU (\(reason)).")
+            }
         }
         lastTexture = frame.texture
         needsRedraw = false
@@ -323,7 +327,7 @@ struct MaxPS4GameView: View {
                             }.font(.subheadline).tint(.cyan)
                             if session.running {
                                 Button("Arrêter la session", role: .destructive) {
-                                    touch = 0; leftStick = .zero; rightStick = .zero; session.stop(); showingMenu = false
+                                    touch = 0; leftStick = .zero; rightStick = .zero; session.stop(reason: "Arrêt demandé depuis le menu du jeu."); showingMenu = false
                                 }
                             }
                             // A snapshot of the report, refreshed on demand: the live
@@ -370,7 +374,7 @@ struct MaxPS4GameView: View {
         }
         // The game waits while its menu is open.
         .onChange(of: showingMenu) { _, open in session.setPaused(open) }
-        .onDisappear { touch = 0; leftStick = .zero; rightStick = .zero; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
+        .onDisappear { touch = 0; leftStick = .zero; rightStick = .zero; session.stop(reason: "Fermeture de l’écran du jeu."); UIApplication.shared.isIdleTimerDisabled = false }
         .onChange(of: scenePhase) { _, phase in
             // An interruption, Control Center included (it reached .background on an
             // iPhone 15 Pro Max), only pauses the game: its flips wait for the return.
@@ -397,7 +401,8 @@ struct MaxPS4GameView: View {
                         .font(.footnote).multilineTextAlignment(.center).frame(maxWidth: 320)
                 }
                 if outcome.crashed {
-                    Text("Le jeu s’est arrêté sur une erreur.").font(.footnote).foregroundStyle(.orange)
+                    Text(outcome.failure ?? "Le jeu s’est arrêté sur une erreur.")
+                        .font(.footnote).foregroundStyle(.orange).multilineTextAlignment(.center)
                 }
                 if let report = outcome.report {
                     ShareLink(item: report) { Label("Partager le rapport de compatibilité", systemImage: "square.and.arrow.up") }
