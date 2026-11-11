@@ -405,9 +405,6 @@ private:
                 int64_t addend; std::memcpy(&addend,&rawAddend,8);
                 uint32_t kind = uint32_t(info);
                 uint64_t sym = info>>32;
-                require(kind == 0 || sym < symbols.size() || (sym == 0 && symbols.empty()), "Index RELA hors SYMTAB");
-                bool supported = kind == 0 || kind == 1 || kind == 6 || kind == 7 || kind == 8;
-                Relocation r{read(p,8),sym,addend,kind,supported};
                 // ELF64 r_info is (unsigned symbol index << 32) | type;
                 // r_addend is the separate, signed third word. In particular,
                 // bits 0xfffffff8 in the index are symbol 4294967288 (often
@@ -420,6 +417,9 @@ private:
                     const std::string message = why.str();
                     require(sym == 0, message.c_str());
                 }
+                require(kind == 0 || sym < symbols.size() || (sym == 0 && symbols.empty()), "Index RELA hors SYMTAB");
+                bool supported = kind == 0 || kind == 1 || kind == 6 || kind == 7 || kind == 8;
+                Relocation r{read(p,8),sym,addend,kind,supported};
                 // PT_SCE_RELRO is written while relocating, then becomes read-only.
                 if (kind != 0 && !covered(r.target,8,2) && !relro(r.target,8)) {
                     std::ostringstream why;
