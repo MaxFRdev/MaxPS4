@@ -91,9 +91,9 @@ int32_t maxps4_fex_engine_read_memory(maxps4_fex_engine* engine,
 // the engine alive and serializes close, as for read_memory.
 int32_t maxps4_fex_engine_write_memory(maxps4_fex_engine* engine,
     uint64_t address, const void* source, size_t bytes, uint64_t* failed_address);
-// The host bytes backing readable guest [address, address + bytes), for the
-// GPU to read guest textures in place (a no-copy Metal buffer). Valid until
-// the game unmaps them; same calling rules as read_memory.
+// The host bytes backing immutable ELF guest [address, address + bytes), for
+// the GPU to read textures in place (a no-copy Metal buffer). Dynamic mappings
+// return no view because a game may unmap them while Metal is still using it.
 int32_t maxps4_fex_engine_gpu_view(maxps4_fex_engine* engine,
     uint64_t address, size_t bytes, const void** pointer);
 // Pending flip metadata and its registered colour-target address, no CPU copy.

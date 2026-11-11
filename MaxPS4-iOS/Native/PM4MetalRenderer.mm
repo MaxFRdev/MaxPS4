@@ -883,7 +883,10 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         // A large range (a texture atlas, a vertex pool) gets a buffer of its
         // own, copied once per submission and shared by every draw reading it;
         // the rest is copied into this draw's buffer.
-        if (commands != sharedOwner_) { shared_.clear(); sharedOwner_ = commands; }
+        // Direct guest views and shared snapshots belong to one command buffer.
+        // A later submission must not inherit an old direct-view exclusion: its
+        // backing mapping may have been released or replaced by the guest.
+        if (commands != sharedOwner_) { shared_.clear(); inPlace_.clear(); sharedOwner_ = commands; }
         bool own[16] = {};
         std::uint64_t total = 0;
         for (std::size_t k = 0, n = 0; k < ranges.size(); ++k) {
