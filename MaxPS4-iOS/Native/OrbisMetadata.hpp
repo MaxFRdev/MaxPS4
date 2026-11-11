@@ -417,7 +417,8 @@ private:
                     why << "R_RELATIVE avec symbole " << sym << " (signé "
                         << static_cast<int32_t>(static_cast<uint32_t>(sym))
                         << "), addend " << addend;
-                    require(sym == 0, why.str());
+                    const std::string message = why.str();
+                    require(sym == 0, message.c_str());
                 }
                 // PT_SCE_RELRO is written while relocating, then becomes read-only.
                 if (kind != 0 && !covered(r.target,8,2) && !relro(r.target,8)) {
