@@ -81,6 +81,19 @@ int main(int argc, char** argv) {
     }
     consumer=original;
     put(consumer,0x908,(uint64_t{1}<<32)|1); put(consumer,0x910,uint64_t{1}<<63); reject(batch(),"underflow");
+    // r_info's high half is an unsigned ELF symbol index. It must not be
+    // confused with the signed RELA addend in the following word.
+    consumer=original;
+    put(consumer,0x908,(uint64_t{0xfffffff8}<<32)|8); put(consumer,0x910,UINT64_MAX-7);
+    reject(batch(),"R_RELATIVE avec symbole 4294967288 (signé -8), addend -8");
+    consumer=original;
+    // A retail Orbis libc keeps a few defined-symbol indices in R_RELATIVE.
+    // B+A remains safe only when that symbol's value proves the same addend.
+    appendTag(provider,0x6100002f,0x300); appendTag(provider,0x61000031,24); appendTag(provider,0x61000033,24);
+    put(provider,0x900,0x2000); put(provider,0x908,(uint64_t{1}<<32)|8); put(provider,0x910,0x1000);
+    Linker::Image relativeSymbol; check(Linker::link(batch(),{},relativeSymbol,diagnostic),diagnostic.c_str());
+    check(value(relativeSymbol,0x202000)==0x201000,"defined-symbol R_RELATIVE remains B+A");
+    put(provider,0x910,0x1008); reject(batch(),"R_RELATIVE symbol/addend mismatch"); provider=make(true);
     consumer=original;
     // RELRO is protected after relocation, not left writable for the backend.
     // NONE may contain unused, unmapped offsets/symbols and must not write.

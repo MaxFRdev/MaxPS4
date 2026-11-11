@@ -1,6 +1,7 @@
 #pragma once
 #include "PS4PKGRuntimePlan.hpp"
 #include "OrbisMetadata.hpp"
+#include <cstring>
 #include <map>
 #include <set>
 #include <tuple>
@@ -143,6 +144,11 @@ private:
         if (!(bits >> 63)) return add(a, bits);
         const uint64_t magnitude = (~bits) + 1;
         require(a >= magnitude, "relocation underflow"); return a - magnitude;
+    }
+    static int64_t signedValue(uint64_t bits) {
+        int64_t value{};
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
     }
     static std::string encoded(uint16_t id) {
         const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
@@ -680,8 +686,22 @@ private:
                         "unsupported x86-64 relocation " + std::to_string(type));
                 const bool tlsRelocation = type >= 16;
                 // TLS relocations may use symbol 0 (local-dynamic: this module, offset = A).
-                require(symbol < resolved[i].size() && (type != 8 || symbol == 0) && (type == 8 || tlsRelocation || symbol != 0),
-                        "invalid relocation symbol");
+                if (type == 8 && symbol) {
+                    std::ostringstream why;
+                    why << "R_RELATIVE avec symbole " << symbol << " (signé "
+                        << static_cast<int32_t>(static_cast<uint32_t>(symbol))
+                        << "), addend " << signedValue(r.addend);
+                    const std::string message = why.str();
+                    // Orbis libc.prx retains defined symbol indices in a few
+                    // R_RELATIVE entries. Their value remains B+A; the symbol
+                    // is admissible only when it is in-range, defined locally,
+                    // and its value exactly equals A.
+                    require(symbol < dynamic[i].symbols.size(), message);
+                    require(dynamic[i].symbols[symbol].defined && r.addend == dynamic[i].symbols[symbol].value,
+                            "R_RELATIVE symbol/addend mismatch");
+                }
+                require(symbol < resolved[i].size(), "invalid relocation symbol");
+                require(type == 8 || tlsRelocation || symbol != 0, "invalid relocation symbol");
                 // An undefined local STT_SECTION symbol in a TLS relocation names this
                 // module's TLS block (local-dynamic model), like symbol 0.
                 const auto& referenced = dynamic[i].symbols[symbol];

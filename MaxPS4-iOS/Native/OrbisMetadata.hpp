@@ -405,10 +405,28 @@ private:
                 int64_t addend; std::memcpy(&addend,&rawAddend,8);
                 uint32_t kind = uint32_t(info);
                 uint64_t sym = info>>32;
+                // ELF64 r_info is (unsigned symbol index << 32) | type;
+                // r_addend is the separate, signed third word. In particular,
+                // bits 0xfffffff8 in the index are symbol 4294967288 (often
+                // displayed as -8 by a signed diagnostic), not an addend -8.
+                if (kind == 8) {
+                    std::ostringstream why;
+                    why << "R_RELATIVE avec symbole " << sym << " (signé "
+                        << static_cast<int32_t>(static_cast<uint32_t>(sym))
+                        << "), addend " << addend;
+                    const std::string message = why.str();
+                    // Retail Orbis libc.prx may retain a defined symbol index
+                    // in R_RELATIVE. The relocation is still B+A, but accept
+                    // it only when the index and addend prove that it names
+                    // the same local definition. Do not treat a malformed
+                    // high half of r_info as an addend.
+                    require(sym < symbols.size(), message.c_str());
+                    if (sym) require(symbols[sym].defined && rawAddend == symbols[sym].value,
+                                     "R_RELATIVE symbole/addend incohérents");
+                }
                 require(kind == 0 || sym < symbols.size() || (sym == 0 && symbols.empty()), "Index RELA hors SYMTAB");
                 bool supported = kind == 0 || kind == 1 || kind == 6 || kind == 7 || kind == 8;
                 Relocation r{read(p,8),sym,addend,kind,supported};
-                if (kind == 8) require(sym == 0, "R_RELATIVE avec symbole");
                 // PT_SCE_RELRO is written while relocating, then becomes read-only.
                 if (kind != 0 && !covered(r.target,8,2) && !relro(r.target,8)) {
                     std::ostringstream why;
