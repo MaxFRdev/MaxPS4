@@ -284,7 +284,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     }
     // The CPU profile since the run started; empty unless profiling was asked.
     private func profile(_ engine: OpaquePointer) -> String {
-        var text = [CChar](repeating: 0, count: 2048)
+        var text = [CChar](repeating: 0, count: 4096)
         _ = maxps4_fex_engine_profile_report(engine, &text, text.count)
         return String(cString: text)
     }
@@ -434,7 +434,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         }
         setStage("fermée")
     }
-    func run(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, progress: @escaping @Sendable (String) -> Void) -> String {
+    func run(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false, progress: @escaping @Sendable (String) -> Void) -> String {
         dispatchPrecondition(condition: .onQueue(MaxPS4FEXMetalExecution.queue))
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -486,6 +486,12 @@ final class MaxPS4GameSource: @unchecked Sendable {
             }, nativeTextures: nativeTextures) else { throw failure("Création du renderer Metal", -ENOMEM) }
             // A new screen's pipelines build on Metal's threads: the game goes on meanwhile.
             metal.asynchronousPipelines = true
+            // Draw-by-draw GPU waits are a developer diagnostic, never a cost
+            // paid by normal game execution.
+            metal.programProfiling = profiling
+            // A separate low-overhead distribution for repeatable combat
+            // traces. It is opt-in and does not add GPU completion waits.
+            metal.frameTimingProfiling = frameTiming
             let attached = maxps4_fex_engine_gnm_host_consumer(opened,
                 Unmanaged.passUnretained(metal).toOpaque(), { context, words, count in
                     guard let context, let words else { return -EINVAL }
@@ -534,8 +540,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
             // The last live report, not a new one: reading the engine now would
             // sample the main guest thread, which is this very thread.
             lock.lock(); let live = lastBeat; lock.unlock()
+            let metalReport = metal.report + (frameTiming ? "\n" + metal.frameTimingReport : "")
             defer {
-                let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP),
+                let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP),
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
                             missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
                             "Derniers appels PS4 en échec :", failedCalls(opened), "",
@@ -547,7 +554,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
                 lock.lock(); let liveFile = liveReport; liveReport = nil; lock.unlock()
                 if let liveFile { try? FileManager.default.removeItem(at: liveFile) }
             }
-            return result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP)
+            return result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP)
         } catch {
             let text = String(localized: "Échec : \(error.localizedDescription)", bundle: .maxps4)
             outcome = Outcome(missing: [], crashed: true, report: MaxPS4Reports.save(text, for: url))
@@ -582,7 +589,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     // whether the new run has started, for the loading screen.
     private static var draining: MaxPS4GameSource? // App-wide: a new game screen waits for it too.
     private var launched = false
-    func start(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false) {
+    func start(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false) {
         stop()
         let source = MaxPS4GameSource(), id = UUID()
         generation = id; self.source = source; worker = source; running = true
@@ -614,7 +621,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
             }
         }
         MaxPS4FEXMetalExecution.queue.async { [weak self] in
-            let result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling) { [weak self] text in
+            let result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling, frameTiming: frameTiming) { [weak self] text in
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.generation == id, self.running else { return }
                     self.launched = true; Self.draining = nil

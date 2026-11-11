@@ -2,9 +2,12 @@
 #include "PS4OrbisExecutionFixture.h"
 #include "../Native/maxps4_ps4_libkernel.h"
 #include "../Native/maxps4_ps4_virtual_memory.h"
+#include <chrono>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <utility>
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x); std::exit(1); } } while(0)
 int main() {
     using namespace orbis_execution;
@@ -129,6 +132,43 @@ int main() {
         const auto syscall=reinterpret_cast<uintptr_t>(image.translate(thunk+8,2,5));
         CHECK(image.hle_gate(syscall,token) && !image.hle_gate(syscall,token+1) && !image.hle_gate(syscall+1,token));
         CHECK(!image.hle_gate(reinterpret_cast<uintptr_t>(image.translate(entry,1,5)),token));
+        // Real game registries contain hundreds of HLE services. Keep the gate
+        // exact at the beginning, middle and end of a deliberately large table.
+        constexpr size_t gateCount=1024;
+        std::vector<maxps4::OrbisLinker::HLE> gates;
+        gates.reserve(gateCount);
+        for(size_t i=0;i<gateCount;++i) {
+            auto identity=kernel_identity();
+            identity.nid="gate-"+std::to_string(i);
+            gates.push_back({std::move(identity),0,uint32_t(0x10000+i)});
+        }
+        gates[gateCount/2]={kernel_identity(),0,token};
+        CHECK(maxps4::OrbisLinker::link({alone},gates,linked,reason));
+        CHECK(linked.thunks.size()==gateCount && image.prepare_orbis(linked,"app.elf",10,reason)==0);
+        const size_t gateIndices[]={0,gateCount/2,gateCount-1};
+        uintptr_t gateSites[3]{};
+        uint32_t gateTokens[3]{};
+        for(size_t i=0;i<3;++i) {
+            const auto& gate=linked.thunks[gateIndices[i]];
+            gateSites[i]=reinterpret_cast<uintptr_t>(image.translate(
+                gate.address+maxps4::OrbisLinker::syscallOffset,2,5));
+            gateTokens[i]=gate.token;
+            CHECK(gateSites[i] && image.hle_gate(gateSites[i],gateTokens[i]));
+            CHECK(!image.hle_gate(gateSites[i],gateTokens[i]+1));
+            CHECK(!image.hle_gate(gateSites[i]+1,gateTokens[i]));
+        }
+        CHECK(!image.hle_gate(reinterpret_cast<uintptr_t>(&gateSites),gateTokens[0]));
+        constexpr size_t gateLookups=50000;
+        size_t accepted=0;
+        const auto gateStarted=std::chrono::steady_clock::now();
+        for(size_t i=0;i<gateLookups;++i) {
+            const size_t selected=i%3;
+            accepted+=image.hle_gate(gateSites[selected],gateTokens[selected]);
+        }
+        const auto gateElapsed=std::chrono::duration<double,std::nano>(
+            std::chrono::steady_clock::now()-gateStarted).count()/gateLookups;
+        CHECK(accepted==gateLookups);
+        std::printf("PERF HLE gate (1024 entries, 50000 exact lookups): %.1f ns/lookup (host fixture, not game FPS)\n",gateElapsed);
         // Pointer argument: LEA into non-executable data is admitted; the HLE gate
         // maps the rebased host pointer back to the logical PS4 address.
         const uint32_t clockToken=static_cast<uint32_t>(maxps4::PS4KernelService::clock_gettime);

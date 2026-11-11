@@ -196,6 +196,7 @@ struct MaxPS4GameView: View {
     @AppStorage("maxps4.display.scaling") private var scaling = "fit"
     @AppStorage("maxps4.video.height") private var outputHeight = 1080
     @AppStorage("maxps4.fex.profile") private var profiling = false
+    @AppStorage("maxps4.metal.frameTiming") private var frameTiming = false
     // The images-per-second counter in the top right corner (all games).
     @AppStorage("maxps4.display.fpsCounter") private var fpsCounter = false
     @State private var fps = 0.0
@@ -418,7 +419,8 @@ struct MaxPS4GameView: View {
                 // (Sonic Mania stutters without TSO), the profiler off.
                 session.start(url: directory, update: update, addons: addons, device: device,
                               nativeTextures: !developer || nativeTextures, tso: !developer || tso,
-                              outputHeight: outputHeight, profiling: developer && profiling)
+                              outputHeight: outputHeight, profiling: developer && profiling,
+                              frameTiming: developer && frameTiming)
             }.buttonStyle(.borderedProminent).tint(.cyan)
             Picker("Affichage", selection: $scaling) {
                 Text("Ajuster").tag("fit")
@@ -436,7 +438,9 @@ struct MaxPS4GameView: View {
                     .font(.footnote).frame(maxWidth: 320)
                 Toggle("Ordre mémoire x86 (TSO)", isOn: $tso)
                     .font(.footnote).frame(maxWidth: 320)
-                Toggle("Profileur processeur (diagnostic)", isOn: $profiling)
+                Toggle("Profileur processeur/GPU (diagnostic)", isOn: $profiling)
+                    .font(.footnote).frame(maxWidth: 320)
+                Toggle("Mesures de régularité Metal (diagnostic)", isOn: $frameTiming)
                     .font(.footnote).frame(maxWidth: 320)
             }
             Text("Ces réglages sont mémorisés pour ce jeu.")

@@ -32,9 +32,17 @@ mkdir -p "$ASSETS/AppIcon.appiconset"
 sips -z 1024 1024 MaxPS4-iOS/Resources/MaxPS4ExactIcon.png \
   --out "$ASSETS/AppIcon.appiconset/AppIcon.png" >/dev/null
 python3 - "$ASSETS" <<'PYICON'
-import json, sys
+import json, struct, sys
 from pathlib import Path
 root=Path(sys.argv[1])
+# Reject missing, malformed or incorrectly sized icon output before xcodebuild.
+icon = root / 'AppIcon.appiconset/AppIcon.png'
+data = icon.read_bytes()
+if len(data) < 33 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
+    raise SystemExit('Generated MaxPS4 app icon is not a valid PNG header')
+width, height = struct.unpack_from('>II', data, 16)
+if (width, height) != (1024, 1024):
+    raise SystemExit(f'Generated MaxPS4 app icon must be 1024x1024, got {width}x{height}')
 (root/'Contents.json').write_text(json.dumps({'info':{'author':'xcode','version':1}}))
 (root/'AppIcon.appiconset/Contents.json').write_text(json.dumps({
  'images':[{'filename':'AppIcon.png','idiom':'universal','platform':'ios','size':'1024x1024'}],
@@ -62,6 +70,10 @@ from pathlib import Path
 path = Path('build/Payload/MaxPS4.app/Info.plist')
 info = plistlib.loads(path.read_bytes())
 info['MaxPS4SourceRevision'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+# Bind the packaged app to the exact artwork checked into this source revision.
+import hashlib
+icon = Path('MaxPS4-iOS/Resources/MaxPS4ExactIcon.png')
+info['MaxPS4AppIconSourceSHA256'] = hashlib.sha256(icon.read_bytes()).hexdigest()
 path.write_bytes(plistlib.dumps(info))
 PYREVISION
 # Xcode strips development Headers/Modules during embedding. Re-seal the exact
