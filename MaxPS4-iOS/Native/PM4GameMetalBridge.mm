@@ -1,8 +1,10 @@
 #import "PM4GameMetalBridge.h"
 #include "PM4MetalRenderer.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -23,6 +25,44 @@ double gpuMs(id<MTLCommandBuffer> command) {
         ? (command.GPUEndTime - command.GPUStartTime) * 1000 : -1;
 }
 NSString* gpuText(double ms) { return ms < 0 ? @"n/d" : [NSString stringWithFormat:@"%.2f", ms]; }
+// Disabled by default: this is a fixed-size distribution, not per-frame log
+// traffic. Recording it neither waits for the GPU nor acquires a drawable.
+struct FrameTimingSamples {
+    static constexpr size_t capacity = 120;
+    std::array<double, capacity> submit{}, encode{}, throttle{}, gpu{};
+    size_t cpuCount = 0, cpuNext = 0, gpuCount = 0, gpuNext = 0;
+    uint64_t gpuUnavailable = 0;
+    void clear() { cpuCount = cpuNext = gpuCount = gpuNext = gpuUnavailable = 0; }
+    void recordCPU(double submitMs, double encodeMs, double throttleMs) {
+        submit[cpuNext] = submitMs; encode[cpuNext] = encodeMs; throttle[cpuNext] = throttleMs;
+        cpuNext = (cpuNext + 1) % capacity; cpuCount = std::min(cpuCount + 1, capacity);
+    }
+    void recordGPU(double gpuMs) {
+        if (gpuMs < 0) { ++gpuUnavailable; return; }
+        gpu[gpuNext] = gpuMs; gpuNext = (gpuNext + 1) % capacity;
+        gpuCount = std::min(gpuCount + 1, capacity);
+    }
+    static double percentile(const std::array<double, capacity>& values, size_t count, double p) {
+        if (!count) return -1;
+        std::array<double, capacity> sorted = values;
+        std::sort(sorted.begin(), sorted.begin() + count);
+        return sorted[std::min(count - 1, size_t(std::ceil((count - 1) * p)))];
+    }
+    std::string text() const {
+        if (!cpuCount) return "\nMetal frame timing: collecting samples";
+        char out[512];
+        std::snprintf(out, sizeof out,
+            "\nMetal frame timing (last %zu batches): submit p50/p95/p99 %.2f/%.2f/%.2f ms"
+            " · encode %.2f/%.2f/%.2f ms · queue cap %.2f/%.2f/%.2f ms"
+            "\nGPU (last %zu completed commands): %.2f/%.2f/%.2f ms%s",
+            cpuCount, percentile(submit, cpuCount, .50), percentile(submit, cpuCount, .95), percentile(submit, cpuCount, .99),
+            percentile(encode, cpuCount, .50), percentile(encode, cpuCount, .95), percentile(encode, cpuCount, .99),
+            percentile(throttle, cpuCount, .50), percentile(throttle, cpuCount, .95), percentile(throttle, cpuCount, .99),
+            gpuCount, percentile(gpu, gpuCount, .50), percentile(gpu, gpuCount, .95), percentile(gpu, gpuCount, .99),
+            gpuUnavailable ? " · unavailable timestamps" : "");
+        return out;
+    }
+};
 struct GameMetalState {
     std::mutex mutex;
     GCNMemory memory;
@@ -41,7 +81,7 @@ struct GameMetalState {
     // Keep at most two render submissions ahead of the GPU. Metal preserves
     // queue order; upload buffers remain owned by their command buffers.
     std::deque<id<MTLCommandBuffer>> inflight;
-    double encodeMs = 0, waitMs = 0, renderGpuMs = -1, copyMs = 0, copyGpuMs = -1;
+    double encodeMs = 0, waitMs = 0, throttleMs = 0, renderGpuMs = -1, copyMs = 0, copyGpuMs = -1;
     // Display copies: flipped buffers found among the colour targets or not
     // (then what the game shows was never drawn by Metal), and the last one.
     unsigned shown = 0, absent = 0;
@@ -55,6 +95,9 @@ struct GameMetalState {
     Clock::time_point nextTiming{};
     bool programProfiling = false;
     uint64_t profiledDraws = 0;
+    bool frameTimingProfiling = false;
+    uint64_t frameTimingGeneration = 0;
+    FrameTimingSamples frameTimings;
     std::string computeError;
     // The draws of the last batch that had any, and the centre pixel of the
     // last displayed image (its four bytes in texture order).
@@ -196,8 +239,12 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         std::lock_guard<std::mutex> lock(s.mutex);
         if (!s.error.empty()) return -EIO;
         s.waitMs = 0;
+        s.throttleMs = 0;
+        const bool captureFrameTiming = s.frameTimingProfiling;
+        const uint64_t frameTimingGeneration = s.frameTimingGeneration;
         if (waitFor) {
             s.waitMs = elapsedMs(started);
+            s.throttleMs = s.waitMs;
             while (!s.inflight.empty()) {
                 id<MTLCommandBuffer> front = s.inflight.front();
                 if (front.status != MTLCommandBufferStatusCompleted && front.status != MTLCommandBufferStatusError) break;
@@ -316,6 +363,9 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                     if (completed.status != MTLCommandBufferStatusCompleted || completed.error)
                         state.error = completed.error ? completed.error.localizedDescription.UTF8String : "Metal GPU completion failed";
                     else if (gpuMs(completed) >= 0) state.renderGpuMs = gpuMs(completed);
+                    if (captureFrameTiming && state.frameTimingProfiling &&
+                        state.frameTimingGeneration == frameTimingGeneration)
+                        state.frameTimings.recordGPU(gpuMs(completed));
                     self.lastReport = state.report();
                 }});
             }];
@@ -323,9 +373,12 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         }
         [command commit];
         if (hasRenderWork) s.encodeMs = encoding;
-        ++s.batches; s.slowBatches += elapsedMs(started) > 33.3;
+        const double submit = elapsedMs(started);
+        if (captureFrameTiming && s.frameTimingProfiling && s.frameTimingGeneration == frameTimingGeneration)
+            s.frameTimings.recordCPU(submit, encoding, s.throttleMs);
+        ++s.batches; s.slowBatches += submit > 33.3;
         s.mostBarriers = std::max(s.mostBarriers, s.batchBarriers);
-        self.submitMilliseconds += elapsedMs(started);
+        self.submitMilliseconds += submit;
         self.lastReport = s.report();
         // The native queue retires synchronization packets only after this return.
         return 0;
@@ -452,6 +505,23 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
 - (uint64_t)profiledDraws {
     std::lock_guard<std::mutex> lock(state_->mutex);
     return state_->profiledDraws;
+}
+- (BOOL)frameTimingProfiling {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->frameTimingProfiling;
+}
+- (void)setFrameTimingProfiling:(BOOL)enabled {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->frameTimingProfiling == bool(enabled)) return;
+    state_->frameTimingProfiling = enabled;
+    ++state_->frameTimingGeneration;
+    state_->frameTimings.clear();
+}
+- (NSString*)frameTimingReport {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!state_->frameTimingProfiling) return @"Metal frame timing: disabled";
+    const std::string text = state_->frameTimings.text();
+    return [NSString stringWithUTF8String:text.c_str()];
 }
 - (NSString*)failure {
     auto& s = *state_;
