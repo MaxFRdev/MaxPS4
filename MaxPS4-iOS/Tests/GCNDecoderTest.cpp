@@ -52,6 +52,13 @@ int main() {
         const auto text = gcnDisassemble(more.instructions[n]);
         if (text != expectedMixed[n]) { std::printf("%zu: %s\n", n, text.c_str()); assert(false); }
     }
+    const std::uint32_t lanes[]={0x046b0e4f,0x02210935,0xd2040035,79u|(135u<<9),0xd2020010,309u|(132u<<9),0xbf810000};
+    const auto laneOps=decodeGCN(lanes,sizeof lanes/4);
+    assert(laneOps && laneOps.instructions.size()==5);
+    assert(gcnDisassemble(laneOps.instructions[0])=="v_writelane_b32 v53, s79, 7");
+    assert(gcnDisassemble(laneOps.instructions[1])=="v_readlane_b32 s16, v53, 4");
+    assert(gcnDisassemble(laneOps.instructions[2])=="v_writelane_b32 v53, s79, 7");
+    assert(gcnDisassemble(laneOps.instructions[3])=="v_readlane_b32 s16, v53, 4");
     // Truncation, missing s_endpgm and an unassigned encoding are refused.
     assert(decodeGCN(mixed, 5).error == GCNError::missing_endpgm);
     assert(decodeGCN(mixed + 5, 1).error == GCNError::truncated_instruction);

@@ -27,6 +27,26 @@ struct Arena {
 };
 inline std::uint32_t bits(float f) { std::uint32_t v; std::memcpy(&v, &f, 4); return v; }
 
+constexpr std::uint64_t scalarSpillPS=0x1a600;
+inline void loadScalarSpillPS(Arena& arena) {
+    // Save four scalar values in lanes 4,5,6,63 of v53 with EXEC=0.
+    // Clobber the source SGPRs, restore into different SGPRs, enable exports.
+    arena.code(scalarSpillPS,{
+        0xbefe0480, // s_mov_b64 exec,0
+        0x04000000u|(53u<<17)|(132u<<9)|0u,
+        0x04000000u|(53u<<17)|(133u<<9)|1u,
+        0x04000000u|(53u<<17)|(134u<<9)|2u,
+        0x04000000u|(53u<<17)|(191u<<9)|3u,
+        0xbe800380,0xbe810380,0xbe820380,0xbe830380,
+        0x02000000u|(8u<<17)|(132u<<9)|309u,
+        0x02000000u|(9u<<17)|(133u<<9)|309u,
+        0x02000000u|(10u<<17)|(134u<<9)|309u,
+        0x02000000u|(11u<<17)|(191u<<9)|309u,
+        0xbefe04c1, // s_mov_b64 exec,-1
+        0x7e000208,0x7e020209,0x7e04020a,0x7e06020b,
+        0xf800180f,0x03020100,0xbf810000});
+}
+
 constexpr std::uint64_t privateLDSPs=0x1a000;
 inline void loadPrivateLDSPs(Arena& arena) {
     // Two lane-private dwords, live across a branch and a rebuilt address.

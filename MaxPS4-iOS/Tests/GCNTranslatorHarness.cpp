@@ -33,6 +33,42 @@ int main() {
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     {
+        loadScalarSpillPS(arena);
+        for(unsigned trial=0;trial<32;++trial) {
+            GCNWave wave(arena.memory,64);
+            for(unsigned c=0;c<4;++c) wave.s[c]=bits(float(4*trial+c+1)/129.0f);
+            assert(wave.run(scalarSpillPS));
+            for(unsigned lane=0;lane<64;++lane) {
+                rt::GCNLane L; L.simdLane=lane;
+                for(unsigned c=0;c<4;++c) L.user[c]=bits(float(4*trial+c+1)/129.0f);
+                rt::ps_scalar_spill(L,M,unusedQuad);
+                for(unsigned c=0;c<4;++c) {
+                    assert(bits(L.color[0][c])==wave.exports[0].value[c][lane]);
+                    assert(L.color[0][c]==float(4*trial+c+1)/129.0f);
+                }
+            }
+            for(unsigned lane=0;lane<64;++lane) {
+                unsigned saved=4;
+                for(unsigned c=0;c<4;++c) if(lane==(c==3 ? 63 : c+4)) saved=c;
+                assert(wave.v(53,lane)==(saved<4 ? bits(float(4*trial+saved+1)/129.0f) : 0u));
+            }
+        }
+        std::puts("PASS scalar lane spills: four slots including lane 63 survive EXEC=0 and scalar clobbers on 64 lanes");
+        arena.put(scalarSpillPS,0xbf800000);
+        arena.put(scalarSpillPS+4*13,0x7e6a02f2);
+        arena.put(scalarSpillPS+4*14,0x7e000335);
+        GCNWave reused(arena.memory,64);
+        for(unsigned c=0;c<4;++c) reused.s[c]=bits(float(c+1)/8.0f);
+        assert(reused.run(scalarSpillPS));
+        for(unsigned lane=0;lane<64;++lane) {
+            rt::GCNLane L;
+            for(unsigned c=0;c<4;++c) L.user[c]=bits(float(c+1)/8.0f);
+            rt::ps_scalar_spill_reuse(L,M,unusedQuad);
+            for(unsigned c=0;c<4;++c) assert(bits(L.color[0][c])==reused.exports[0].value[c][lane]);
+            assert(L.color[0][0]==1.0f);
+        }
+    }
+    {
         loadJoinedLDSPs(arena);
         for(unsigned path=0;path<2;++path) {
             GCNWave wave(arena.memory,64); wave.s[10]=path;

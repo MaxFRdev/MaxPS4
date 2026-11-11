@@ -21,6 +21,38 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    loadScalarSpillPS(arena);
+    GCNTranslateOptions spillOptions=ps; spillOptions.name="ps_scalar_spill";
+    const auto scalarSpill=translateGCN(arena.memory,scalarSpillPS,spillOptions);
+    assert(scalarSpill && !scalarSpill.laneIndex && scalarSpill.source.find("scalarSpill3455")!=std::string::npos);
+    arena.put(scalarSpillPS,0xbf800000); // full EXEC throughout the vector reuse
+    arena.put(scalarSpillPS+4*13,0x7e6a02f2); // overwrite bank with 1.0
+    arena.put(scalarSpillPS+4*14,0x7e000335); // ordinary read after overwrite
+    spillOptions.name="ps_scalar_spill_reuse";
+    const auto scalarSpillReuse=translateGCN(arena.memory,scalarSpillPS,spillOptions);
+    assert(scalarSpillReuse);
+    arena.code(coverageProgram,{0xd2040035,2u|(191u<<9),0xd2020008,309u|(191u<<9),0xbf810000});
+    assert(translateGCN(arena.memory,coverageProgram,spillOptions)); // VOP3 constant selectors
+    // Refuse reads without initialization, dynamic lane selectors, ordinary
+    // vector reads of spilled data, EXEC changes and branches across the spill.
+    for(const auto& mutation:std::vector<std::pair<unsigned,uint32_t>>{
+        {1,0xbf800000}, {1,0x046a0200}, {5,0x7e080335},
+        {5,0xbefe04c1}, {5,0xbf820001}, {5,0x7e6a0280},
+        {9,0x02110f35}}) {
+        loadScalarSpillPS(arena); arena.put(scalarSpillPS+4*mutation.first,mutation.second);
+        assert(!translateGCN(arena.memory,scalarSpillPS,spillOptions));
+    }
+    loadScalarSpillPS(arena);
+    for(unsigned form=0;form<2;++form) for(unsigned lane=0;lane<64;++lane) {
+        const uint32_t write=form ? 0xd2040035u : 0x046a0a02u;
+        const uint32_t read=form ? 0xd2020008u : 0x02100b35u;
+        if(form) arena.code(coverageProgram,{write,2u|(5u<<9),read,309u|(5u<<9),0xbf810000});
+        else arena.code(coverageProgram,{write,read,0xbf810000});
+        GCNWave wave(arena.memory,64); wave.setExec(0); wave.s[2]=0x12340000u+lane; wave.s[5]=128+lane;
+        assert(wave.run(coverageProgram) && wave.s[8]==0x12340000u+lane);
+        for(unsigned n=0;n<64;++n) assert(wave.v(53,n)==(n==lane ? 0x12340000u+lane : 0u));
+        assert(!translateGCN(arena.memory,coverageProgram,spillOptions));
+    }
     loadPrivateLDSPs(arena);
     loadJoinedLDSPs(arena);
     GCNTranslateOptions joinedOptions=ps; joinedOptions.name="ps_joined_lds";
@@ -176,6 +208,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source << privateLDS.source << joinedLDS.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source << privateLDS.source << joinedLDS.source << scalarSpill.source << scalarSpillReuse.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

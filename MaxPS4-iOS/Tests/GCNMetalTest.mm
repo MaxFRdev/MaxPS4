@@ -332,5 +332,21 @@ int main() {
             }
         }
         std::puts("PASS three private LDS slots after a branch join on Metal: both paths match at every pixel");
+        loadScalarSpillPS(arena);
+        const auto spillPS=translateGCN(arena.memory,scalarSpillPS,psOptions);
+        assert(spillPS && !spillPS.laneIndex);
+        const std::string spillSource=gcnMetalPrelude()+typedVS.source+spillPS.source+
+            gcnMetalEntryPoints(typedVS,spillPS,"vs_program","ps_program",0,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:spillSource.c_str()] options:options error:&error];
+        if(!library) { std::printf("scalar spill MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        for(unsigned trial=0;trial<4;++trial) {
+            for(unsigned c=0;c<4;++c) state.psUser[c]=bits(float(4*trial+c+1)/17.0f);
+            renderCount(@"gcn_fragment",pixels);
+            for(unsigned n=0;n<width*height;++n) for(unsigned c=0;c<4;++c) {
+                const unsigned channel=c==0 ? 2 : c==2 ? 0 : c; // BGRA8 target
+                assert(std::abs(int(pixels[4*n+channel])-int(std::lround(255.0f*float(4*trial+c+1)/17.0f)))<=1);
+            }
+        }
+        std::puts("PASS scalar lane spills on Metal: four slots including lane 63 survive EXEC=0 at every pixel");
     }
 }

@@ -367,11 +367,11 @@ inline std::string gcnDisassemble(const GCNInstruction& i) {
         break;
     }
     case GCNEncoding::vop2:
-        arg(operand(256 + ((w >> 17) & 0xff), i));
+        arg(operand((i.opcode == 1 ? 0 : 256) + ((w >> 17) & 0xff), i));
         if (i.opcode >= 37 && i.opcode <= 42) arg("vcc"); // carry out
         arg(operand(w & 0x1ff, i));
         if (i.opcode == 32) arg(hex(i.literal));          // v_madmk_f32 d, s0, K, s1
-        arg(operand(256 + ((w >> 9) & 0xff), i));
+        arg(operand((i.opcode == 1 || i.opcode == 2 ? 0 : 256) + ((w >> 9) & 0xff), i));
         if (i.opcode == 0 || (i.opcode >= 40 && i.opcode <= 42)) arg("vcc"); // carry/select in
         if (i.opcode == 33) arg(hex(i.literal));          // v_madak_f32 d, s0, s1, K
         break;
@@ -398,7 +398,7 @@ inline std::string gcnDisassemble(const GCNInstruction& i) {
         };
         unsigned sources = 2;
         if (op < 256) arg(operand(w & 0xff, i, 2)); // compare: SGPR pair destination
-        else arg(operand(256 + (w & 0xff), i));
+        else arg(operand((op == 257 || op == 386 ? 0 : 256) + (w & 0xff), i));
         if (op >= 320 && op < 384) sources = 3;
         else if (op >= 384) sources = 1;
         else if (op == 256 || op == 296 || op == 297 || op == 298) sources = 3; // cndmask, addc/subb

@@ -71,6 +71,7 @@ public:
                 pc+=4*i.size;
             }
             preparePrivateLDS(entry);
+            prepareScalarSpills();
             emit(entry);
             out_.mayKill=execMayKill_ || (restoresEntryExec_ &&
                 (scalarWrites_[savedEntryExec_]!=1 || scalarWrites_[savedEntryExec_+1]!=1));
@@ -100,6 +101,106 @@ private:
     std::map<std::array<std::uint32_t, 6>, std::uint32_t> loads_; // Same load, same site.
     bool inOrder_ = false;
     unsigned privateLDSSlots_ = 0;
+    std::map<std::uint64_t,unsigned> scalarSpills_;
+    // Only scalar spills into constant lane slots are lowered. This does not
+    // implement a general wave64 shuffle using a native SIMD32 group.
+    static bool laneInstruction(const GCNInstruction& i, unsigned& op, unsigned& dst,
+                                unsigned& value, unsigned& select) {
+        if(i.encoding==GCNEncoding::vop2 && (i.opcode==1 || i.opcode==2)) {
+            op=i.opcode; dst=(i.word0>>17)&255; value=i.word0&511; select=(i.word0>>9)&255;
+            return true;
+        }
+        if(i.encoding==GCNEncoding::vop3 && (i.opcode==257 || i.opcode==258)) {
+            op=i.opcode-256; dst=i.word0&255; value=i.word1&511; select=(i.word1>>9)&511;
+            return !(i.word0&0xf00) && !(i.word1&0xf8000000u);
+        }
+        return false;
+    }
+    static bool readsVGPR(const GCNInstruction& i, unsigned reg) {
+        const auto name=gcnMnemonic(i);
+        const unsigned width=name.find("64")!=std::string::npos ? 2u : 1u;
+        const auto vector=[&](unsigned code,unsigned count) { return code>=256 && reg>=code-256 && reg-(code-256)<count; };
+        switch(i.encoding) {
+        case GCNEncoding::sop1: case GCNEncoding::sop2: case GCNEncoding::sopk:
+        case GCNEncoding::sopc: case GCNEncoding::sopp: case GCNEncoding::smrd: return false;
+        case GCNEncoding::vop1: return vector(i.word0&511,width);
+        case GCNEncoding::vop2:
+            return vector(i.word0&511,width) || vector(256+((i.word0>>9)&255),width) ||
+                (name.find("mac")!=std::string::npos && ((i.word0>>17)&255)==reg);
+        case GCNEncoding::vopc: return vector(i.word0&511,width) || vector(256+((i.word0>>9)&255),width);
+        case GCNEncoding::vop3:
+            return vector(i.word1&511,width) || vector((i.word1>>9)&511,width) ||
+                vector((i.word1>>18)&511,width) || (name.find("mac")!=std::string::npos && (i.word0&255)==reg);
+        case GCNEncoding::vintrp:
+            return (i.word0&255)==reg || (i.opcode==1 && ((i.word0>>18)&255)==reg);
+        case GCNEncoding::mimg:
+            // Plain SAMPLE needs at most four coordinates (including arrays).
+            // Conservatively bound the larger packed argument lists of other image ops.
+            return vector(256+(i.word1&255),i.opcode==32 ? 4 : 16);
+        case GCNEncoding::mubuf: case GCNEncoding::mtbuf:
+            return vector(256+(i.word1&255),2) || vector(256+((i.word1>>8)&255),4);
+        case GCNEncoding::ds:
+            return vector(256+(i.word1&255),1) || vector(256+((i.word1>>8)&255),2) || vector(256+((i.word1>>16)&255),2);
+        case GCNEncoding::exp:
+            for(unsigned c=0;c<4;++c) if((i.word0&(1u<<c)) && ((i.word1>>(8*c))&255)==reg) return true;
+            return false;
+        default: return true;
+        }
+    }
+    void prepareScalarSpills() {
+        scalarSpills_.clear();
+        std::set<unsigned> banks;
+        for(const auto& item:code_) {
+            unsigned op,dst,value,select;
+            if(laneInstruction(item.second.i,op,dst,value,select)) banks.insert(op==2 ? dst : value-256);
+        }
+        for(const unsigned bank:banks) {
+            bool dirty=false,started=false;
+            std::uint64_t block=0;
+            std::set<unsigned> initialized;
+            std::map<std::uint64_t,unsigned> proved;
+            auto last=code_.end();
+            for(auto it=code_.begin();it!=code_.end();++it) {
+                unsigned op,dst,value,select;
+                const auto& i=it->second.i;
+                if((laneInstruction(i,op,dst,value,select) && (op==2 ? dst : value-256)==bank) ||
+                   readsVGPR(i,bank) || writesVGPR(i,bank)) last=it;
+            }
+            for(auto it=code_.begin();it!=code_.end();++it) {
+                const auto pc=it->first; const auto& i=it->second.i;
+                const auto current=*std::prev(leaders_.upper_bound(pc));
+                if(started && current!=block) { proved.clear(); break; }
+                unsigned op,dst,value,select;
+                if(laneInstruction(i,op,dst,value,select) && (op==2 ? dst : value-256)==bank) {
+                    const bool scalarValue=value<104 || value==124 || (value>=128 && value<=208) || (value>=240 && value<=248) || value==255;
+                    if(select<128 || select>191 || (op==2 ? !scalarValue : value<256 || dst>=104)) { proved.clear(); break; }
+                    const unsigned slot=select-128, key=64*bank+slot;
+                    if(op==2) { initialized.insert(slot); dirty=true; started=true; block=current; }
+                    else if(!initialized.count(slot)) { proved.clear(); break; }
+                    proved[pc]=key;
+                } else if(started) {
+                    // Changing EXEC could expose an unwritten physical lane later.
+                    const auto name=gcnMnemonic(i);
+                    const bool execWrite=((i.encoding==GCNEncoding::sop1 || i.encoding==GCNEncoding::sop2 || i.encoding==GCNEncoding::sopk) &&
+                        (((i.word0>>16)&127)>=126 || (((i.word0>>16)&127)==125 && name.find("64")!=std::string::npos) ||
+                         name.find("saveexec")!=std::string::npos)) || name.find("cmpx")!=std::string::npos;
+                    if(execWrite || name.find("movrel")!=std::string::npos || (dirty && readsVGPR(i,bank))) { proved.clear(); break; }
+                    if(writesVGPR(i,bank)) {
+                        // Broad def tracking includes possible multi-result writes.
+                        // Only a definite vector destination may discard the spill.
+                        const bool overwrite=(i.encoding==GCNEncoding::vop1 && i.opcode!=0 && i.opcode!=2 && i.opcode!=65 && ((i.word0>>17)&255)==bank) ||
+                            (i.encoding==GCNEncoding::vop2 && i.opcode>2 && ((i.word0>>17)&255)==bank) ||
+                            (i.encoding==GCNEncoding::vop3 && i.opcode>258 && i.opcode!=384 && i.opcode!=386 && i.opcode!=449 && (i.word0&255)==bank) ||
+                            (i.encoding==GCNEncoding::vintrp && ((i.word0>>18)&255)==bank);
+                        if(!overwrite) { proved.clear(); break; }
+                        dirty=false; initialized.clear();
+                    }
+                }
+                if(it==last) break;
+            }
+            scalarSpills_.insert(proved.begin(),proved.end());
+        }
+    }
     // Conservative VGPR def tracking for the lane-address proof. Unknown or
     // multi-result operations may invalidate a candidate, never prove one.
     static bool writesVGPR(const GCNInstruction& i, unsigned reg) {
@@ -359,6 +460,9 @@ private:
             head += "    uint v" + std::to_string(n) + " = " + (n < 24 ? "L.vinit[" + std::to_string(n) + "]" : std::string("0u")) + ";\n";
         for(unsigned slot=0;slot<8;++slot) if(privateLDSSlots_&(1u<<slot))
             head += "    uint privateLDS"+std::to_string(slot)+" = 0u;\n";
+        std::set<unsigned> spillSlots;
+        for(const auto& spill:scalarSpills_) spillSlots.insert(spill.second);
+        for(const unsigned slot:spillSlots) head += "    uint scalarSpill"+std::to_string(slot)+" = 0u;\n";
         // Blocks are numbered by address: a fetch shader below the program
         // comes first, so execution starts at the entry's own block.
         head += "    bool scc = false; uint pc = " + std::to_string(index(entry)) + "u; bool running = true;\n"
@@ -376,7 +480,7 @@ private:
         case GCNEncoding::sopc: return sopc(in);
         case GCNEncoding::sopp: return sopp(in, pc, ended);
         case GCNEncoding::smrd: return smrd(in);
-        case GCNEncoding::vop1: case GCNEncoding::vop2: case GCNEncoding::vopc: case GCNEncoding::vop3: return vector(in);
+        case GCNEncoding::vop1: case GCNEncoding::vop2: case GCNEncoding::vopc: case GCNEncoding::vop3: return vector(in,pc);
         case GCNEncoding::vintrp: return vintrp(in);
         case GCNEncoding::ds: return ds(in,pc);
         case GCNEncoding::mubuf: case GCNEncoding::mtbuf: return mubuf(in);
@@ -605,8 +709,17 @@ private:
     }
 
     // Vector ALU, normalized to VOP3 opcode numbers as in the interpreter.
-    bool vector(const Inst& in) {
+    bool vector(const Inst& in, std::uint64_t pc) {
         const GCNInstruction& i = in.i;
+        unsigned laneOp,laneDst,laneValue,laneSelect;
+        if(laneInstruction(i,laneOp,laneDst,laneValue,laneSelect)) {
+            const auto spill=scalarSpills_.find(pc);
+            if(spill==scalarSpills_.end()) return fail("lane exchange outside proved scalar spill");
+            const std::string slot="scalarSpill"+std::to_string(spill->second);
+            if(laneOp==2) body_ += slot+" = "+scalar(laneValue,i)+";";
+            else setScalar(laneDst,slot);
+            return true; // READLANE/WRITELANE ignore EXEC.
+        }
         unsigned op, dst, src[3] = {0, 0, 0};
         unsigned abs = 0, neg = 0, omod = 0, sdst = 106;
         bool clamp = false, vop3 = false;

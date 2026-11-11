@@ -455,6 +455,17 @@ private:
             if (op < 256) sdst = dst;
             break;
         }
+        if (op == 257 || op == 258) {
+            if (!vop3) src[1] -= 256; // lane select is a scalar operand, including inline constants
+            if (abs || neg || omod || clamp || src[1] >= 256 ||
+                (op == 257 ? src[0] < 256 || dst >= 128 : src[0] >= 256)) return false;
+            const unsigned lane = scalar(src[1], i) & 63;
+            if (lane >= lanes_) return false;
+            // These two instructions ignore EXEC, even when every lane is disabled.
+            if (op == 257) setScalar(dst, v(src[0] - 256, lane));
+            else v(dst, lane) = scalar(src[0], i);
+            return true;
+        }
         const std::string name = gcnMnemonic(i);
         if (name.empty()) return false;
         const bool floatIn = gcn_detail::endsWith(name, "_f32");
