@@ -3,6 +3,7 @@
 #include "maxps4_ps4_abi.h"
 #include <array>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace maxps4 {
@@ -95,6 +96,10 @@ private:
     size_t holding(uint64_t address) const;
     void insert(Region region);
     void release(uint64_t address, uint64_t size);
+    // Splits a fully mapped span into per-region pieces (false on any hole).
+    bool pieces(uint64_t address, uint64_t size, std::vector<std::pair<uint64_t, uint64_t>>& out) const;
+    ps4::Error unmap_one(uint64_t address, uint64_t size);
+    ps4::Error protect_one(uint64_t address, uint64_t size, uint8_t permission);
     // Host pages of the current image's mmap window (general images only).
     bool hosted(const Region& region) const;
     static bool host_protect(uint64_t address, uint64_t length, uint8_t permission);
