@@ -415,7 +415,14 @@ private:
                         << static_cast<int32_t>(static_cast<uint32_t>(sym))
                         << "), addend " << addend;
                     const std::string message = why.str();
-                    require(sym == 0, message.c_str());
+                    // Retail Orbis libc.prx may retain a defined symbol index
+                    // in R_RELATIVE. The relocation is still B+A, but accept
+                    // it only when the index and addend prove that it names
+                    // the same local definition. Do not treat a malformed
+                    // high half of r_info as an addend.
+                    require(sym < symbols.size(), message.c_str());
+                    if (sym) require(symbols[sym].defined && rawAddend == symbols[sym].value,
+                                     "R_RELATIVE symbole/addend incohérents");
                 }
                 require(kind == 0 || sym < symbols.size() || (sym == 0 && symbols.empty()), "Index RELA hors SYMTAB");
                 bool supported = kind == 0 || kind == 1 || kind == 6 || kind == 7 || kind == 8;

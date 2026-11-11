@@ -691,7 +691,14 @@ private:
                     why << "R_RELATIVE avec symbole " << symbol << " (signé "
                         << static_cast<int32_t>(static_cast<uint32_t>(symbol))
                         << "), addend " << signedValue(r.addend);
-                    require(false, why.str());
+                    const std::string message = why.str();
+                    // Orbis libc.prx retains defined symbol indices in a few
+                    // R_RELATIVE entries. Their value remains B+A; the symbol
+                    // is admissible only when it is in-range, defined locally,
+                    // and its value exactly equals A.
+                    require(symbol < dynamic[i].symbols.size(), message);
+                    require(dynamic[i].symbols[symbol].defined && r.addend == dynamic[i].symbols[symbol].value,
+                            "R_RELATIVE symbol/addend mismatch");
                 }
                 require(symbol < resolved[i].size(), "invalid relocation symbol");
                 require(type == 8 || tlsRelocation || symbol != 0, "invalid relocation symbol");

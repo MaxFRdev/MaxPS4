@@ -81,6 +81,12 @@ int main(int argc, char** argv) {
     // addends valid while rejecting that malformed symbol index precisely.
     bad=good; put(bad,8,0xc08); put(bad,UINT64_MAX-7,0xc10);
     assert(m.parse(bad.data(),bad.size()) && m.relocations[0].symbol==0 && m.relocations[0].addend==-8);
+    // Retail Orbis libc can retain a defined symbol in R_RELATIVE. It remains
+    // B+A only when that symbol proves the same addend.
+    bad=good; put(bad,(uint64_t{1}<<32)|8,0xc20); put(bad,0x1000,0xc28);
+    assert(m.parse(bad.data(),bad.size()) && m.relocations[1].symbol==1 && m.relocations[1].addend==0x1000);
+    bad=good; put(bad,(uint64_t{1}<<32)|8,0xc20); put(bad,0x1008,0xc28);
+    assert(!m.parse(bad.data(),bad.size()) && m.error.find("R_RELATIVE symbole/addend")!=std::string::npos);
     bad=good; put(bad,(uint64_t{0xfffffff8}<<32)|8,0xc08); put(bad,UINT64_MAX-7,0xc10);
     assert(!m.parse(bad.data(),bad.size()) && m.error.find("symbole 4294967288 (signé -8), addend -8")!=std::string::npos);
     // Bounded deterministic malformed-header coverage.
