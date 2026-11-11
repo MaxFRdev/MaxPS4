@@ -62,6 +62,10 @@ from pathlib import Path
 path = Path('build/Payload/MaxPS4.app/Info.plist')
 info = plistlib.loads(path.read_bytes())
 info['MaxPS4SourceRevision'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+# Bind the packaged app to the exact artwork checked into this source revision.
+import hashlib
+icon = Path('MaxPS4-iOS/Resources/MaxPS4ExactIcon.png')
+info['MaxPS4AppIconSourceSHA256'] = hashlib.sha256(icon.read_bytes()).hexdigest()
 path.write_bytes(plistlib.dumps(info))
 PYREVISION
 # Xcode strips development Headers/Modules during embedding. Re-seal the exact
