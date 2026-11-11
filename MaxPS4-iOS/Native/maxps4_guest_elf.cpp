@@ -723,6 +723,10 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
         for (const auto& module : copy.modules) for (const auto& segment : module.image.segments)
             regions[i++].file_size = segment.header.fileSize;
         thunks = copy.thunks;
+        // hle_gate performs an exact binary address lookup on this immutable table.
+        std::sort(thunks.begin(), thunks.end(), [](const auto& a, const auto& b) {
+            return a.address < b.address;
+        });
         hle_data = copy.data;
         for (const auto& module : copy.modules) if (module.path == root)
             for (const auto& h : module.image.headers) if (h.type == 0x61000001) process_param_address = module.bias + h.address;

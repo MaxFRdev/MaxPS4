@@ -53,6 +53,8 @@ struct GameMetalState {
     double barrierMs = 0;
     std::string programCosts; // GPU time per pixel program in the last timed batch.
     Clock::time_point nextTiming{};
+    bool programProfiling = false;
+    uint64_t profiledDraws = 0;
     std::string computeError;
     // The draws of the last batch that had any, and the centre pixel of the
     // last displayed image (its four bytes in texture order).
@@ -245,12 +247,13 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             s.enter(3);
             s.renderer.resumeBatch();
         };
-        // One batch every 10 s runs draw by draw: what each pixel program costs the
-        // GPU. It stalls that batch, so it stays rare.
-        const bool timing = Clock::now() >= s.nextTiming;
+        // When explicitly enabled, one batch every 10 s runs draw by draw: what
+        // each pixel program costs the GPU. It stalls that batch, so it stays rare.
+        const bool timing = s.programProfiling && Clock::now() >= s.nextTiming;
         if (timing) s.nextTiming = Clock::now() + std::chrono::seconds(10);
         std::map<std::uint64_t, std::pair<double, unsigned>> drawCosts;
         const auto timeDraw = [&](std::uint64_t program) {
+            ++s.profiledDraws;
             s.renderer.endBatch();
             [command commit];
             [command waitUntilCompleted];
@@ -433,6 +436,22 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
 - (void)setAsynchronousPipelines:(BOOL)asynchronous {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->renderer.asyncPipelines = asynchronous;
+}
+- (BOOL)programProfiling {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->programProfiling;
+}
+- (void)setProgramProfiling:(BOOL)enabled {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->programProfiling == bool(enabled)) return;
+    state_->programProfiling = enabled;
+    state_->nextTiming = {};
+    if (!enabled) state_->programCosts.clear();
+    self.lastReport = state_->report();
+}
+- (uint64_t)profiledDraws {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->profiledDraws;
 }
 - (NSString*)failure {
     auto& s = *state_;
