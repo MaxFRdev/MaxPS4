@@ -38,7 +38,7 @@ root=Path(sys.argv[1])
 # Reject missing, malformed or incorrectly sized icon output before xcodebuild.
 icon = root / 'AppIcon.appiconset/AppIcon.png'
 data = icon.read_bytes()
-if len(data) < 33 or data[:8] != b'\x5cx89PNG\x5cr\x5cn\x5cx1a\x5cn' or data[12:16] != b'IHDR':
+if len(data) < 33 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
     raise SystemExit('Generated MaxPS4 app icon is not a valid PNG header')
 width, height = struct.unpack_from('>II', data, 16)
 if (width, height) != (1024, 1024):
