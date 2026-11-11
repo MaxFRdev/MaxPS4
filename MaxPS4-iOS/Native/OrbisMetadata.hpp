@@ -408,7 +408,17 @@ private:
                 require(kind == 0 || sym < symbols.size() || (sym == 0 && symbols.empty()), "Index RELA hors SYMTAB");
                 bool supported = kind == 0 || kind == 1 || kind == 6 || kind == 7 || kind == 8;
                 Relocation r{read(p,8),sym,addend,kind,supported};
-                if (kind == 8) require(sym == 0, "R_RELATIVE avec symbole");
+                // ELF64 r_info is (unsigned symbol index << 32) | type;
+                // r_addend is the separate, signed third word. In particular,
+                // bits 0xfffffff8 in the index are symbol 4294967288 (often
+                // displayed as -8 by a signed diagnostic), not an addend -8.
+                if (kind == 8) {
+                    std::ostringstream why;
+                    why << "R_RELATIVE avec symbole " << sym << " (signé "
+                        << static_cast<int32_t>(static_cast<uint32_t>(sym))
+                        << "), addend " << addend;
+                    require(sym == 0, why.str());
+                }
                 // PT_SCE_RELRO is written while relocating, then becomes read-only.
                 if (kind != 0 && !covered(r.target,8,2) && !relro(r.target,8)) {
                     std::ostringstream why;

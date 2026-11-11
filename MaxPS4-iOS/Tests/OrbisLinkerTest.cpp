@@ -81,6 +81,12 @@ int main(int argc, char** argv) {
     }
     consumer=original;
     put(consumer,0x908,(uint64_t{1}<<32)|1); put(consumer,0x910,uint64_t{1}<<63); reject(batch(),"underflow");
+    // r_info's high half is an unsigned ELF symbol index. It must not be
+    // confused with the signed RELA addend in the following word.
+    consumer=original;
+    put(consumer,0x908,(uint64_t{0xfffffff8}<<32)|8); put(consumer,0x910,UINT64_MAX-7);
+    reject(batch(),"R_RELATIVE avec symbole 4294967288 (signé -8), addend -8");
+    consumer=original;
     consumer=original;
     // RELRO is protected after relocation, not left writable for the backend.
     // NONE may contain unused, unmapped offsets/symbols and must not write.

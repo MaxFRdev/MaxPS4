@@ -680,8 +680,15 @@ private:
                         "unsupported x86-64 relocation " + std::to_string(type));
                 const bool tlsRelocation = type >= 16;
                 // TLS relocations may use symbol 0 (local-dynamic: this module, offset = A).
-                require(symbol < resolved[i].size() && (type != 8 || symbol == 0) && (type == 8 || tlsRelocation || symbol != 0),
-                        "invalid relocation symbol");
+                if (type == 8 && symbol) {
+                    std::ostringstream why;
+                    why << "R_RELATIVE avec symbole " << symbol << " (signé "
+                        << static_cast<int32_t>(static_cast<uint32_t>(symbol))
+                        << "), addend " << static_cast<int64_t>(r.addend);
+                    require(false, why.str());
+                }
+                require(symbol < resolved[i].size(), "invalid relocation symbol");
+                require(type == 8 || tlsRelocation || symbol != 0, "invalid relocation symbol");
                 // An undefined local STT_SECTION symbol in a TLS relocation names this
                 // module's TLS block (local-dynamic model), like symbol 0.
                 const auto& referenced = dynamic[i].symbols[symbol];
