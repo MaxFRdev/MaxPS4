@@ -626,10 +626,14 @@ private:
             fatal.lr = machine->uc_mcontext->__ss.__lr;
             fatal.fp = machine->uc_mcontext->__ss.__fp;
             for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext->__ss.__x[i];
+            fatal.x16 = machine->uc_mcontext->__ss.__x[16];
+            fatal.x17 = machine->uc_mcontext->__ss.__x[17];
 #else
             fatal.lr = machine->uc_mcontext.regs[30];
             fatal.fp = machine->uc_mcontext.regs[29];
             for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext.regs[i];
+            fatal.x16 = machine->uc_mcontext.regs[16];
+            fatal.x17 = machine->uc_mcontext.regs[17];
 #endif
 #if __has_feature(ptrauth_calls)
             fatal.lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(fatal.lr), ptrauth_key_return_address)));
@@ -641,6 +645,7 @@ private:
                     return at >= guard->config.DispatcherBegin && at < guard->config.DispatcherEnd
                         ? maxps4::FatalFault::dispatcher : maxps4::FatalFault::other;
                 };
+                fatal.dispatcher_begin = guard->config.DispatcherBegin;
                 fatal.pc_where = classify(fatal.pc);
                 fatal.lr_where = classify(fatal.lr);
                 fatal.guest_thread_known = true;
