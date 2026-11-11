@@ -70,3 +70,36 @@ changed. Run `42957724270` completed on every matrix entry. Its 1,024-entry,
 10,591.9 ns per lookup on Ubuntu. These values include sanitizer/test-runner
 conditions and are only a before/after host-fixture comparison, not device
 performance or game FPS.
+
+## Post-change validation
+
+The runtime change is in `bd24e7c`. It sorts the immutable linker thunk table
+once, uses an exact lower-bound lookup in `hle_gate`, and retains the token and
+RX guest-to-host translation proof. It also makes the draw-by-draw Metal GPU
+timer opt-in through the existing developer profiling preference; normal game
+submissions no longer introduce diagnostic command-buffer completion barriers.
+It does not alter W^X, guest address translation, display/event ordering,
+back-pressure, or resource cleanup.
+
+The following GitHub Actions runs completed successfully for that commit:
+
+- `43004642631` (`ps4-system-services`): the 1,024-entry HLE regression and
+  benchmark passed. The same 50,000-lookup host fixture measured 833.7 ns per
+  lookup on macOS and 619.4 ns on Ubuntu. This is approximately 90.5% and
+  94.2% lower than the recorded pre-change fixture values, respectively.
+- `43004641183` (`pm4-decoder`): the Metal regression confirms zero diagnostic
+  barriers by default, timing after explicit opt-in, and no further timing
+  after it is disabled. Its macOS CI fixture recorded 0.669 ms normal,
+  2.251 ms while profiling, then 0.127 ms normal again, with three diagnostic
+  barriers only for the opt-in submission.
+- `43004651445` (`fexcore-app`): macOS Metal and iPhone ARM64 compilation
+  completed, and the leak checks reported zero leaked bytes. Its normal
+  synthetic integration pass recorded FEX p50/p95 of 0.43/0.50 ms and
+  119.27 ms for three native Metal draw/readback operations. The separately
+  instrumented pass recorded 0.53/0.62 ms and 122.90 ms; it is not compared to
+  the normal pass.
+
+All timing figures above are CI host fixtures, not iPhone game-frame or FPS
+measurements. Promotion still requires physical-iPhone regression testing of
+Sonic Mania and Mortal Kombat, plus the intended PS4 game workload, before any
+release decision.
