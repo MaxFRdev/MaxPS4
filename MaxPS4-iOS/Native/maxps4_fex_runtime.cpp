@@ -40,6 +40,7 @@
 #include <unistd.h>
 #include <cerrno>
 #include <mutex>
+#include "maxps4_hle_timing.h"
 #include <new>
 #include <atomic>
 #include <chrono>
@@ -102,6 +103,8 @@ public:
     // One stderr line per HLE call (boot probe only): thousands per second,
     // which a game on the iPhone paid on its own thread, through the debugger.
     bool trace = false;
+    // Opt-in per-service and frame timing (profiling runs only).
+    maxps4::HLETiming* timing = nullptr;
     uint64_t private_stack = 0;
     size_t private_stack_size = 0;
     // Guest threads of a general run call in concurrently.
@@ -226,6 +229,11 @@ public:
             }
             Activity* slot = activity_slot();
             if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns(); slot->inside = true; }
+            const uint64_t timed_from = timing && timing->enabled() ? now_ns() : 0;
+            if (timed_from && (orbis == maxps4::PS4KernelService::video_submit ||
+                               orbis == maxps4::PS4KernelService::gnm_submit_flip ||
+                               orbis == maxps4::PS4KernelService::gnm_submit_flip_workload))
+                timing->frame(timed_from);
             const uint32_t stub = static_cast<uint32_t>(orbis) - maxps4::missing_import_token;
             if (static_cast<uint32_t>(orbis) >= maxps4::missing_import_token) {
                 if (missing_imports && stub < missing_imports->size()) {
@@ -273,6 +281,7 @@ public:
             }
             if (pthread) result = maxps4::pthread_result(result);
             if (slot) { slot->since = now_ns(); slot->inside = false; ++slot->returned; }
+            if (timed_from) timing->record(static_cast<uint32_t>(orbis), now_ns() - timed_from);
             if (!frequent(orbis)) {
                 RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}};
                 if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)
@@ -283,10 +292,10 @@ public:
                 else if (orbis == maxps4::PS4KernelService::open) opened[opened_next++ % opened.size()] = entry;
             }
             ++calls;
-            char path[256] = {};
-            if (trace && (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat) &&
-                memory->read_cstring(call.rdi, path, sizeof(path)))
-                std::fprintf(stderr, "hle path \"%s\"\n", path);
+            if (trace && (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)) {
+                char path[256] = {}; // Trace only: no longer zeroed on every HLE call.
+                if (memory->read_cstring(call.rdi, path, sizeof(path))) std::fprintf(stderr, "hle path \"%s\"\n", path);
+            }
             if (trace && static_cast<uint32_t>(orbis) < maxps4::missing_import_token)
                 std::fprintf(stderr, "hle %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx rsp 0x%llx -> 0x%llx\n",
                     service_name(orbis), (unsigned long long)call.rdi, (unsigned long long)call.rsi,
@@ -1004,6 +1013,7 @@ struct maxps4_fex_engine {
     std::mutex sample_lock;
     GuestFaultGuard* main_guard = nullptr;
     CPUProfile profile;
+    maxps4::HLETiming hle_timing; // Enabled with profiling.
     std::atomic<bool> profiling{false};
     uint64_t relocation = 0; // Of the loaded game, for relative profile RIPs.
     std::string update_directory; // For load_game (set_update); empty: none.
@@ -1243,6 +1253,10 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     engine->probe.missing_imports = engine->import_probe ? &engine->missing_imports : nullptr;
     engine->probe.missing_reported = engine->import_probe ? &engine->missing_reported : nullptr;
     engine->probe.trace = engine->import_trace;
+    engine->probe.timing = &engine->hle_timing;
+    engine->hle_timing.enable(false);
+    engine->hle_timing.clear();
+    engine->hle_timing.enable(engine->profiling.load());
     engine->probe.private_stack = reinterpret_cast<uintptr_t>(stack_base);
     engine->probe.private_stack_size = page;
     engine->probe.calls = 0;
@@ -2316,7 +2330,16 @@ extern "C" int32_t maxps4_fex_engine_profile_report(maxps4_fex_engine* engine, c
         symbols.assign(p.symbols.begin(), p.symbols.end());
     }
     const uint64_t total = jit + dispatcher + host;
-    if (!total) return 0;
+    const std::string timing = engine->hle_timing.report([](uint32_t id) {
+        const char* known = service_name(static_cast<maxps4::PS4KernelService>(id));
+        return known ? known : "?";
+    });
+    auto emit = [&](const std::string& out) {
+        const size_t n = std::min(capacity - 1, out.size());
+        std::memcpy(text, out.data(), n);
+        text[n] = 0;
+    };
+    if (!total) { emit(timing); return 0; }
     auto by_count = [](const auto& a, const auto& b) { return a.second > b.second; };
     std::sort(guest.begin(), guest.end(), by_count);
     std::sort(symbols.begin(), symbols.end(), by_count);
@@ -2340,9 +2363,7 @@ extern "C" int32_t maxps4_fex_engine_profile_report(maxps4_fex_engine* engine, c
         out += line;
     }
     out += "\n";
-    const size_t n = std::min(capacity - 1, out.size());
-    std::memcpy(text, out.data(), n);
-    text[n] = 0;
+    emit(out + timing);
     return 0;
 }
 extern "C" int32_t maxps4_fex_set_tso_emulation(uint32_t enabled) {

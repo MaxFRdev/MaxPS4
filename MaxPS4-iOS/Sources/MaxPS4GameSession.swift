@@ -284,7 +284,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     }
     // The CPU profile since the run started; empty unless profiling was asked.
     private func profile(_ engine: OpaquePointer) -> String {
-        var text = [CChar](repeating: 0, count: 2048)
+        var text = [CChar](repeating: 0, count: 4096)
         _ = maxps4_fex_engine_profile_report(engine, &text, text.count)
         return String(cString: text)
     }
