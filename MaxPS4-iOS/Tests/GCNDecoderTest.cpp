@@ -59,6 +59,11 @@ int main() {
     assert(gcnDisassemble(laneOps.instructions[1])=="v_readlane_b32 s16, v53, 4");
     assert(gcnDisassemble(laneOps.instructions[2])=="v_writelane_b32 v53, s79, 7");
     assert(gcnDisassemble(laneOps.instructions[3])=="v_readlane_b32 s16, v53, 4");
+    const std::uint32_t relative[]={0x7e2c8704,0xd3860014,0x00000104,0xbf810000};
+    const auto relativeOps=decodeGCN(relative,sizeof relative/4);
+    assert(relativeOps && relativeOps.instructions.size()==3);
+    assert(gcnDisassemble(relativeOps.instructions[0])=="v_movrels_b32 v22, v4");
+    assert(gcnDisassemble(relativeOps.instructions[1])=="v_movrels_b32 v20, v4");
     // Truncation, missing s_endpgm and an unassigned encoding are refused.
     assert(decodeGCN(mixed, 5).error == GCNError::missing_endpgm);
     assert(decodeGCN(mixed + 5, 1).error == GCNError::truncated_instruction);

@@ -661,15 +661,20 @@ int main() {
         id<MTLCommandBuffer> isolated = [queue commandBuffer];
         isolation.beginBatch();
         textured.target = targetA;
+        const unsigned firstPSAllocation=textured.psVGPRCount;
+        assert(firstPSAllocation<=252);
         assert(isolation.encode(textured, isolated));
         std::memset(isolationArena.bytes.data() + (image - Arena::start), 0, width * height * 4);
         PM4SoftwareRenderer blankReference(isolationArena.memory);
         blankReference.execute(s.words.data(), s.words.size());
         assert(blankReference.stats.failed == 0);
         textured.target = targetB;
+        textured.psVGPRCount=firstPSAllocation+4; // same programs, distinct RSRC1 cache key
         assert(isolation.encode(textured, isolated));
         isolation.endBatch();
         assert(isolation.buffersBuilt == 2 && isolation.buffersReused == 0);
+        assert(isolation.pipelinesBuilt==2);
+        std::puts("PASS render pipeline cache separates RSRC1 VGPR allocations");
         [isolated commit]; [isolated waitUntilCompleted];
         assert(isolated.status == MTLCommandBufferStatusCompleted && !isolated.error);
         std::uint8_t isolatedPixels[width * height * 4]{};

@@ -152,8 +152,9 @@ public:
     static MTLSamplerDescriptor* nativeSamplerDescriptor(const std::array<std::uint32_t, 4>& s);
 
 private:
-    // Programs, fetch SGPRs, PS inputs, colour format, blend, mask, depth format.
-    using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned, unsigned>;
+    // Programs, their VGPR allocations, fetch SGPRs, PS inputs, colour
+    // format, blend, mask and depth format.
+    using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, unsigned, unsigned, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned, unsigned>;
     // `format`: CB FORMAT (also its T# data format) of a colour target.
     struct Target { id<MTLTexture> texture; bool fresh; unsigned format = 0xa; };
     std::map<std::uint64_t, Target> depthTargets_;
@@ -209,7 +210,7 @@ private:
     struct PendingGuestWrite { std::uint64_t address, size, offset; id<MTLBuffer> buffer; };
     std::vector<PendingGuestWrite> pendingGuestWrites_;
     static MTLCompileOptions* compileOptions();
-    std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
+    std::map<std::tuple<std::uint64_t, std::uint32_t, unsigned>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
     bool fillProgram(std::uint64_t address);
     bool fillDispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);

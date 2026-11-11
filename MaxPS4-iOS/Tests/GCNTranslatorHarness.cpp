@@ -33,6 +33,43 @@ int main() {
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
     {
+        loadRelativeSourcePS(arena);
+        for(unsigned offset=0;offset<10;++offset) {
+            GCNWave wave(arena.memory,64); wave.s[0]=offset;
+            for(unsigned reg=4;reg<16;++reg) wave.s[reg]=bits(float(reg-3)/16.0f);
+            assert(wave.run(relativeSourcePS));
+            for(unsigned lane=0;lane<64;++lane) {
+                rt::GCNLane L; L.user[0]=offset;
+                for(unsigned reg=4;reg<16;++reg) L.user[reg]=bits(float(reg-3)/16.0f);
+                rt::ps_relative_source(L,M,unusedQuad);
+                for(unsigned c=0;c<3;++c) {
+                    const float expected=float(offset+c+1)/16.0f;
+                    assert(L.color[0][c]==expected);
+                    assert(bits(expected)==wave.exports[0].value[c][lane]);
+                }
+                assert(L.color[0][3]==1.0f);
+            }
+        }
+        GCNWave masked(arena.memory,64); masked.s[0]=3; masked.vgprCount=16;
+        for(unsigned reg=4;reg<16;++reg) masked.s[reg]=bits(float(reg-3)/16.0f);
+        for(unsigned lane=0;lane<64;++lane) masked.v(20,lane)=0xdead0000u+lane;
+        masked.setExec(0x5555555555555555ull);
+        assert(masked.run(relativeSourcePS));
+        for(unsigned lane=0;lane<64;++lane)
+            assert(masked.v(20,lane)==((lane&1) ? 0xdead0000u+lane : bits(4.0f/16.0f)));
+        arena.code(0x11800,{0xbefc0300,0xd3860014,0x00000104,0xbf810000});
+        GCNWave vop3(arena.memory,64); vop3.s[0]=3; vop3.vgprCount=16;
+        for(unsigned lane=0;lane<64;++lane) vop3.v(7,lane)=0x77000000u+lane;
+        assert(vop3.run(0x11800));
+        for(unsigned lane=0;lane<64;++lane) assert(vop3.v(20,lane)==0x77000000u+lane);
+        arena.code(0x11800,{0xbefc0300,0x7e288704,0xbf810000});
+        GCNWave outside(arena.memory,64); outside.s[0]=12; outside.vgprCount=16;
+        for(unsigned lane=0;lane<64;++lane) outside.v(0,lane)=0xabc00000u+lane;
+        assert(outside.run(0x11800));
+        for(unsigned lane=0;lane<64;++lane) assert(outside.v(20,lane)==0xabc00000u+lane);
+        std::puts("PASS relative VGPR source: unsigned M0 selects all ten packed triplets on 64 lanes");
+    }
+    {
         loadScalarSpillPS(arena);
         for(unsigned trial=0;trial<32;++trial) {
             GCNWave wave(arena.memory,64);

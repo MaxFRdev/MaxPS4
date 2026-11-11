@@ -47,6 +47,20 @@ inline void loadScalarSpillPS(Arena& arena) {
         0xf800180f,0x03020100,0xbf810000});
 }
 
+constexpr std::uint64_t relativeSourcePS=0x1a700;
+inline void loadRelativeSourcePS(Arena& arena) {
+    // Twelve scalar values become four packed float3 values in v4..v15.
+    // M0 selects one component triplet through three V_MOVRELS_B32 reads.
+    std::vector<std::uint32_t> words{0xbefc0300}; // s_mov_b32 m0,s0
+    for(unsigned reg=4;reg<16;++reg) words.push_back(0x7e000200u|(reg<<17)|reg);
+    words.insert(words.end(),{
+        0x7e288704,0x7e2a8705,0x7e2c8706, // v20..v22 = v[4..6 + M0]
+        0x7e2e02f2,                       // v23 = 1.0
+        0xf800180f,0x17161514,0xbf810000});
+    std::uint64_t at=relativeSourcePS;
+    for(const auto word:words) { arena.put(at,word); at+=4; }
+}
+
 constexpr std::uint64_t privateLDSPs=0x1a000;
 inline void loadPrivateLDSPs(Arena& arena) {
     // Two lane-private dwords, live across a branch and a rebuilt address.

@@ -58,7 +58,7 @@ std::string inputKey(const PM4Draw& d) {
 }
 
 id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format, MTLPixelFormat depth) {
-    const PipelineKey key{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
+    const PipelineKey key{d.vs, d.ps, d.vsVGPRCount, d.psVGPRCount, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
                           (d.blend >> 30) & 1 ? d.blend : 0u, d.mask, unsigned(depth)};
     if (asyncPipelines) {
         std::lock_guard<std::mutex> lock(async_->mutex);
@@ -83,9 +83,11 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     }
     GCNTranslateOptions vsOptions;
     vsOptions.stage = GCNStage::vertex; vsOptions.name = "vs_program"; vsOptions.userCount = d.vsUserCount;
+    vsOptions.vgprCount = d.vsVGPRCount;
     for (unsigned k = 0; k < 16; ++k) vsOptions.userData[k] = d.vsUser[k];
     GCNTranslateOptions psOptions;
     psOptions.name = "ps_program"; psOptions.userCount = d.psUserCount;
+    psOptions.vgprCount = d.psVGPRCount;
     psOptions.directLoads = native_ || !guest_; // Each draw is scanned: its table is complete.
     for (unsigned k = 0; k < 16; ++k) psOptions.userData[k] = d.psUser[k];
     compiling = 3;
@@ -308,11 +310,12 @@ id<MTLLibrary> PM4MetalRenderer::library(const std::string& source) {
 }
 
 id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
-    const auto key = std::make_pair(c.program, c.rsrc2);
+    const auto key = std::make_tuple(c.program, c.rsrc2, c.vgprCount);
     const auto found = kernels_.find(key);
     if (found != kernels_.end()) return found->second;
     GCNTranslateOptions options;
     options.stage = GCNStage::compute; options.name = "cs_program"; options.userCount = c.userCount;
+    options.vgprCount = c.vgprCount;
     options.maxInstructions = 1024;
     for (unsigned k = 0; k < 16; ++k) options.userData[k] = c.user[k];
     compiling = 3;

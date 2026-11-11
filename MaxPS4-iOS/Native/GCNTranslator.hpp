@@ -31,6 +31,9 @@ struct GCNTranslateOptions {
     unsigned userCount = 0;
     std::size_t maxInstructions = 16384;
     std::string name = "gcn_program";
+    // Number of VGPRs allocated by SPI_SHADER_PGM_RSRC1. Required only by
+    // relative VGPR source instructions; zero means the bound is unavailable.
+    unsigned vgprCount = 0;
     bool dispatcher = false;     // keep the switch in a loop where blocks could run in order
     // Each draw gets a complete table of scalar values (PM4ResourceScanner::scalarTable):
     // loads whose address is proved the same on every path read it without a check.
@@ -739,6 +742,19 @@ private:
         }
         const std::string& name = in.name;
         if (name.empty()) return false;
+        if(op==451) { // v_movrels_b32: source VGPR is indexed by unsigned M0
+            if(src[0]<256 || abs || neg || omod || clamp)
+                return fail("unsupported relative VGPR modifiers");
+            const unsigned base=src[0]-256;
+            if(options_.vgprCount<4 || options_.vgprCount>256 || (options_.vgprCount&3) || base>=options_.vgprCount)
+                return fail("relative VGPR allocation unavailable");
+            body_ += "{ uint relativeValue = "+v(0)+"; switch ("+s(124)+") { ";
+            for(unsigned reg=base;reg<options_.vgprCount;++reg)
+                body_ += "case "+std::to_string(reg-base)+"u: relativeValue = "+v(reg)+"; break; ";
+            body_ += "default: break; } if ("+std::string(ex())+") "+v(dst)+" = relativeValue; }";
+            sregs_.insert(126);
+            return true;
+        }
         const bool floatIn = gcn_detail::endsWith(name, "_f32");
         const bool floatOut = (floatIn && name.compare(0, 5, "v_cmp") != 0 && name != "v_cvt_u32_f32" &&
                                name != "v_cvt_i32_f32" && name != "v_cvt_pkrtz_f16_f32" && name != "v_cvt_flr_i32_f32" &&

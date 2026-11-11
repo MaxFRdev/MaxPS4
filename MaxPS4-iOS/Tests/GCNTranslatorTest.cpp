@@ -21,6 +21,25 @@ int main(int argc, char** argv) {
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
     constexpr uint64_t coverageProgram=0x11800;
+    loadRelativeSourcePS(arena);
+    GCNTranslateOptions relativeOptions=ps; relativeOptions.name="ps_relative_source"; relativeOptions.vgprCount=16;
+    const auto relativeSource=translateGCN(arena.memory,relativeSourcePS,relativeOptions);
+    assert(relativeSource && relativeSource.source.find("uint relativeValue = v0")!=std::string::npos &&
+           relativeSource.source.find("switch (s124)")!=std::string::npos &&
+           relativeSource.source.find("case 11u: relativeValue = v15")!=std::string::npos &&
+           relativeSource.source.find("relativeValue = v16")==std::string::npos);
+    GCNTranslateOptions unknownAllocation=relativeOptions; unknownAllocation.vgprCount=0;
+    assert(translateGCN(arena.memory,relativeSourcePS,unknownAllocation).error.find("relative VGPR allocation unavailable")==0);
+    unknownAllocation.vgprCount=4;
+    assert(translateGCN(arena.memory,relativeSourcePS,unknownAllocation).error.find("relative VGPR allocation unavailable")==0);
+    // VOP3 uses the same unsigned M0 indexing. Relative destinations remain
+    // refused because they cannot be represented by the bounded source switch.
+    arena.code(coverageProgram,{0xbefc0300,0xd3860014,0x00000104,0xbf810000});
+    assert(translateGCN(arena.memory,coverageProgram,relativeOptions));
+    for(const uint32_t unsupported:{0x7e288504u,0x7e288904u}) {
+        arena.code(coverageProgram,{unsupported,0xbf810000});
+        assert(!translateGCN(arena.memory,coverageProgram,relativeOptions));
+    }
     loadScalarSpillPS(arena);
     GCNTranslateOptions spillOptions=ps; spillOptions.name="ps_scalar_spill";
     const auto scalarSpill=translateGCN(arena.memory,scalarSpillPS,spillOptions);
@@ -208,6 +227,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source << privateLDS.source << joinedLDS.source << scalarSpill.source << scalarSpillReuse.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << compared.source << copied.source << lodProgram.source << gatherProgram.source << depthExport.source << typedProgram.source << counted.source << privateLDS.source << joinedLDS.source << scalarSpill.source << scalarSpillReuse.source << relativeSource.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
 }

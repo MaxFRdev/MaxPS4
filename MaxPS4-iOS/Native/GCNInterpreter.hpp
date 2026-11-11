@@ -157,6 +157,9 @@ public:
     // exchange reaches another slot, resume with full storage and the current
     // EXEC mask. Unobserved lanes start at zero, as in the representative scan.
     bool expandResourceLanes = false;
+    // Hardware allocation from *_PGM_RSRC1. Relative source reads outside it
+    // return VGPR0 on Southern Islands.
+    unsigned vgprCount = 256;
     // Called as `resource` for the resources a store instruction writes.
     std::function<void(std::uint64_t base, std::uint64_t bytes)> stored;
     // Called with every V# access: its extent, stride and the address the
@@ -175,7 +178,7 @@ public:
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
         lds_.clear(); // retain capacity; initialize only if this wave uses LDS
-        expandResourceLanes = false; missingLane_ = false;
+        expandResourceLanes = false; vgprCount = 256; missingLane_ = false;
         attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false; scalarLoad = {};
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
@@ -482,6 +485,14 @@ private:
             // These two instructions ignore EXEC, even when every lane is disabled.
             if (op == 257) setScalar(dst, v(src[0] - 256, lane));
             else v(dst, lane) = scalar(src[0], i);
+            return true;
+        }
+        if (op == 451) { // v_movrels_b32: VGPR[dst] = VGPR[src0 + M0]
+            if (src[0] < 256 || abs || neg || omod || clamp) return false;
+            std::uint64_t reg = std::uint64_t(src[0] - 256) + s[m0];
+            if (reg >= std::min(vgprCount,256u)) reg = 0;
+            for (unsigned lane = 0; lane < lanes_; ++lane)
+                if (active(lane)) v(dst, lane) = v(unsigned(reg), lane);
             return true;
         }
         const std::string name = gcnMnemonic(i);

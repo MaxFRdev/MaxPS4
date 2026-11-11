@@ -348,5 +348,24 @@ int main() {
             }
         }
         std::puts("PASS scalar lane spills on Metal: four slots including lane 63 survive EXEC=0 at every pixel");
+        loadRelativeSourcePS(arena);
+        GCNTranslateOptions relativeOptions=psOptions; relativeOptions.vgprCount=16;
+        const auto relativePS=translateGCN(arena.memory,relativeSourcePS,relativeOptions);
+        assert(relativePS);
+        const std::string relativeSource=gcnMetalPrelude()+typedVS.source+relativePS.source+
+            gcnMetalEntryPoints(typedVS,relativePS,"vs_program","ps_program",0,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:relativeSource.c_str()] options:options error:&error];
+        if(!library) { std::printf("relative source MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        for(const unsigned offset:{0u,3u,6u,9u}) {
+            state.psUser[0]=offset;
+            for(unsigned reg=4;reg<16;++reg) state.psUser[reg]=bits(float(reg-3)/16.0f);
+            renderCount(@"gcn_fragment",pixels);
+            for(unsigned n=0;n<width*height;++n) for(unsigned c=0;c<3;++c) {
+                const unsigned channel=c==0 ? 2 : c==2 ? 0 : c;
+                const int expected=int(std::lround(255.0f*float(offset+c+1)/16.0f));
+                assert(std::abs(int(pixels[4*n+channel])-expected)<=1 && pixels[4*n+3]==255);
+            }
+        }
+        std::puts("PASS relative VGPR source on Metal: four M0-selected float3 values match at every pixel");
     }
 }

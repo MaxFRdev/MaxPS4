@@ -8,6 +8,22 @@ using namespace gcn_test;
 int main(int argc, char** argv) {
     Arena arena;
     {
+        Arena relativeArena; loadEmbeddedVS(relativeArena); loadRelativeSourcePS(relativeArena);
+        relativeArena.put(0x13000,0x12345678);
+        relativeArena.put(relativeSourcePS+4*19,0xc0060900); // load after the relative reads
+        relativeArena.put(relativeSourcePS+4*20,0xbf8c007f);
+        relativeArena.put(relativeSourcePS+4*21,0xbf810000);
+        PM4Draw draw; draw.vs=embeddedVS; draw.ps=relativeSourcePS; draw.psVGPRCount=16; draw.psUserCount=16;
+        draw.psUser[0]=9; draw.psUser[8]=0x13000;
+        PM4ResourceScanner scanner(relativeArena.memory);
+        const auto& ranges=scanner.scan(draw);
+        assert(scanner.pixelError().empty() && scanner.scalarLoads().size()==1 && scanner.scalarLoads()[0].words[0]==0x12345678);
+        bool found=false;
+        for(const auto& range:ranges) found |= range.base<=0x13000 && range.base+range.size>=0x13004;
+        assert(found);
+        std::puts("PASS resource scan uses the PS VGPR allocation and continues after a relative source read");
+    }
+    {
         Arena spilled; loadEmbeddedVS(spilled); loadScalarSpillPS(spilled);
         spilled.put(0x13000,0xdecafbad);
         // A scalar load after the four restores must be discovered, even though

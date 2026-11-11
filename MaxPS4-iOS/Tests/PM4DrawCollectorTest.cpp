@@ -37,6 +37,20 @@ struct Fixture {
 }
 int main() {
     {
+        Fixture f;
+        f.run({0xc0017600,0x0a,14,0xc0017600,0x4a,3,0xc0012d00,3,2});
+        assert(f.full.size()==1 && f.full[0].psVGPRCount==60 && f.full[0].vsVGPRCount==16);
+        f.run({0xc0017600,0x0a,0,0xc0017600,0x4a,0,0xc0012d00,3,2});
+        assert(f.full.size()==2 && f.full[1].psVGPRCount==4 && f.full[1].vsVGPRCount==4);
+        bool dispatched=false;
+        const std::vector<std::uint32_t> commands={0xc0027600,0x212,7,0xa0,0xc0031500,1,1,1,1};
+        f.collector.execute(commands.data(),commands.size(),[](const PM4Draw&){},[&](const PM4Dispatch& c) {
+            dispatched=true; assert(c.vgprCount==32 && c.rsrc2==0xa0);
+        });
+        assert(dispatched);
+        std::puts("PASS RSRC1 VGPR allocations are carried by draws and dispatches");
+    }
+    {
         // Depth state is only counted: Z enabled and written, back faces culled,
         // then the same with no colour target mask.
         Fixture f;
