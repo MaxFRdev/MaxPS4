@@ -1,6 +1,7 @@
 #pragma once
 #include "PS4PKGRuntimePlan.hpp"
 #include "OrbisMetadata.hpp"
+#include <cstring>
 #include <map>
 #include <set>
 #include <tuple>
@@ -143,6 +144,11 @@ private:
         if (!(bits >> 63)) return add(a, bits);
         const uint64_t magnitude = (~bits) + 1;
         require(a >= magnitude, "relocation underflow"); return a - magnitude;
+    }
+    static int64_t signedValue(uint64_t bits) {
+        int64_t value{};
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
     }
     static std::string encoded(uint16_t id) {
         const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
@@ -684,7 +690,7 @@ private:
                     std::ostringstream why;
                     why << "R_RELATIVE avec symbole " << symbol << " (signé "
                         << static_cast<int32_t>(static_cast<uint32_t>(symbol))
-                        << "), addend " << static_cast<int64_t>(r.addend);
+                        << "), addend " << signedValue(r.addend);
                     require(false, why.str());
                 }
                 require(symbol < resolved[i].size(), "invalid relocation symbol");
