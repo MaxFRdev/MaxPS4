@@ -239,7 +239,9 @@ private:
     static constexpr std::uint64_t sharedRangeBytes = 1ull << 20;
     struct Shared { id<MTLBuffer> buffer; std::uint64_t offset; }; // the range's first byte in `buffer`
     std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
-    std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_; // Guest ranges the GPU reads directly.
+    // Guest ranges the current command buffer's GPU reads directly. Cleared
+    // with shared_ for the next submission; they must not affect later writes.
+    std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_;
     std::set<std::uint64_t> costly_;
     struct Decoded { id<MTLTexture> texture; std::uint64_t mark, batch; };
     std::uint64_t batchSerial_ = 0;

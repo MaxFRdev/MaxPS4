@@ -27,6 +27,11 @@ int main() {
     assert(!memory.executable(0x10000, 4));
     assert(memory.executable(0x1000, 1));
     assert(!memory.write(0x1000, bytes, sizeof(bytes)));
+    // A GPU no-copy view is restricted to image mappings. It is safe to keep
+    // past the synchronous GNM callback; dynamic mappings must use copies
+    // because the guest can unmap them while Metal still reads a buffer.
+    assert(memory.gpu_view(0x10000, sizeof(bytes)));
+    assert(!memory.gpu_view(UINT64_MAX, sizeof(bytes)));
     // RX code must be readable and executable but never writable.
     uint8_t code_byte = 0;
     assert(memory.read(0x1000, &code_byte, 1));

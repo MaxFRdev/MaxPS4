@@ -150,10 +150,12 @@ public:
     bool write_host_result(uint64_t address, const void* source, size_t length) {
         return write_host_result_status(address, source, length) == 0;
     }
-    // The host bytes behind readable guest memory, for the GPU only (a Metal
-    // no-copy buffer over a guest texture); CPU clients copy through read().
+    // The host bytes behind immutable image memory, for the GPU only (a Metal
+    // no-copy buffer over a guest texture). Dynamic guest mappings may be
+    // unmapped as soon as the synchronous GNM callback returns while Metal
+    // still reads the buffer, so they must go through read()/a GPU copy.
     const uint8_t* gpu_view(uint64_t address, size_t length) const {
-        return length ? translate(address, length, 4) : nullptr;
+        return length ? image_.translate(address, length, 4) : nullptr;
     }
     bool permitted(uint64_t address, size_t length, uint32_t permissions) const {
         return translate(address, length, permissions) != nullptr;
