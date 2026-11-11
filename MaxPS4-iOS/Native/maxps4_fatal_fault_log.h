@@ -43,7 +43,7 @@ public:
         w.text(" fp="); w.hex(f.fp); w.text(" sp="); w.hex(f.sp);
         for (int i = 0; i < 4; ++i) { w.text(" x"); w.dec(uint64_t(i)); w.text("="); w.hex(f.x[i]); }
         w.text(" x16="); w.hex(f.x16); w.text(" x17="); w.hex(f.x17);
-        if (f.dispatcher_begin && f.lr >= f.dispatcher_begin) {
+        if (f.dispatcher_begin && f.lr_where == FatalFault::dispatcher && f.lr >= f.dispatcher_begin) {
             w.text(" lr-dispatch-offset="); w.hex(f.lr - f.dispatcher_begin);
         }
         if (f.guest_thread_known) {
