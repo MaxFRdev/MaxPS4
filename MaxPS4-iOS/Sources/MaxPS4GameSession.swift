@@ -486,6 +486,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
             }, nativeTextures: nativeTextures) else { throw failure("Création du renderer Metal", -ENOMEM) }
             // A new screen's pipelines build on Metal's threads: the game goes on meanwhile.
             metal.asynchronousPipelines = true
+            // Draw-by-draw GPU waits are a developer diagnostic, never a cost
+            // paid by normal game execution.
+            metal.programProfiling = profiling
             let attached = maxps4_fex_engine_gnm_host_consumer(opened,
                 Unmanaged.passUnretained(metal).toOpaque(), { context, words, count in
                     guard let context, let words else { return -EINVAL }

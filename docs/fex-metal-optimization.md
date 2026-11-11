@@ -61,3 +61,12 @@ Metal profiling behavior, identical pixels, iPhone ARM64 compilation, W^X,
 guest/host translation, engine cleanup and leak checks. Physical iPhone tests
 of Sonic Mania and Mortal Kombat remain release gates; CI measurements are not
 a substitute.
+
+## HLE lookup baseline
+
+The test-only benchmark commit `f4bd394` ran before the lookup implementation
+changed. Run `42957724270` completed on every matrix entry. Its 1,024-entry,
+50,000-lookup host fixture measured 8,788.2 ns per lookup on macOS and
+10,591.9 ns per lookup on Ubuntu. These values include sanitizer/test-runner
+conditions and are only a before/after host-fixture comparison, not device
+performance or game FPS.

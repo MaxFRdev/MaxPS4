@@ -436,7 +436,7 @@ struct MaxPS4GameView: View {
                     .font(.footnote).frame(maxWidth: 320)
                 Toggle("Ordre mémoire x86 (TSO)", isOn: $tso)
                     .font(.footnote).frame(maxWidth: 320)
-                Toggle("Profileur processeur (diagnostic)", isOn: $profiling)
+                Toggle("Profileur processeur/GPU (diagnostic)", isOn: $profiling)
                     .font(.footnote).frame(maxWidth: 320)
             }
             Text("Ces réglages sont mémorisés pour ce jeu.")
