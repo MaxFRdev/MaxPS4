@@ -7,6 +7,30 @@ using namespace maxps4::gpu;
 using namespace gcn_test;
 int main(int argc, char** argv) {
     Arena arena;
+    {
+        Arena spilled; loadEmbeddedVS(spilled); loadScalarSpillPS(spilled);
+        spilled.put(0x13000,0xdecafbad);
+        // A scalar load after the four restores must be discovered, even though
+        // the scan initially represents only lane 0 and the spill uses lane 63.
+        spilled.put(scalarSpillPS+4*13,0xc0060900); // s_load_dword s12,s[8:9],0
+        PM4Draw draw; draw.vs=embeddedVS; draw.ps=scalarSpillPS; draw.psUserCount=4;
+        draw.psUser[0]=0x13000;
+        PM4ResourceScanner scanner(spilled.memory);
+        for(unsigned repeat=0;repeat<2;++repeat) {
+            const auto& discovered=scanner.scan(draw);
+            assert(scanner.pixelError().empty() && scanner.scalarLoads().size()==1);
+            assert(scanner.scalarLoads()[0].words[0]==0xdecafbad);
+            bool found=false;
+            for(const auto& range:discovered) found |= range.base<=0x13000 && range.base+range.size>=0x13004;
+            assert(found);
+        }
+        GCNWave representative(spilled.memory,1); representative.s[0]=0x13000;
+        assert(!representative.run(scalarSpillPS)); // no silent widening in normal interpretation
+        representative.reset(); representative.s[0]=0x13000; representative.expandResourceLanes=true;
+        assert(representative.run(scalarSpillPS) && representative.lanes()==1 && representative.s[12]==0xdecafbad);
+        representative.reset(); assert(!representative.expandResourceLanes && representative.lanes()==1);
+        std::puts("PASS representative resource scan resumes through scalar lane spills and finds the following constant load");
+    }
     loadFetchVS(arena); loadQuadPS(arena);
     PM4Draw d;
     d.vs = fetchVS; d.vsUserCount = 4;

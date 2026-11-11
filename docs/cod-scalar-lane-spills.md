@@ -27,3 +27,12 @@ interpreter checks cover every lane and dynamic masked indices in both
 encodings. Negative translation tests cover unsafe lifetimes and selectors.
 The Metal test checks four sets of four scalar values at every target pixel.
 Full game rendering and performance still require a physical-device test.
+
+Resource discovery normally interprets only lane 0. It may now temporarily
+expand to 64-lane storage when a lane exchange needs another slot, resuming
+at that instruction with the current SGPRs, EXEC and LDS rather than replaying
+earlier memory loads. Unobserved lanes start at zero; this remains a
+representative scan, not discovery of every divergent resource path. The
+single-lane storage is restored afterward, and normal interpretation retains
+its explicit lane bounds. A repeated scanner regression checks a constant
+load after four spills including lane 63, and verifies no duplicate loads.

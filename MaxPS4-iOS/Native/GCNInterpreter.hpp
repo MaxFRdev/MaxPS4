@@ -153,6 +153,10 @@ public:
     std::array<std::uint32_t, 4> imageSampler{};
     // Resource scans only: a tiled image reads as zeros instead of ending the run.
     bool tiledReadsZero = false;
+    // Resource discovery normally executes only lane 0. If an explicit lane
+    // exchange reaches another slot, resume with full storage and the current
+    // EXEC mask. Unobserved lanes start at zero, as in the representative scan.
+    bool expandResourceLanes = false;
     // Called as `resource` for the resources a store instruction writes.
     std::function<void(std::uint64_t base, std::uint64_t bytes)> stored;
     // Called with every V# access: its extent, stride and the address the
@@ -171,6 +175,7 @@ public:
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
         lds_.clear(); // retain capacity; initialize only if this wave uses LDS
+        expandResourceLanes = false; missingLane_ = false;
         attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false; scalarLoad = {};
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
@@ -183,7 +188,19 @@ public:
             if (!fetch(pc, i)) return false;
             std::uint64_t next = pc + 4ull * i.size;
             bool ended = false;
+            missingLane_ = false;
             if (!execute(i, pc, next, ended)) {
+                if(missingLane_ && expandResourceLanes && lanes_==1) {
+                    // Resume at the failed instruction, preserving SGPRs, LDS,
+                    // callbacks and earlier resource discoveries; do not replay loads.
+                    auto narrow=std::move(v_);
+                    lanes_=64; v_.assign(256*64,0);
+                    for(unsigned reg=0;reg<256;++reg) v_[64*reg]=narrow[reg];
+                    const bool result=run(pc,maxInstructions-steps);
+                    for(unsigned reg=0;reg<256;++reg) narrow[reg]=v_[64*reg];
+                    v_=std::move(narrow); lanes_=1;
+                    return result;
+                }
                 if (error.empty()) error = "unsupported " + gcnMnemonic(i);
                 char at[32]; std::snprintf(at, sizeof at, " at 0x%llx", (unsigned long long)pc);
                 error += at;
@@ -199,6 +216,7 @@ public:
 private:
     const GCNMemory& memory_;
     unsigned lanes_;
+    bool missingLane_ = false;
     std::vector<std::uint8_t> lds_; // one interpreted wave; allocated only when used
     GCNCodeCache* cache_;
     std::vector<std::uint32_t> v_;
@@ -460,7 +478,7 @@ private:
             if (abs || neg || omod || clamp || src[1] >= 256 ||
                 (op == 257 ? src[0] < 256 || dst >= 128 : src[0] >= 256)) return false;
             const unsigned lane = scalar(src[1], i) & 63;
-            if (lane >= lanes_) return false;
+            if (lane >= lanes_) { missingLane_=true; return false; }
             // These two instructions ignore EXEC, even when every lane is disabled.
             if (op == 257) setScalar(dst, v(src[0] - 256, lane));
             else v(dst, lane) = scalar(src[0], i);
