@@ -6,12 +6,12 @@
 [![Jeux jouables](https://img.shields.io/badge/Jeux%20jouables-Sonic%20Mania%20%C2%B7%20Mortal%20Kombat-brightgreen)](#ce-qui-marche-aujourdhui)
 
 <p align="center">
-  <a href="https://discord.gg/G7BaXN4fd">
+  <a href="https://discord.gg/99KcfSVxT8">
     <img src="https://img.shields.io/badge/Discord-Rejoindre%20la%20communaut%C3%A9%20MaxPS4-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Rejoindre le Discord MaxPS4">
   </a>
 </p>
 
-<p align="center"><b>💬 Suis l'avancement, pose tes questions et partage tes tests sur le <a href="https://discord.gg/G7BaXN4fd">Discord MaxPS4</a>.</b></p>
+<p align="center"><b>💬 Suis l'avancement, pose tes questions et partage tes tests sur le <a href="https://discord.gg/99KcfSVxT8">Discord MaxPS4</a>.</b></p>
 
 **MaxPS4** est un projet indépendant d'émulation PS4 sur iPhone. Le code x86-64 des jeux tourne sur l'iPhone grâce au JIT de **FEXCore** (activé avec StikDebug), les fonctions système de la PS4 sont réécrites dans MaxPS4, et le GPU de la PS4 est traduit vers **Metal**. Le projet s'appuie sur des travaux d'**AetherPS4**, de **FEXCore** et de **shadPS4**.
 
@@ -60,7 +60,7 @@ Les autres jeux ne sont pas encore pris en charge ou pas encore testés (voir [C
 | Autres jeux 2D légers et homebrews | ❓ Non testés : à essayer, avec le rapport de compatibilité |
 | Gros jeux 3D (God of War, Assassin's Creed…) | ❌ Hors de portée pour l'instant (processeur, GPU et mémoire) |
 
-Un jeu qui bloque laisse un rapport dans **MaxPS4 › Rapports** : partage-le sur le [Discord](https://discord.gg/G7BaXN4fd) ou dans une [Issue](https://github.com/MaxFRdev/MaxPS4/issues) pour aider à ajouter ce qui manque.
+Un jeu qui bloque laisse un rapport dans **MaxPS4 › Rapports** : partage-le sur le [Discord](https://discord.gg/99KcfSVxT8) ou dans une [Issue](https://github.com/MaxFRdev/MaxPS4/issues) pour aider à ajouter ce qui manque.
 
 ## Installer et jouer
 
@@ -85,9 +85,9 @@ Voir le document détaillé [Conformité, attribution et limites légales](docs/
 
 Les contributions sont bienvenues via [Issues](https://github.com/MaxFRdev/MaxPS4/issues), [Pull Requests](https://github.com/MaxFRdev/MaxPS4/pulls) et [CONTRIBUTING.md](CONTRIBUTING.md). Les [GitHub Actions](https://github.com/MaxFRdev/MaxPS4/actions) compilent l'IPA et lancent les tests ; les builds de développement ne sont pas des versions stables.
 
-[![Discord](https://img.shields.io/badge/Discord-Rejoindre%20MaxPS4-5865F2?logo=discord&logoColor=white)](https://discord.gg/G7BaXN4fd)
+[![Discord](https://img.shields.io/badge/Discord-Rejoindre%20MaxPS4-5865F2?logo=discord&logoColor=white)](https://discord.gg/99KcfSVxT8)
 
-**[Rejoindre le Discord MaxPS4](https://discord.gg/G7BaXN4fd)**
+**[Rejoindre le Discord MaxPS4](https://discord.gg/99KcfSVxT8)**
 
 ## Documentation technique
 
