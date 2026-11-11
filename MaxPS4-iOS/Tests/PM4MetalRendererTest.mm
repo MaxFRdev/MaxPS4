@@ -682,6 +682,7 @@ int main() {
                 return reader->memory.read(address,destination,count);
             }];
         assert(profilingBridge && !profilingBridge.programProfiling && profilingBridge.profiledDraws==0);
+        assert(!profilingBridge.frameTimingProfiling && [profilingBridge.frameTimingReport containsString:@"disabled"]);
         // Warm pipelines, then compare the same real bridge fixture with the
         // intrusive draw profiler off/on/off. Timings are evidence only; the
         // deterministic regression gate is the number of profiling barriers.
@@ -697,6 +698,17 @@ int main() {
         const double normalSubmit=profilingBridge.submitMilliseconds-beforeSubmit;
         drainProfilingBridge();
         assert(profilingBridge.profiledDraws==0 && ![profilingBridge.report containsString:@"GPU par programme"]);
+        // Frame timing is separately opt-in: it records bounded aggregate
+        // samples and does not turn on the intrusive draw-by-draw profiler.
+        profilingBridge.frameTimingProfiling=YES;
+        assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);
+        drainProfilingBridge();
+        assert(profilingBridge.frameTimingProfiling && !profilingBridge.programProfiling &&
+               [profilingBridge.frameTimingReport containsString:@"submit p50/p95/p99"] &&
+               [profilingBridge.frameTimingReport containsString:@"last 1 batches"]);
+        profilingBridge.frameTimingProfiling=NO;
+        assert(!profilingBridge.frameTimingProfiling && [profilingBridge.frameTimingReport containsString:@"disabled"]);
+        std::puts("PASS frame-time Metal diagnostics are bounded and opt-in without draw timing barriers");
         profilingBridge.programProfiling=YES;
         beforeSubmit=profilingBridge.submitMilliseconds;
         assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);

@@ -51,6 +51,10 @@ typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
 @property(nonatomic) BOOL programProfiling;
 // Number of draw-level GPU timing barriers performed by this bridge.
 @property(nonatomic, readonly) uint64_t profiledDraws;
+// Opt-in bounded frame-time distribution. It records CPU submission/encoding,
+// queue-cap waits and completed-command GPU duration without adding a GPU wait.
+@property(nonatomic) BOOL frameTimingProfiling;
+@property(nonatomic, readonly, copy) NSString* frameTimingReport;
 @end
 NS_ASSUME_NONNULL_END
 #endif

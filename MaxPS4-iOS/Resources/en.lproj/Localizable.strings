@@ -77,6 +77,7 @@
 "Textures Metal natives (expérimental)" = "Native Metal textures (experimental)";
 "Ordre mémoire x86 (TSO)" = "x86 memory order (TSO)";
 "Profileur processeur/GPU (diagnostic)" = "CPU/GPU profiler (diagnostics)";
+"Mesures de régularité Metal (diagnostic)" = "Metal frame-pacing metrics (diagnostics)";
 "Tourne l’iPhone pour jouer en paysage." = "Turn your iPhone to play in landscape.";
 "Metal indisponible sur cet appareil." = "Metal is not available on this device.";
 "Le runtime FEX n’est pas inclus dans cette compilation." = "The FEX runtime is not included in this build.";
