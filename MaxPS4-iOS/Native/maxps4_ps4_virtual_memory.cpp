@@ -299,9 +299,34 @@ PS4VirtualMemory::Region* PS4VirtualMemory::range(uint64_t address, uint64_t siz
     for (size_t i = first; i <= last; ++i) if (region.pages[i] == 0xff) return nullptr;
     return &region;
 }
+bool PS4VirtualMemory::pieces(uint64_t address, uint64_t size, std::vector<std::pair<uint64_t, uint64_t>>& out) const {
+    // FreeBSD munmap/mprotect accept a span over several adjacent mappings;
+    // every page of it must be mapped. Validate the whole span before any change.
+    out.clear();
+    if (address > UINT64_MAX - size) return false;
+    for (uint64_t at = address, end = address + size; at < end;) {
+        const size_t r = holding(at);
+        if (r == SIZE_MAX) return false;
+        const Region& region = regions_[r];
+        const uint64_t piece = std::min(end - at, region.size - (at - region.address));
+        const size_t first = size_t((at - region.address) / page_size);
+        for (size_t i = first; i < first + size_t(piece / page_size); ++i) if (region.pages[i] == 0xff) return false;
+        out.emplace_back(at, piece);
+        at += piece;
+    }
+    return true;
+}
 Error PS4VirtualMemory::unmap(uint64_t address, uint64_t length) {
     uint64_t size;
     if (address % page_size || !rounded(length, size)) return inval;
+    std::vector<std::pair<uint64_t, uint64_t>> spans;
+    if (!pieces(address, size, spans)) return nomem;
+    // Highest first: splitting a region never moves the lower ones.
+    for (auto it = spans.rbegin(); it != spans.rend(); ++it)
+        if (const Error e = unmap_one(it->first, it->second)) return e;
+    return ok;
+}
+Error PS4VirtualMemory::unmap_one(uint64_t address, uint64_t size) {
     Region* region = range(address, size);
     if (!region) return nomem;
     const size_t first = size_t((address - region->address) / page_size);
@@ -342,6 +367,13 @@ Error PS4VirtualMemory::protect(uint64_t address, uint64_t length, uint32_t prot
     if (e) return e;
     uint64_t size;
     if (address % page_size || !rounded(length, size)) return inval;
+    std::vector<std::pair<uint64_t, uint64_t>> spans;
+    if (!pieces(address, size, spans)) return nomem;
+    for (const auto& span : spans)
+        if (const Error e = protect_one(span.first, span.second, permission)) return e;
+    return ok;
+}
+Error PS4VirtualMemory::protect_one(uint64_t address, uint64_t size, uint8_t permission) {
     Region* region = range(address, size);
     if (!region) return nomem;
     if (hosted(*region) && !host_protect(address, size, permission)) return nomem;
