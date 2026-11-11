@@ -25,8 +25,8 @@ int main() {
         // accepted when every page is mapped, refused untouched over a hole.
         uint64_t a = 0, b = 0, c = 0;
         CHECK(vm.place(0, page, 0, 3, false, a) == ps4::ok);
-        CHECK(vm.place(a + page, 2 * page, 0, 1, true, b) == ps4::ok && b == a + page);
-        CHECK(vm.place(a + 3 * page, page, 0, 3, true, c) == ps4::ok && c == a + 3 * page);
+        CHECK(vm.place(0, 2 * page, 0, 1, false, b) == ps4::ok && b == a + page);
+        CHECK(vm.place(0, page, 0, 3, false, c) == ps4::ok && c == a + 3 * page);
         CHECK(vm.protect(a, 4 * page, 1) == ps4::ok);
         for (uint64_t i = 0; i < 4; ++i) CHECK(vm.translate(a + i * page, 1, 4) && !vm.translate(a + i * page, 1, 2));
         CHECK(vm.protect(a + page, 3 * page, 3) == ps4::ok);
