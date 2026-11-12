@@ -26,4 +26,6 @@ Only work in experimental branches based on `experiment/claude-codex-integration
 
 ## Current status
 
-The two runs narrow the investigation to the dispatcher return site but do **not** prove the null branch target's provenance. No code fix or on-device validation is claimed here.
+The two runs narrow the investigation to the dispatcher return site but do **not** prove the null branch target's provenance. The experimental fatal-fault record now captures the bounded RX word at `LR - 4` whenever LR is inside the dispatcher, decodes `blr`/`br`/`ret`, and records the selected source register and its saved value. Thus the observed `LR = dispatcher + 0x190` will identify the generated instruction at `dispatcher + 0x18c` on the next physical-device reproduction.
+
+For example, a report ending with `lr-previous=0xd63f0080(blrx4) lr-branch-target=0x0` would prove that the dispatcher called its `x4` target (the CompileBlock callback on the normal ARM64 path) with a null value. A `br` record instead identifies a JIT transition. Neither outcome is assumed in advance. No code fix or on-device validation is claimed here.
