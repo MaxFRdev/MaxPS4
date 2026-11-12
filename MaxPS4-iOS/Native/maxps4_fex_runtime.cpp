@@ -2471,6 +2471,26 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             engine->probe.stop_exits.load());
         out += stop;
     }
+    // Curtain-to-black-screen triage (#296): summarize the state of all guest
+    // threads at the same instant as the detailed per-thread lines below.
+    // These are observations, not proof of a deadlock: a guest can legitimately
+    // wait for an event, and a thread outside HLE may still be spinning.
+    uint32_t waiting_hle = 0, executing_guest = 0, long_hle = 0;
+    for (const auto& a : engine->probe.activity) {
+        if (!a.thread.load()) continue;
+        if (a.inside.load()) {
+            ++waiting_hle;
+            const uint64_t since = a.since.load();
+            if (now - std::min(now, since) >= 2000000000ULL) ++long_hle;
+        } else {
+            ++executing_guest;
+        }
+    }
+    char summary[192];
+    std::snprintf(summary, sizeof summary,
+        "Threads PS4 : %u dans un service HLE (%u depuis au moins 2 s) · %u hors HLE ; état instantané, blocage non confirmé\n",
+        waiting_hle, long_hle, executing_guest);
+    out += summary;
     for (const auto& a : engine->probe.activity) {
         const uint64_t thread = a.thread.load();
         if (!thread) continue;
