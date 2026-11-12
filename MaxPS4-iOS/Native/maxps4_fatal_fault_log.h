@@ -17,6 +17,11 @@ struct FatalFault {
     Where pc_where = other, lr_where = other;
     bool guest_thread_known = false;
     uint64_t guest_thread = 0, guest_rip = 0; // guest_rip: from LR when it is in JIT code, else FEX's last stored RIP.
+    // Contained as a guest fault (the app survives) rather than chained.
+    bool contained = false;
+    // Guest code bytes at guest_rip, when readable (uncompilable block).
+    uint8_t bytes[16] {};
+    uint8_t byte_count = 0;
 };
 
 class FatalFaultLog {
@@ -33,7 +38,7 @@ public:
     // One line, NUL-terminated; returns its length (without NUL).
     static size_t format(const FatalFault& f, char* out, size_t capacity) {
         Writer w {out, capacity};
-        w.text("fatal-host-fault signal="); w.dec(uint64_t(f.signal));
+        w.text(f.contained ? "contained-host-fault signal=" : "fatal-host-fault signal="); w.dec(uint64_t(f.signal));
         w.text(" code="); w.dec(uint64_t(uint32_t(f.code)));
         w.text(" addr="); w.hex(f.address);
         w.text(" pc="); w.hex(f.pc); w.text("("); w.text(where(f.pc_where)); w.text(")");
@@ -44,6 +49,13 @@ public:
             w.text(" guest-thread="); w.dec(f.guest_thread);
             w.text(" guest-rip="); w.hex(f.guest_rip);
         } else w.text(" guest-thread=none");
+        if (f.byte_count) {
+            w.text(" guest-bytes=");
+            for (uint8_t i = 0; i < f.byte_count && i < sizeof f.bytes; ++i) {
+                w.put("0123456789abcdef"[f.bytes[i] >> 4]);
+                w.put("0123456789abcdef"[f.bytes[i] & 15]);
+            }
+        }
         w.text("\n");
         return w.finish();
     }

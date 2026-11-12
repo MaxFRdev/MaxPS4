@@ -1,6 +1,8 @@
 // FatalFaultLog (issue #296): exact line format, truncation without overflow,
 // append-only file, disabled without a directory.
 #include "maxps4_fatal_fault_log.h"
+#include "maxps4_dispatch_fault.h"
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -48,6 +50,30 @@ int main() {
     CHECK(text.rfind(want, 0) == 0);
     CHECK(text.find("guest-thread=none\n") != std::string::npos && text.size() > std::strlen(want));
     std::remove(path.c_str()); ::rmdir(dir);
+    // #296 signature: pc == 0 with LR inside the dispatcher (br x0 after a
+    // CompileBlock that returned 0), only for SIGSEGV.
+    {
+        const uint64_t begin = 0x1031b4000, end = 0x1031b8000, lr = begin + 0x190;
+        CHECK(maxps4::uncompilable_dispatch(SIGSEGV, 0, lr, begin, end));
+        CHECK(!maxps4::uncompilable_dispatch(SIGSEGV, 4, lr, begin, end));        // a non-null PC is not this case
+        CHECK(!maxps4::uncompilable_dispatch(SIGSEGV, 0, end, begin, end));       // LR past the dispatcher
+        CHECK(!maxps4::uncompilable_dispatch(SIGSEGV, 0, begin - 4, begin, end)); // LR before it (e.g. app code)
+        CHECK(!maxps4::uncompilable_dispatch(SIGBUS, 0, lr, begin, end));
+        CHECK(!maxps4::uncompilable_dispatch(SIGSEGV, 0, 0, 0, 0));               // dispatcher range unknown
+    }
+    // The contained record names the guest bytes FEX could not compile.
+    {
+        FatalFault c; c.signal = SIGILL; c.code = maxps4::uncompilable_guest_block; c.address = 0x7001a14338;
+        c.lr = 0x1031b4190; c.lr_where = FatalFault::dispatcher; c.guest_thread_known = true; c.guest_thread = 14;
+        c.guest_rip = 0x7001a14338; c.contained = true;
+        const uint8_t bytes[] = {0xf0, 0x0f, 0xc7, 0x0e};
+        for (uint8_t i = 0; i < sizeof bytes; ++i) c.bytes[i] = bytes[i];
+        c.byte_count = sizeof bytes;
+        char out[512];
+        FatalFaultLog::format(c, out, sizeof out);
+        CHECK(std::strncmp(out, "contained-host-fault signal=4 code=19792 addr=0x7001a14338 pc=0x0(other) lr=0x1031b4190(dispatcher)", 99) == 0);
+        CHECK(std::strstr(out, " guest-thread=14 guest-rip=0x7001a14338 guest-bytes=f00fc70e\n") != nullptr);
+    }
     std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory");
     return 0;
 }

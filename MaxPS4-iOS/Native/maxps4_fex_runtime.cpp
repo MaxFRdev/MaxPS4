@@ -42,6 +42,7 @@
 #include <mutex>
 #include "maxps4_hle_timing.h"
 #include "maxps4_fatal_fault_log.h"
+#include "maxps4_dispatch_fault.h"
 #include <new>
 #include <atomic>
 #include <chrono>
@@ -605,6 +606,44 @@ private:
                 stop = guard->config.ThreadStopHandlerAddressSpillSRA;
             else if (pc >= guard->config.DispatcherBegin && pc < guard->config.DispatcherEnd)
                 stop = guard->config.ThreadStopHandlerAddress;
+            // #296: the dispatcher branched to a null block (`br x0` after
+            // CompileBlock returned 0 for a guest block FEX cannot compile).
+            // A guest fault at the RIP FEX stored, not a host crash. The static
+            // registers were refilled after the call: spill them on the way out.
+            uint64_t lr = 0;
+#if defined(__APPLE__)
+            lr = machine->uc_mcontext->__ss.__lr;
+#else
+            lr = machine->uc_mcontext.regs[30];
+#endif
+#if __has_feature(ptrauth_calls)
+            lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(lr), ptrauth_key_return_address)));
+#endif
+            if (!stop && maxps4::uncompilable_dispatch(number, pc, lr, guard->config.DispatcherBegin, guard->config.DispatcherEnd)) {
+                const uint64_t rip = guard->thread->CurrentFrame->State.rip;
+                maxps4::FatalFault record;
+                record.signal = SIGILL; record.code = maxps4::uncompilable_guest_block;
+                record.address = rip; record.pc = pc; record.lr = lr; record.sp = sp;
+                record.pc_where = maxps4::FatalFault::other; record.lr_where = maxps4::FatalFault::dispatcher;
+                record.guest_thread_known = true;
+                record.guest_thread = ProbeAddressSpace::guest_thread;
+                record.guest_rip = rip;
+                record.contained = true;
+                // The bytes FEX failed on, so the instruction can be identified.
+                for (uint8_t n = sizeof record.bytes; n; n /= 2)
+                    if (guard->memory_access && guard->memory_access(rip, n, 4)) {
+                        std::memcpy(record.bytes, reinterpret_cast<const void*>(rip), n);
+                        record.byte_count = n;
+                        break;
+                    }
+                maxps4::FatalFaultLog::append(record);
+                guard->code = maxps4::uncompilable_guest_block;
+                guard->address = rip;
+                guard->signal.store(SIGILL);
+                sp = guard->thread->CurrentFrame->ReturningStackLocation;
+                pc = guard->config.ThreadStopHandlerAddressSpillSRA;
+                return;
+            }
             if (stop) {
                 guard->code = number == SIGURG ? 0 : info->si_code;
                 guard->address = number == SIGURG ? 0 : reinterpret_cast<uintptr_t>(info->si_addr);
