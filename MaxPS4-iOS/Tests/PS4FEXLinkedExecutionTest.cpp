@@ -1073,9 +1073,10 @@ int main(int argc, char** argv) {
             if (kind>=5) CHECK(fault.signal==SIGILL && fault.code==0x4d50);
             if (kind==5) CHECK(fault.address==code+6 && fault.rip==stub_rip && stub_rip>code+8);
             // A direct JMP (6: inside the entry; 7: the stub's JMP to the entry)
-            // leaves no call-ret entry: the target is not recovered and the
-            // address stays the stale State.rip (documented limitation).
-            if (kind==6 || kind==7) CHECK(fault.address==stub_rip && fault.rip==stub_rip);
+            // leaves no call-ret entry. The target comes from the code-buffer
+            // scan for the thunk ExitFunctionLink patched with HostCode 0.
+            if (kind==6) CHECK(fault.address==code+3 && fault.rip==stub_rip);
+            if (kind==7) CHECK(fault.address==code && fault.rip==stub_rip);
         }
         // Recovery: the next image runs normally and clears the fault record.
         auto app = orbis_execution::make_general_app(9);

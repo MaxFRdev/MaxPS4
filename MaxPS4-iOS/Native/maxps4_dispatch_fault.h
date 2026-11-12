@@ -64,4 +64,35 @@ inline bool jump_thunk_record(const JumpThunk& t, uint64_t thunk, uint64_t calle
     return first && t.insn[1] == 0xd61f0000u && (t.insn[2] & 0xff00001fu) == 0x58000000u &&
            t.insn[3] == 0xd63f0000u && thunk + t.caller_offset == caller;
 }
+
+// ExitFunctionLink when CompileBlock returned 0: BranchOffset = 0/4 - caller/4
+// is never in `b` range for a JIT buffer above 128 MiB, so FEX takes the
+// out-of-range path. It stores HostCode = 0 in the record, patches the thunk's
+// first word to `ldr x0, #0x10` and returns 0. This leaves a permanent mark in
+// the code buffer, even for a JMP/Jcc with no call-ret entry. Every other
+// linked thunk has a non-null HostCode, and unlinked thunks still start with
+// `b +8`.
+//
+// The scan only reports a candidate when the caller at thunk + CallerOffset is
+// inside [begin, end) and is a `b` or `bl` to this thunk.
+struct NullLinkScan { uint32_t count = 0; uint64_t thunk = 0, guest_rip = 0, caller = 0; bool call = false; };
+inline NullLinkScan scan_null_links(uint64_t begin, uint64_t end) {
+    NullLinkScan out;
+    if (end <= begin || end - begin < sizeof(JumpThunk)) return out;
+    for (uint64_t at = (begin + 7) & ~uint64_t(7); at + sizeof(JumpThunk) <= end; at += 8) {
+        const auto* w = reinterpret_cast<const uint32_t*>(at);
+        if (w[0] != 0x58000080u || w[1] != 0xd61f0000u || w[3] != 0xd63f0000u) continue;
+        JumpThunk t;
+        __builtin_memcpy(&t, w, sizeof t);
+        if (t.host_code || !jump_thunk_record(t, at, at + t.caller_offset)) continue;
+        const uint64_t caller = at + t.caller_offset;
+        if (caller < begin || caller + 4 > end || (caller & 3)) continue;
+        const uint32_t insn = *reinterpret_cast<const uint32_t*>(caller);
+        const bool is_bl = (insn & 0xfc000000u) == 0x94000000u, is_b = (insn & 0xfc000000u) == 0x14000000u;
+        uint64_t target = 0;
+        if (!(is_bl || is_b) || !bl_target(caller, (insn & 0x03ffffffu) | 0x94000000u, target) || target != at) continue;
+        if (!out.count++) { out.thunk = at; out.guest_rip = t.guest_rip; out.caller = caller; out.call = is_bl; }
+    }
+    return out;
+}
 } // namespace maxps4

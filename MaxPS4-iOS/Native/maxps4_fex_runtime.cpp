@@ -673,6 +673,38 @@ private:
                         }
                     }
                 }
+                // A JMP/Jcc (or a CALL below an older call-ret entry) leaves no
+                // pointer to its thunk. ExitFunctionLink still marked it: the
+                // thunk now starts `ldr x0, #0x10` with HostCode 0. Scan the code
+                // buffer that holds a known JIT address (the call-ret host PC);
+                // its bounds are found page by page with IsAddressInCodeBuffer.
+                // Fallback anchor: a host block from FEX's L1 lookup cache
+                // ({HostCode, GuestCode} pairs, at least MIN_L1_ENTRIES = 8192).
+                uint64_t anchor_code = 0;
+                if (call == maxps4::DispatchCall::exit_link && !record.link_known && !maxps4_jit_held()) {
+                    if (record.callret_known && guard->context->IsAddressInCodeBuffer(thread, record.callret_host))
+                        anchor_code = record.callret_host;
+                    else if (const auto* l1 = reinterpret_cast<const uint64_t*>(thread->CurrentFrame->State.L1Pointer))
+                        for (size_t i = 0; i < 8192 && !anchor_code; ++i)
+                            if (l1[2 * i] && guard->context->IsAddressInCodeBuffer(thread, l1[2 * i])) anchor_code = l1[2 * i];
+                }
+                if (anchor_code) {
+                    constexpr uint64_t step = 0x4000, limit = uint64_t(1) << 30;
+                    const uint64_t anchor = anchor_code & ~(step - 1);
+                    uint64_t lo = anchor, hi = anchor + step;
+                    while (anchor - lo < limit && lo >= step && guard->context->IsAddressInCodeBuffer(thread, lo - step)) lo -= step;
+                    while (hi - anchor < limit && guard->context->IsAddressInCodeBuffer(thread, hi)) hi += step;
+                    const auto scan = maxps4::scan_null_links(lo, hi);
+                    record.scan_known = true;
+                    record.null_links = scan.count;
+                    if (scan.count) {
+                        record.null_link_caller = scan.caller;
+                        record.null_link_call = scan.call;
+                        record.link_known = true;
+                        record.link_rip = scan.guest_rip; record.link_host = 0;
+                        read_guest(scan.guest_rip, record.link_bytes, record.link_byte_count);
+                    }
+                }
                 // The failing RIP: the linked target when the thunk proves it.
                 const uint64_t failed = call == maxps4::DispatchCall::exit_link && record.link_known && !record.link_host
                     ? record.link_rip : rip;
