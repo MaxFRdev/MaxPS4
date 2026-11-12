@@ -678,15 +678,33 @@ private:
                 // thunk now starts `ldr x0, #0x10` with HostCode 0. Scan the code
                 // buffer that holds a known JIT address (the call-ret host PC);
                 // its bounds are found page by page with IsAddressInCodeBuffer.
+                // Host reads outside known-mapped memory are probed first: write()
+                // from an unreadable page fails with EFAULT instead of faulting
+                // (async-signal-safe). One byte per 4 KiB page.
+                const int saved_errno = errno;
+                int probe[2] = {-1, -1};
+                const bool can_probe = ::pipe(probe) == 0;
+                auto readable = [&](uint64_t at, uint64_t len) {
+                    if (!can_probe || !len) return false;
+                    for (uint64_t p = at & ~uint64_t(0xfff); p < at + len; p += 0x1000) {
+                        const uint64_t q = p < at ? at : p;
+                        char c;
+                        if (::write(probe[1], reinterpret_cast<const void*>(q), 1) != 1) return false;
+                        if (::read(probe[0], &c, 1) != 1) return false;
+                    }
+                    return true;
+                };
                 // Fallback anchor: a host block from FEX's L1 lookup cache
                 // ({HostCode, GuestCode} pairs, at least MIN_L1_ENTRIES = 8192).
                 uint64_t anchor_code = 0;
                 if (call == maxps4::DispatchCall::exit_link && !record.link_known && !maxps4_jit_held()) {
                     if (record.callret_known && guard->context->IsAddressInCodeBuffer(thread, record.callret_host))
                         anchor_code = record.callret_host;
-                    else if (const auto* l1 = reinterpret_cast<const uint64_t*>(thread->CurrentFrame->State.L1Pointer))
-                        for (size_t i = 0; i < 8192 && !anchor_code; ++i)
-                            if (l1[2 * i] && guard->context->IsAddressInCodeBuffer(thread, l1[2 * i])) anchor_code = l1[2 * i];
+                    else if (const uint64_t l1 = thread->CurrentFrame->State.L1Pointer; l1 && readable(l1, 8192 * 16))
+                        for (size_t i = 0; i < 8192 && !anchor_code; ++i) {
+                            const uint64_t host = reinterpret_cast<const uint64_t*>(l1)[2 * i];
+                            if (host && guard->context->IsAddressInCodeBuffer(thread, host)) anchor_code = host;
+                        }
                 }
                 if (anchor_code) {
                     constexpr uint64_t step = 0x4000, limit = uint64_t(1) << 30;
@@ -694,7 +712,17 @@ private:
                     uint64_t lo = anchor, hi = anchor + step;
                     while (anchor - lo < limit && lo >= step && guard->context->IsAddressInCodeBuffer(thread, lo - step)) lo -= step;
                     while (hi - anchor < limit && guard->context->IsAddressInCodeBuffer(thread, hi)) hi += step;
-                    const auto scan = maxps4::scan_null_links(lo, hi);
+                    // Scan each run of readable pages (a code buffer may hold
+                    // reserved, unreadable pages).
+                    maxps4::NullLinkScan scan;
+                    for (uint64_t run = lo; run < hi;) {
+                        if (!readable(run, 0x1000)) { run += 0x1000; continue; }
+                        uint64_t end = run + 0x1000;
+                        while (end < hi && readable(end, 0x1000)) end += 0x1000;
+                        const auto part = maxps4::scan_null_links(run, end);
+                        if (part.count && !scan.count) scan = part; else scan.count += part.count;
+                        run = end;
+                    }
                     record.scan_known = true;
                     record.null_links = scan.count;
                     if (scan.count) {
@@ -705,6 +733,8 @@ private:
                         read_guest(scan.guest_rip, record.link_bytes, record.link_byte_count);
                     }
                 }
+                if (can_probe) { ::close(probe[0]); ::close(probe[1]); }
+                errno = saved_errno;
                 // The failing RIP: the linked target when the thunk proves it.
                 const uint64_t failed = call == maxps4::DispatchCall::exit_link && record.link_known && !record.link_host
                     ? record.link_rip : rip;
