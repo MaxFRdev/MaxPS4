@@ -626,12 +626,16 @@ private:
             fatal.lr = machine->uc_mcontext->__ss.__lr;
             fatal.fp = machine->uc_mcontext->__ss.__fp;
             for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext->__ss.__x[i];
+            fatal.x4 = machine->uc_mcontext->__ss.__x[4];
+            fatal.x5 = machine->uc_mcontext->__ss.__x[5];
             fatal.x16 = machine->uc_mcontext->__ss.__x[16];
             fatal.x17 = machine->uc_mcontext->__ss.__x[17];
 #else
             fatal.lr = machine->uc_mcontext.regs[30];
             fatal.fp = machine->uc_mcontext.regs[29];
             for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext.regs[i];
+            fatal.x4 = machine->uc_mcontext.regs[4];
+            fatal.x5 = machine->uc_mcontext.regs[5];
             fatal.x16 = machine->uc_mcontext.regs[16];
             fatal.x17 = machine->uc_mcontext.regs[17];
 #endif
