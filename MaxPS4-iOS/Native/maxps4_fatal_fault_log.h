@@ -6,6 +6,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include "maxps4_dispatch_fault.h"
 #include <fcntl.h>
 #include <unistd.h>
 
