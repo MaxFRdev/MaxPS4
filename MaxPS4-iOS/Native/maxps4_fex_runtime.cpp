@@ -657,19 +657,28 @@ private:
                     std::memcpy(entry, reinterpret_cast<const void*>(callret), sizeof entry);
                     record.callret_known = true;
                     record.callret_rip = entry[0]; record.callret_host = entry[1];
+                    record.exit_link_trace = maxps4::ExitLinkTrace::callret_entry;
                     const uint64_t site = entry[1] - 4;
-                    uint64_t thunk = 0;
                     if (entry[1] >= 4 && !maxps4_jit_held() &&
-                        guard->context->IsAddressInCodeBuffer(thread, site) &&
-                        maxps4::bl_target(site, *reinterpret_cast<const uint32_t*>(site), thunk) && !(thunk & 7) &&
-                        guard->context->IsAddressInCodeBuffer(thread, thunk) &&
-                        guard->context->IsAddressInCodeBuffer(thread, thunk + sizeof(maxps4::JumpThunk) - 1)) {
-                        maxps4::JumpThunk t;
-                        std::memcpy(&t, reinterpret_cast<const void*>(thunk), sizeof t);
-                        if (maxps4::jump_thunk_record(t, thunk, site)) {
-                            record.link_known = true;
-                            record.link_rip = t.guest_rip; record.link_host = t.host_code;
-                            read_guest(t.guest_rip, record.link_bytes, record.link_byte_count);
+                        guard->context->IsAddressInCodeBuffer(thread, site)) {
+                        record.exit_link_trace = maxps4::ExitLinkTrace::return_site_jit;
+                        const uint32_t previous = *reinterpret_cast<const uint32_t*>(site);
+                        record.callret_previous_instruction = previous;
+                        uint64_t thunk = 0;
+                        if (maxps4::bl_target(site, previous, thunk)) {
+                            record.exit_link_trace = maxps4::ExitLinkTrace::direct_bl;
+                            if (!(thunk & 7) && guard->context->IsAddressInCodeBuffer(thread, thunk) &&
+                                guard->context->IsAddressInCodeBuffer(thread, thunk + sizeof(maxps4::JumpThunk) - 1)) {
+                                record.exit_link_trace = maxps4::ExitLinkTrace::thunk_in_jit;
+                                maxps4::JumpThunk t;
+                                std::memcpy(&t, reinterpret_cast<const void*>(thunk), sizeof t);
+                                if (maxps4::jump_thunk_record(t, thunk, site)) {
+                                    record.exit_link_trace = maxps4::ExitLinkTrace::validated;
+                                    record.link_known = true;
+                                    record.link_rip = t.guest_rip; record.link_host = t.host_code;
+                                    read_guest(t.guest_rip, record.link_bytes, record.link_byte_count);
+                                }
+                            }
                         }
                     }
                 }

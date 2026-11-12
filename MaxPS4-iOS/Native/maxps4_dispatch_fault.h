@@ -42,6 +42,21 @@ inline const char* dispatch_call_name(DispatchCall c) {
     return c == DispatchCall::compile_block ? "compile-block" : c == DispatchCall::exit_link ? "exit-link" : "unknown";
 }
 
+// Progress made while resolving a call-ret entry back to the jump thunk that
+// invoked ExitFunctionLink. A call-ret entry proves an older x86 CALL is live,
+// but it need not be the direct branch currently being linked.
+enum class ExitLinkTrace : uint8_t { unavailable, callret_entry, return_site_jit, direct_bl, thunk_in_jit, validated };
+inline const char* exit_link_trace_name(ExitLinkTrace stage) {
+    switch (stage) {
+    case ExitLinkTrace::callret_entry: return "callret";
+    case ExitLinkTrace::return_site_jit: return "return-site-jit";
+    case ExitLinkTrace::direct_bl: return "direct-bl";
+    case ExitLinkTrace::thunk_in_jit: return "thunk-in-jit";
+    case ExitLinkTrace::validated: return "validated";
+    default: return "unavailable";
+    }
+}
+
 // Target of an ARM64 `bl` at `at`.
 inline bool bl_target(uint64_t at, uint32_t instruction, uint64_t& target) {
     if ((instruction & 0xfc000000u) != 0x94000000u) return false;
