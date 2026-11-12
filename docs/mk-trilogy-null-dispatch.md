@@ -1,4 +1,4 @@
-# MK Trilogy: host `pc=0` from FEX's dispatcher (issue #296)
+﻿# MK Trilogy: host `pc=0` from FEX's dispatcher (issue #296)
 
 ## Device evidence (#298, #300)
 
@@ -25,7 +25,7 @@ FEX source pinned by CI (AetherPS4 `3347fc13`):
 
 So: guest thread 14 reaches `0x7001a14338` (the RIP the dispatcher read from
 `State.rip`), FEX cannot lower its first instruction, `CompileBlock` returns 0,
-the dispatcher does `br x0` → host `pc=0`, LR still just after the `blr`
+the dispatcher does `br x0` â†’ host `pc=0`, LR still just after the `blr`
 (+0x190). `x0=0` is that return value. `br` does not change LR. `x2` is a
 caller-saved register clobbered by the call, so `0x13` is not the RIP.
 
@@ -39,11 +39,11 @@ on SIGSEGV is exactly this case. `GuestFaultGuard::handle` now contains it as a
 guest fault: SIGILL, code `0x4d50`, address = guest RIP, thread stopped through
 `ThreadStopHandlerAddressSpillSRA` (static registers were refilled after the
 call). The run ends with `-EILSEQ`. The app reports "Instruction x86 non prise
-en charge par FEX à RIP …" instead of being killed. The game **still does not
+en charge par FEX Ã  RIP â€¦" instead of being killed. The game **still does not
 run**: the instruction must be supported next.
 
 The handler also appends a `contained-host-fault` line with up to 16 bytes at
-the guest RIP (`guest-bytes=…`) to `Documents/maxps4-fatal-fault.txt`.
+the guest RIP (`guest-bytes=â€¦`) to `Documents/maxps4-fatal-fault.txt`.
 
 ## Next step
 
@@ -52,7 +52,7 @@ that instruction. Then retest MK Trilogy and Sonic Mania.
 
 ## iPhone retest: curtain-to-black-screen (2026-11-12)
 
-The SideStore IPA from #298 (`2ee8e6c`) no longer exits to SpringBoard when selecting **Legacy Kollection → Mortal Kombat Trilogy → Play**. The menu and curtain-closing animation render, followed by a persistent **black screen and no audible sound**, even after 1–2 minutes. This is **not** a verified game fix. See issue #296 for the full user report.
+The SideStore IPA from #298 (`2ee8e6c`) no longer exits to SpringBoard when selecting **Legacy Kollection â†’ Mortal Kombat Trilogy â†’ Play**. The menu and curtain-closing animation render, followed by a persistent **black screen and no audible sound**, even after 1â€“2 minutes. This is **not** a verified game fix. See issue #296 for the full user report.
 
 Observed diagnostic snapshot (not a causal proof): JIT uptime ~37 s; 1,943 previously displayed frames, but current presentation rate 0 FPS; `sceGnmSubmitAndFlipCommandBuffers` reported waiting for VBlank ~1.5 s; repeated `sceKernelUsleep(0x3e8, ...)` returns `-1`; audio calls occur but output frames are overwhelmingly dropped; Metal reports 0 draw failures. This snapshot contains **no** `contained-host-fault` or `guest-bytes` line. Do not assume the original null-dispatch fault still occurs, or that `sceKernelUsleep` is causal, without more evidence.
 
@@ -93,12 +93,12 @@ dispatcher calls `CompileBlock` from **two** places, both followed by
 
 | path | call | compiles |
 |---|---|---|
-| `NoBlock` | `blr x4` → `CompileBlock` | `State.rip` (just loaded) |
-| `ExitFunctionLinker` | `blr x2` → `Arm64JITCore::ExitFunctionLink` → `CompileBlock` | `Record->GuestRIP`, the target of a **direct** JMP/CALL |
+| `NoBlock` | `blr x4` â†’ `CompileBlock` | `State.rip` (just loaded) |
+| `ExitFunctionLinker` | `blr x2` â†’ `Arm64JITCore::ExitFunctionLink` â†’ `CompileBlock` | `Record->GuestRIP`, the target of a **direct** JMP/CALL |
 
 A linked direct branch never writes `State.rip`. The reported value is exactly
 the address after the `syscall` of the previous libkernel stub (`0f 05` at
-`…336`, then `c3` at `…338`), i.e. where `ProbeAddressSpace::HandleSyscall`
+`â€¦336`, then `c3` at `â€¦338`), i.e. where `ProbeAddressSpace::HandleSyscall`
 left it (`state.rip += 2`). FEX then ran the RET and the caller's code inline,
 up to a direct JMP/CALL to a block it could not compile. That block's RIP is
 in the jump thunk's `ExitFunctionLinkData`, not in `State.rip`.
@@ -132,10 +132,14 @@ For a direct JMP (no call-ret entry), `link-rip` is absent and `addr=` stays
 * `PS4FEXLinkedExecutionTest` (native ARM64 FEX): three guest apps that reach
   `66 cf` (IRET with an operand-size override, which FEX decodes but rejects
   with `DecodeFailure`), so `CompileBlock` really returns 0:
-  * via a direct CALL: contained as SIGILL `0x4d50`, `address` = the CALL
-    target, `rip` = the stale entry RIP (reproduces the device pattern);
-  * via a direct JMP: contained;
-  * at the entry (`NoBlock`): `address` = `rip` = entry.
+  * via a direct CALL: contained as SIGILL `0x4d50`. `address` is the CALL
+    target (`code+6`). `rip` is the startup stub after the image: the entry
+    itself is reached by the stub's linked `JMP entry`, so `State.rip` never
+    reaches the app's code. This reproduces the device pattern (CI, macOS
+    ARM64: `address=0x7000004006 rip=0x7000128000`);
+  * via a direct JMP inside the entry, and at the entry (reached by the
+    stub's JMP): contained, with `address` = `rip` = the stub (a JMP target
+    is not recovered).
 * `FatalFaultLogTest`: `dispatch_call`, `bl_target`, thunk validation and the
   new line fields. Also fixes the device-record check, which searched for a
   literal `\n` (two characters) and failed the services job.
