@@ -41,6 +41,7 @@
 #include <cerrno>
 #include <mutex>
 #include "maxps4_hle_timing.h"
+#include "maxps4_fatal_fault_log.h"
 #include <new>
 #include <atomic>
 #include <chrono>
@@ -428,6 +429,11 @@ public:
         if (!available) return;
         active = this;
         if (!install) return;
+        // Where an uncontained fault is recorded before the app dies (#296).
+        if (const char* home = std::getenv("HOME")) {
+            std::string documents = std::string(home) + "/Documents";
+            maxps4::FatalFaultLog::set_path(documents.c_str());
+        }
         struct sigaction action {};
         action.sa_sigaction = handle;
         action.sa_flags = SA_SIGINFO;
@@ -607,6 +613,75 @@ private:
                 pc = stop;
                 return;
             }
+        }
+        // Not contained: the process is about to die on this fault. Record
+        // where the host was and who called it (LR), then chain unchanged.
+        if (number != SIGURG) {
+            maxps4::FatalFault fatal;
+            fatal.signal = number;
+            fatal.code = info ? info->si_code : 0;
+            fatal.address = info ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
+            fatal.pc = pc; fatal.sp = sp;
+#if defined(__APPLE__)
+            fatal.lr = machine->uc_mcontext->__ss.__lr;
+            fatal.fp = machine->uc_mcontext->__ss.__fp;
+            for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext->__ss.__x[i];
+            fatal.x4 = machine->uc_mcontext->__ss.__x[4];
+            fatal.x5 = machine->uc_mcontext->__ss.__x[5];
+            fatal.x16 = machine->uc_mcontext->__ss.__x[16];
+            fatal.x17 = machine->uc_mcontext->__ss.__x[17];
+#else
+            fatal.lr = machine->uc_mcontext.regs[30];
+            fatal.fp = machine->uc_mcontext.regs[29];
+            for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext.regs[i];
+            fatal.x4 = machine->uc_mcontext.regs[4];
+            fatal.x5 = machine->uc_mcontext.regs[5];
+            fatal.x16 = machine->uc_mcontext.regs[16];
+            fatal.x17 = machine->uc_mcontext.regs[17];
+#endif
+#if __has_feature(ptrauth_calls)
+            fatal.lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(fatal.lr), ptrauth_key_return_address)));
+#endif
+            if (guard) {
+                const bool held = maxps4_jit_held();
+                auto classify = [&](uint64_t at) {
+                    if (!held && guard->context->IsAddressInCodeBuffer(guard->thread, at)) return maxps4::FatalFault::jit;
+                    return at >= guard->config.DispatcherBegin && at < guard->config.DispatcherEnd
+                        ? maxps4::FatalFault::dispatcher : maxps4::FatalFault::other;
+                };
+                fatal.dispatcher_begin = guard->config.DispatcherBegin;
+                fatal.pc_where = classify(fatal.pc);
+                fatal.lr_where = classify(fatal.lr);
+                // BLR stores the address of the following instruction in LR.
+                // Reading this already-mapped RX dispatcher word lets a device
+                // report the exact branch at LR-4 without changing execution.
+                if (fatal.lr_where == maxps4::FatalFault::dispatcher &&
+                    fatal.lr >= guard->config.DispatcherBegin + sizeof(uint32_t) &&
+                    fatal.lr <= guard->config.DispatcherEnd) {
+                    const auto instruction = *reinterpret_cast<const volatile uint32_t*>(
+                        static_cast<uintptr_t>(fatal.lr - sizeof(uint32_t)));
+                    const auto branch = maxps4::decode_arm64_indirect_branch(instruction);
+                    if (branch.kind != maxps4::Arm64IndirectBranch::None) {
+                        fatal.dispatcher_lr_previous_instruction = instruction;
+                        fatal.dispatcher_lr_branch = branch.kind;
+                        fatal.dispatcher_lr_branch_register = branch.register_number;
+#if defined(__APPLE__)
+                        const auto& saved = machine->uc_mcontext->__ss;
+                        fatal.dispatcher_lr_branch_target = branch.register_number < 29 ? saved.__x[branch.register_number] :
+                            branch.register_number == 29 ? saved.__fp : branch.register_number == 30 ? saved.__lr : 0;
+#else
+                        fatal.dispatcher_lr_branch_target = branch.register_number < 31 ?
+                            machine->uc_mcontext.regs[branch.register_number] : 0;
+#endif
+                    }
+                }
+                fatal.guest_thread_known = true;
+                fatal.guest_thread = ProbeAddressSpace::guest_thread;
+                fatal.guest_rip = fatal.lr_where == maxps4::FatalFault::jit
+                    ? guard->context->RestoreRIPFromHostPC(guard->thread, fatal.lr)
+                    : guard->thread->CurrentFrame->State.rip;
+            }
+            maxps4::FatalFaultLog::append(fatal);
         }
 #endif
         for (size_t i = 0; i < signals.size(); ++i) if (signals[i] == number) {
