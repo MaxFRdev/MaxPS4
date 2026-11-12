@@ -41,6 +41,8 @@
 #include <cerrno>
 #include <mutex>
 #include "maxps4_hle_timing.h"
+#include "maxps4_fatal_fault_log.h"
+#include "maxps4_dispatch_fault.h"
 #include <new>
 #include <atomic>
 #include <chrono>
@@ -428,6 +430,11 @@ public:
         if (!available) return;
         active = this;
         if (!install) return;
+        // Where an uncontained fault is recorded before the app dies (#296).
+        if (const char* home = std::getenv("HOME")) {
+            std::string documents = std::string(home) + "/Documents";
+            maxps4::FatalFaultLog::set_path(documents.c_str());
+        }
         struct sigaction action {};
         action.sa_sigaction = handle;
         action.sa_flags = SA_SIGINFO;
@@ -599,6 +606,44 @@ private:
                 stop = guard->config.ThreadStopHandlerAddressSpillSRA;
             else if (pc >= guard->config.DispatcherBegin && pc < guard->config.DispatcherEnd)
                 stop = guard->config.ThreadStopHandlerAddress;
+            // #296: the dispatcher branched to a null block (`br x0` after
+            // CompileBlock returned 0 for a guest block FEX cannot compile).
+            // A guest fault at the RIP FEX stored, not a host crash. The static
+            // registers were refilled after the call: spill them on the way out.
+            uint64_t lr = 0;
+#if defined(__APPLE__)
+            lr = machine->uc_mcontext->__ss.__lr;
+#else
+            lr = machine->uc_mcontext.regs[30];
+#endif
+#if __has_feature(ptrauth_calls)
+            lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(lr), ptrauth_key_return_address)));
+#endif
+            if (!stop && maxps4::uncompilable_dispatch(number, pc, lr, guard->config.DispatcherBegin, guard->config.DispatcherEnd)) {
+                const uint64_t rip = guard->thread->CurrentFrame->State.rip;
+                maxps4::FatalFault record;
+                record.signal = SIGILL; record.code = maxps4::uncompilable_guest_block;
+                record.address = rip; record.pc = pc; record.lr = lr; record.sp = sp;
+                record.pc_where = maxps4::FatalFault::other; record.lr_where = maxps4::FatalFault::dispatcher;
+                record.guest_thread_known = true;
+                record.guest_thread = ProbeAddressSpace::guest_thread;
+                record.guest_rip = rip;
+                record.contained = true;
+                // The bytes FEX failed on, so the instruction can be identified.
+                for (uint8_t n = sizeof record.bytes; n; n /= 2)
+                    if (guard->memory_access && guard->memory_access(rip, n, 4)) {
+                        std::memcpy(record.bytes, reinterpret_cast<const void*>(rip), n);
+                        record.byte_count = n;
+                        break;
+                    }
+                maxps4::FatalFaultLog::append(record);
+                guard->code = maxps4::uncompilable_guest_block;
+                guard->address = rip;
+                guard->signal.store(SIGILL);
+                sp = guard->thread->CurrentFrame->ReturningStackLocation;
+                pc = guard->config.ThreadStopHandlerAddressSpillSRA;
+                return;
+            }
             if (stop) {
                 guard->code = number == SIGURG ? 0 : info->si_code;
                 guard->address = number == SIGURG ? 0 : reinterpret_cast<uintptr_t>(info->si_addr);
@@ -607,6 +652,43 @@ private:
                 pc = stop;
                 return;
             }
+        }
+        // Not contained: the process is about to die on this fault. Record
+        // where the host was and who called it (LR), then chain unchanged.
+        if (number != SIGURG) {
+            maxps4::FatalFault fatal;
+            fatal.signal = number;
+            fatal.code = info ? info->si_code : 0;
+            fatal.address = info ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
+            fatal.pc = pc; fatal.sp = sp;
+#if defined(__APPLE__)
+            fatal.lr = machine->uc_mcontext->__ss.__lr;
+            fatal.fp = machine->uc_mcontext->__ss.__fp;
+            for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext->__ss.__x[i];
+#else
+            fatal.lr = machine->uc_mcontext.regs[30];
+            fatal.fp = machine->uc_mcontext.regs[29];
+            for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext.regs[i];
+#endif
+#if __has_feature(ptrauth_calls)
+            fatal.lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(fatal.lr), ptrauth_key_return_address)));
+#endif
+            if (guard) {
+                const bool held = maxps4_jit_held();
+                auto classify = [&](uint64_t at) {
+                    if (!held && guard->context->IsAddressInCodeBuffer(guard->thread, at)) return maxps4::FatalFault::jit;
+                    return at >= guard->config.DispatcherBegin && at < guard->config.DispatcherEnd
+                        ? maxps4::FatalFault::dispatcher : maxps4::FatalFault::other;
+                };
+                fatal.pc_where = classify(fatal.pc);
+                fatal.lr_where = classify(fatal.lr);
+                fatal.guest_thread_known = true;
+                fatal.guest_thread = ProbeAddressSpace::guest_thread;
+                fatal.guest_rip = fatal.lr_where == maxps4::FatalFault::jit
+                    ? guard->context->RestoreRIPFromHostPC(guard->thread, fatal.lr)
+                    : guard->thread->CurrentFrame->State.rip;
+            }
+            maxps4::FatalFaultLog::append(fatal);
         }
 #endif
         for (size_t i = 0; i < signals.size(); ++i) if (signals[i] == number) {

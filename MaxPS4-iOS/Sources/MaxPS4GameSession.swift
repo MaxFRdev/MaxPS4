@@ -566,7 +566,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             if wasStopped {
                 return "Arrêté après \(frames) images présentées. \(metal)\nThread principal interrompu à RIP 0x\(String(fault.rip, radix: 16)) (relatif 0x\(String(relativeRIP, radix: 16)), relocation 0x\(String(relocation, radix: 16)))."
             }
-            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16))."
+            // 0x4d50 (maxps4_dispatch_fault.h): FEX could not compile the guest block at RIP.
+            let uncompilable = fault.code == 0x4d50
+                ? "\nInstruction x86 non prise en charge par FEX à RIP 0x\(String(fault.rip, radix: 16)) : octets dans Documents/maxps4-fatal-fault.txt." : ""
+            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\(uncompilable)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16))."
     }
     private func failure(_ text: String, _ code: Int32) -> NSError {
         NSError(domain: "MaxPS4.Game", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "\(text) (\(code))"])
