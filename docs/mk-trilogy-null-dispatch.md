@@ -63,3 +63,15 @@ Observed diagnostic snapshot (not a causal proof): JIT uptime ~37 s; 1,943 previ
 3. **VideoOut / Metal:** correlate monotonic timestamps for flip submission, VBlank wake, flip completion, and final Metal present; identify the last completed flip and any queue stall. Avoid synthetic VBlank or bypassing a wait without a failing regression test.
 4. **Audio:** correlate audio-output timestamps and frame drops with the first stalled flip; determine whether audio is causally blocked or only starved.
 5. **Validation:** add focused automated tests; compare Sonic Mania; build a fresh experimental SideStore IPA and retest on iPhone. Keep PRs #298/#302 isolated, no merge to `main` or `MaxPS4-Beta` without explicit approval.
+
+## Device fault captured after retest (2026-11-12)
+
+The device now reports:
+
+```text
+contained-host-fault signal=4 code=19792 addr=0x7001a14338 pc=0x0(other) lr=0x10131c190(dispatcher) fp=0x0 sp=0x17f0e6bf0 x0=0x0 x1=0x0 x2=0x0 x3=0x0 guest-thread=14 guest-rip=0x7001a14338 guest-bytes=c34989cab8110000000f05c34989cab8
+```
+
+The first instruction at the reported guest RIP is **`c3` = `ret`**. The following bytes decode as `mov r10, rcx; mov eax, 17; syscall; ret`. These are adjacent instructions, **not** evidence that the `syscall` was reached. The previous hypothesis that this is necessarily an unsupported x86 opcode is therefore **not established**. Check whether the guest RIP is a valid instruction boundary, whether the return stack / memory mapping is valid, and why FEX's CompileBlock returned zero for a `ret` entry point. Do not special-case or skip `ret` without proving the cause.
+
+The corresponding regression in `MaxPS4-iOS/Tests/FatalFaultLogTest.cpp` locks down the observed record's formatting; **it does not reproduce or fix the JIT compilation failure**. Next investigate FEX's GenerateIR / CompileBlock return path and capture the guest stack top and mapping permissions at RIP, with bounded diagnostics, before changing translation semantics.
