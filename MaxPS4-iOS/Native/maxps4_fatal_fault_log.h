@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <fcntl.h>
 #include <unistd.h>
+#include "maxps4_arm64_branch_diagnostic.h"
 
 namespace maxps4 {
 struct FatalFault {
@@ -16,6 +17,13 @@ struct FatalFault {
     uint64_t address = 0, pc = 0, lr = 0, fp = 0, sp = 0, x[4] {};
     uint64_t x4 = 0, x5 = 0, x16 = 0, x17 = 0; // AArch64 inter-procedure scratch registers: common indirect branch targets.
     uint64_t dispatcher_begin = 0;
+    // Decoded only when LR is known to be in the dispatcher. The instruction
+    // is the word immediately preceding LR, so for the observed +0x190 it is
+    // exactly the generated word at dispatcher +0x18c.
+    uint32_t dispatcher_lr_previous_instruction = 0;
+    Arm64IndirectBranch dispatcher_lr_branch = Arm64IndirectBranch::None;
+    uint8_t dispatcher_lr_branch_register = 0;
+    uint64_t dispatcher_lr_branch_target = 0;
     Where pc_where = other, lr_where = other;
     bool guest_thread_known = false;
     uint64_t guest_thread = 0, guest_rip = 0; // guest_rip: from LR when it is in JIT code, else FEX's last stored RIP.
@@ -46,6 +54,12 @@ public:
         w.text(" x16="); w.hex(f.x16); w.text(" x17="); w.hex(f.x17);
         if (f.dispatcher_begin && f.lr_where == FatalFault::dispatcher && f.lr >= f.dispatcher_begin) {
             w.text(" lr-dispatch-offset="); w.hex(f.lr - f.dispatcher_begin);
+        }
+        if (f.dispatcher_lr_branch != Arm64IndirectBranch::None) {
+            w.text(" lr-previous="); w.hex(f.dispatcher_lr_previous_instruction);
+            w.text("("); w.text(arm64_indirect_branch_name(f.dispatcher_lr_branch)); w.text("x");
+            w.dec(f.dispatcher_lr_branch_register); w.text(")");
+            w.text(" lr-branch-target="); w.hex(f.dispatcher_lr_branch_target);
         }
         if (f.guest_thread_known) {
             w.text(" guest-thread="); w.dec(f.guest_thread);

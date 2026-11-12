@@ -652,6 +652,29 @@ private:
                 fatal.dispatcher_begin = guard->config.DispatcherBegin;
                 fatal.pc_where = classify(fatal.pc);
                 fatal.lr_where = classify(fatal.lr);
+                // BLR stores the address of the following instruction in LR.
+                // Reading this already-mapped RX dispatcher word lets a device
+                // report the exact branch at LR-4 without changing execution.
+                if (fatal.lr_where == maxps4::FatalFault::dispatcher &&
+                    fatal.lr >= guard->config.DispatcherBegin + sizeof(uint32_t) &&
+                    fatal.lr <= guard->config.DispatcherEnd) {
+                    const auto instruction = *reinterpret_cast<const volatile uint32_t*>(
+                        static_cast<uintptr_t>(fatal.lr - sizeof(uint32_t)));
+                    const auto branch = maxps4::decode_arm64_indirect_branch(instruction);
+                    if (branch.kind != maxps4::Arm64IndirectBranch::None) {
+                        fatal.dispatcher_lr_previous_instruction = instruction;
+                        fatal.dispatcher_lr_branch = branch.kind;
+                        fatal.dispatcher_lr_branch_register = branch.register_number;
+#if defined(__APPLE__)
+                        const auto& saved = machine->uc_mcontext->__ss;
+                        fatal.dispatcher_lr_branch_target = branch.register_number < 29 ? saved.__x[branch.register_number] :
+                            branch.register_number == 29 ? saved.__fp : branch.register_number == 30 ? saved.__lr : 0;
+#else
+                        fatal.dispatcher_lr_branch_target = branch.register_number < 31 ?
+                            machine->uc_mcontext.regs[branch.register_number] : 0;
+#endif
+                    }
+                }
                 fatal.guest_thread_known = true;
                 fatal.guest_thread = ProbeAddressSpace::guest_thread;
                 fatal.guest_rip = fatal.lr_where == maxps4::FatalFault::jit
