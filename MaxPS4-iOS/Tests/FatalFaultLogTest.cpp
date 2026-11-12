@@ -74,6 +74,24 @@ int main() {
         CHECK(std::strncmp(out, "contained-host-fault signal=4 code=19792 addr=0x7001a14338 pc=0x0(other) lr=0x1031b4190(dispatcher)", 99) == 0);
         CHECK(std::strstr(out, " guest-thread=14 guest-rip=0x7001a14338 guest-bytes=f00fc70e\n") != nullptr);
     }
+    // Device reproduction (#296): actual captured bytes start with RET, not an
+    // unsupported LOCK opcode. Preserve the exact fault record for triage.
+    {
+        FatalFault c; c.signal = SIGILL; c.code = maxps4::uncompilable_guest_block;
+        c.address = 0x7001a14338; c.pc = 0; c.lr = 0x10131c190;
+        c.lr_where = FatalFault::dispatcher; c.sp = 0x17f0e6bf0;
+        c.guest_thread_known = true; c.guest_thread = 14;
+        c.guest_rip = 0x7001a14338; c.contained = true;
+        const uint8_t bytes[] = {0xc3, 0x49, 0x89, 0xca, 0xb8, 0x11, 0x00, 0x00,
+                                 0x00, 0x0f, 0x05, 0xc3, 0x49, 0x89, 0xca, 0xb8};
+        for (size_t i = 0; i < sizeof bytes; ++i) c.bytes[i] = bytes[i];
+        c.byte_count = sizeof bytes;
+        char out[512];
+        FatalFaultLog::format(c, out, sizeof out);
+        CHECK(std::strstr(out, "contained-host-fault signal=4 code=19792 addr=0x7001a14338") != nullptr);
+        CHECK(std::strstr(out, "lr=0x10131c190(dispatcher)") != nullptr);
+        CHECK(std::strstr(out, "guest-thread=14 guest-rip=0x7001a14338 guest-bytes=c34989cab8110000000f05c34989cab8\\n") != nullptr);
+    }
     std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory");
     return 0;
 }
