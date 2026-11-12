@@ -49,3 +49,17 @@ the guest RIP (`guest-bytes=…`) to `Documents/maxps4-fatal-fault.txt`.
 
 Retest on device, read `guest-bytes`, disassemble them, and add FEX support for
 that instruction. Then retest MK Trilogy and Sonic Mania.
+
+## iPhone retest: curtain-to-black-screen (2026-11-12)
+
+The SideStore IPA from #298 (`2ee8e6c`) no longer exits to SpringBoard when selecting **Legacy Kollection → Mortal Kombat Trilogy → Play**. The menu and curtain-closing animation render, followed by a persistent **black screen and no audible sound**, even after 1–2 minutes. This is **not** a verified game fix. See issue #296 for the full user report.
+
+Observed diagnostic snapshot (not a causal proof): JIT uptime ~37 s; 1,943 previously displayed frames, but current presentation rate 0 FPS; `sceGnmSubmitAndFlipCommandBuffers` reported waiting for VBlank ~1.5 s; repeated `sceKernelUsleep(0x3e8, ...)` returns `-1`; audio calls occur but output frames are overwhelmingly dropped; Metal reports 0 draw failures. This snapshot contains **no** `contained-host-fault` or `guest-bytes` line. Do not assume the original null-dispatch fault still occurs, or that `sceKernelUsleep` is causal, without more evidence.
+
+### Required diagnostics before a behavior change
+
+1. **FEX / guest progress:** record bounded per-thread guest RIP progress, guest thread stop reason, and any contained fault; determine whether execution advances after Play. If a contained fault occurs, capture `guest-bytes` from `maxps4-fatal-fault.txt` and decode the actual instruction before changing FEX.
+2. **PS4 sleep / synchronization:** for `sceKernelUsleep`, log raw guest return, relevant guest errno and whether the intended sleep duration is honored; audit calling convention and return translation. For `scePthreadCondWait`, capture wait and wake counts at the curtain transition. Repeated `-1` alone is not evidence of a hang.
+3. **VideoOut / Metal:** correlate monotonic timestamps for flip submission, VBlank wake, flip completion, and final Metal present; identify the last completed flip and any queue stall. Avoid synthetic VBlank or bypassing a wait without a failing regression test.
+4. **Audio:** correlate audio-output timestamps and frame drops with the first stalled flip; determine whether audio is causally blocked or only starved.
+5. **Validation:** add focused automated tests; compare Sonic Mania; build a fresh experimental SideStore IPA and retest on iPhone. Keep PRs #298/#302 isolated, no merge to `main` or `MaxPS4-Beta` without explicit approval.
