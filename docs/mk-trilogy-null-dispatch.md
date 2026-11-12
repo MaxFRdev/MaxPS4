@@ -75,3 +75,73 @@ contained-host-fault signal=4 code=19792 addr=0x7001a14338 pc=0x0(other) lr=0x10
 The first instruction at the reported guest RIP is **`c3` = `ret`**. The following bytes decode as `mov r10, rcx; mov eax, 17; syscall; ret`. These are adjacent instructions, **not** evidence that the `syscall` was reached. The previous hypothesis that this is necessarily an unsupported x86 opcode is therefore **not established**. Check whether the guest RIP is a valid instruction boundary, whether the return stack / memory mapping is valid, and why FEX's CompileBlock returned zero for a `ret` entry point. Do not special-case or skip `ret` without proving the cause.
 
 The corresponding regression in `MaxPS4-iOS/Tests/FatalFaultLogTest.cpp` locks down the observed record's formatting; **it does not reproduce or fix the JIT compilation failure**. Next investigate FEX's GenerateIR / CompileBlock return path and capture the guest stack top and mapping permissions at RIP, with bounded diagnostics, before changing translation semantics.
+
+## Why `CompileBlock` "returned 0 for a RET" (analysis, 2026-11-12)
+
+A plain `c3` cannot make `CompileBlock` return 0 in the pinned FEX
+(AetherPS4 `3347fc13`):
+
+* `RETOp` never sets `DecodeFailure` (`OpcodeDispatcher.cpp:150`).
+* A non-executable or unreadable RIP does not return 0 either: the decoder
+  marks `NOEXEC_INST` and `GenerateIR` emits a faulting block (`NoExecOp`).
+* `CompileBlock` only returns 0 when `GenerateIR` gets a dispatch error on the
+  **first** instruction (`Core.cpp:763`).
+
+So the RIP that failed is not `0x7001a14338`. The likely explanation: the
+dispatcher calls `CompileBlock` from **two** places, both followed by
+`br x0` without a null check:
+
+| path | call | compiles |
+|---|---|---|
+| `NoBlock` | `blr x4` → `CompileBlock` | `State.rip` (just loaded) |
+| `ExitFunctionLinker` | `blr x2` → `Arm64JITCore::ExitFunctionLink` → `CompileBlock` | `Record->GuestRIP`, the target of a **direct** JMP/CALL |
+
+A linked direct branch never writes `State.rip`. The reported value is exactly
+the address after the `syscall` of the previous libkernel stub (`0f 05` at
+`…336`, then `c3` at `…338`), i.e. where `ProbeAddressSpace::HandleSyscall`
+left it (`state.rip += 2`). FEX then ran the RET and the caller's code inline,
+up to a direct JMP/CALL to a block it could not compile. That block's RIP is
+in the jump thunk's `ExitFunctionLinkData`, not in `State.rip`.
+
+Also: with `HostCode == 0`, `ExitFunctionLink` still patches the thunk to
+`ldr x0, [HostCode]; br x0` (`JIT.cpp:633`), so a second thread reaching that
+branch would also jump to 0. The thread stop on the first fault prevents it in
+practice.
+
+### Diagnostics added
+
+`GuestFaultGuard` now also records, on a null dispatch:
+
+* `lr-insn` / `dispatch`: the instruction before LR, `blr x4` =
+  `compile-block`, `blr x2` = `exit-link`. On device this settles which path
+  returned 0.
+* `callret-rip` / `callret-host`: the top of FEX's call-ret stack (bounds
+  checked against `CallRetStackBase`).
+* `link-rip` / `link-host` / `link-bytes`: for a direct CALL, the `bl` before
+  `callret-host` leads to the jump thunk. The thunk shape and its
+  `CallerOffset` are validated. Its `GuestRIP` is the CALL target and
+  `link-host=0x0` shows that compilation failed. The fault address
+  (`addr=`, and the app message) then becomes that target instead of the
+  stale `State.rip`.
+
+For a direct JMP (no call-ret entry), `link-rip` is absent and `addr=` stays
+`State.rip`; `dispatch=exit-link` still tells that this address is stale.
+
+### Regression tests
+
+* `PS4FEXLinkedExecutionTest` (native ARM64 FEX): three guest apps that reach
+  `66 cf` (IRET with an operand-size override, which FEX decodes but rejects
+  with `DecodeFailure`), so `CompileBlock` really returns 0:
+  * via a direct CALL: contained as SIGILL `0x4d50`, `address` = the CALL
+    target, `rip` = the stale entry RIP (reproduces the device pattern);
+  * via a direct JMP: contained;
+  * at the entry (`NoBlock`): `address` = `rip` = entry.
+* `FatalFaultLogTest`: `dispatch_call`, `bl_target`, thunk validation and the
+  new line fields. Also fixes the device-record check, which searched for a
+  literal `\n` (two characters) and failed the services job.
+
+### Next step
+
+Install the new IPA, reproduce, and send the new `contained-host-fault` line.
+`link-bytes` (or, for a JMP, the guest code around `callret-rip`) gives the
+instruction FEX rejects; support for it goes into a separate change.

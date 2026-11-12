@@ -90,8 +90,49 @@ int main() {
         FatalFaultLog::format(c, out, sizeof out);
         CHECK(std::strstr(out, "contained-host-fault signal=4 code=19792 addr=0x7001a14338") != nullptr);
         CHECK(std::strstr(out, "lr=0x10131c190(dispatcher)") != nullptr);
-        CHECK(std::strstr(out, "guest-thread=14 guest-rip=0x7001a14338 guest-bytes=c34989cab8110000000f05c34989cab8\\n") != nullptr);
+        CHECK(std::strstr(out, "guest-thread=14 guest-rip=0x7001a14338 guest-bytes=c34989cab8110000000f05c34989cab8\n") != nullptr);
     }
-    std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory");
+    // Which dispatcher call returned 0, from the instruction before LR.
+    {
+        using maxps4::DispatchCall;
+        CHECK(maxps4::dispatch_call(0xd63f0080u) == DispatchCall::compile_block); // blr x4
+        CHECK(maxps4::dispatch_call(0xd63f0040u) == DispatchCall::exit_link);     // blr x2
+        CHECK(maxps4::dispatch_call(0xd63f0000u) == DispatchCall::unknown);       // blr x0
+        CHECK(std::strcmp(maxps4::dispatch_call_name(DispatchCall::exit_link), "exit-link") == 0);
+    }
+    // bl: forward, backward, and not a bl.
+    {
+        uint64_t t = 0;
+        CHECK(maxps4::bl_target(0x1000, 0x94000010u, t) && t == 0x1040);
+        CHECK(maxps4::bl_target(0x1000, 0x97fffffcu, t) && t == 0x1000 - 16);
+        CHECK(!maxps4::bl_target(0x1000, 0x14000010u, t)); // b, not bl
+    }
+    // Jump thunk + ExitFunctionLinkData, unlinked and linked to a null block.
+    {
+        const uint64_t thunk = 0x10000200, caller = 0x10000100;
+        maxps4::JumpThunk t {{0x14000002u, 0xd61f0000u, 0x58000100u, 0xd63f0000u}, 0, 0x7001a20000, caller - thunk};
+        CHECK(maxps4::jump_thunk_record(t, thunk, caller));
+        t.insn[0] = 0x58000080u; // ldr x0, #0x10 after ExitFunctionLink stored HostCode 0
+        CHECK(maxps4::jump_thunk_record(t, thunk, caller));
+        CHECK(!maxps4::jump_thunk_record(t, thunk, caller + 4)); // another call site
+        t.insn[1] = 0xd61f0020u;                                  // br x1: not a thunk
+        CHECK(!maxps4::jump_thunk_record(t, thunk, caller));
+    }
+    // The line names the dispatcher call and the linked target.
+    {
+        FatalFault c; c.signal = SIGILL; c.code = maxps4::uncompilable_guest_block; c.address = 0x7001a20000;
+        c.guest_thread_known = true; c.guest_thread = 14; c.guest_rip = 0x7001a14338; c.contained = true;
+        c.bytes[0] = 0xc3; c.byte_count = 1;
+        c.dispatch_known = true; c.lr_insn = 0xd63f0040u; c.dispatch = 2;
+        c.callret_known = true; c.callret_rip = 0x7001a10005; c.callret_host = 0x10000104;
+        c.link_known = true; c.link_rip = 0x7001a20000; c.link_host = 0;
+        c.link_bytes[0] = 0x66; c.link_bytes[1] = 0xcf; c.link_byte_count = 2;
+        char out[1024];
+        FatalFaultLog::format(c, out, sizeof out);
+        CHECK(std::strstr(out, " guest-rip=0x7001a14338 guest-bytes=c3 lr-insn=0xd63f0040 dispatch=exit-link"
+                               " callret-rip=0x7001a10005 callret-host=0x10000104"
+                               " link-rip=0x7001a20000 link-host=0x0 link-bytes=66cf\n") != nullptr);
+    }
+    std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory, null-dispatch call and link target");
     return 0;
 }

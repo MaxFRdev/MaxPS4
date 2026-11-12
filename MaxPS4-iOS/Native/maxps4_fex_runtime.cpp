@@ -629,16 +629,57 @@ private:
                 record.guest_thread = ProbeAddressSpace::guest_thread;
                 record.guest_rip = rip;
                 record.contained = true;
-                // The bytes FEX failed on, so the instruction can be identified.
-                for (uint8_t n = sizeof record.bytes; n; n /= 2)
-                    if (guard->memory_access && guard->memory_access(rip, n, 4)) {
-                        std::memcpy(record.bytes, reinterpret_cast<const void*>(rip), n);
-                        record.byte_count = n;
-                        break;
+                // Guest bytes, read only through the permission-checked guest view.
+                auto read_guest = [guard](uint64_t at, uint8_t* out, uint8_t& count) {
+                    for (uint8_t n = 16; n; n /= 2)
+                        if (guard->memory_access && guard->memory_access(at, n, 4)) {
+                            std::memcpy(out, reinterpret_cast<const void*>(at), n);
+                            count = n;
+                            return;
+                        }
+                };
+                read_guest(rip, record.bytes, record.byte_count);
+                // Which call returned 0 (dispatcher code is readable).
+                record.dispatch_known = lr - 4 >= guard->config.DispatcherBegin;
+                if (record.dispatch_known) record.lr_insn = *reinterpret_cast<const uint32_t*>(lr - 4);
+                const auto call = maxps4::dispatch_call(record.lr_insn);
+                record.dispatch = static_cast<uint8_t>(call);
+                // ExitFunctionLink compiled Record->GuestRIP, not State.rip. For a
+                // direct CALL, the top call-ret entry's host return PC follows the
+                // `bl` to the jump thunk; the thunk holds the target. Every step is
+                // validated (stack bounds, JIT ranges, thunk shape, CallerOffset).
+                auto* thread = guard->thread;
+                const uint64_t callret = thread->CurrentFrame->State.callret_sp;
+                const uint64_t base = reinterpret_cast<uint64_t>(thread->CallRetStackBase);
+                const uint64_t size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+                if (base && callret >= base && callret - base <= size - 16 && !(callret & 7)) {
+                    uint64_t entry[2];
+                    std::memcpy(entry, reinterpret_cast<const void*>(callret), sizeof entry);
+                    record.callret_known = true;
+                    record.callret_rip = entry[0]; record.callret_host = entry[1];
+                    const uint64_t site = entry[1] - 4;
+                    uint64_t thunk = 0;
+                    if (entry[1] >= 4 && !maxps4_jit_held() &&
+                        guard->context->IsAddressInCodeBuffer(thread, site) &&
+                        maxps4::bl_target(site, *reinterpret_cast<const uint32_t*>(site), thunk) && !(thunk & 7) &&
+                        guard->context->IsAddressInCodeBuffer(thread, thunk) &&
+                        guard->context->IsAddressInCodeBuffer(thread, thunk + sizeof(maxps4::JumpThunk) - 1)) {
+                        maxps4::JumpThunk t;
+                        std::memcpy(&t, reinterpret_cast<const void*>(thunk), sizeof t);
+                        if (maxps4::jump_thunk_record(t, thunk, site)) {
+                            record.link_known = true;
+                            record.link_rip = t.guest_rip; record.link_host = t.host_code;
+                            read_guest(t.guest_rip, record.link_bytes, record.link_byte_count);
+                        }
                     }
+                }
+                // The failing RIP: the linked target when the thunk proves it.
+                const uint64_t failed = call == maxps4::DispatchCall::exit_link && record.link_known && !record.link_host
+                    ? record.link_rip : rip;
+                record.address = failed;
                 maxps4::FatalFaultLog::append(record);
                 guard->code = maxps4::uncompilable_guest_block;
-                guard->address = rip;
+                guard->address = failed;
                 guard->signal.store(SIGILL);
                 sp = guard->thread->CurrentFrame->ReturningStackLocation;
                 pc = guard->config.ThreadStopHandlerAddressSpillSRA;
