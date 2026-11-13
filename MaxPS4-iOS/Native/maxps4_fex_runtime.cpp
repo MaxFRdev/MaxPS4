@@ -651,36 +651,6 @@ private:
                 // direct CALL, the top call-ret entry's host return PC follows the
                 // `bl` to the jump thunk; the thunk holds the target. Every step is
                 // validated (stack bounds, JIT ranges, thunk shape, CallerOffset).
-                auto* thread = guard->thread;
-                const uint64_t callret = thread->CurrentFrame->State.callret_sp;
-                const uint64_t base = reinterpret_cast<uint64_t>(thread->CallRetStackBase);
-                const uint64_t size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
-                if (base && callret >= base && callret - base <= size - 16 && !(callret & 7)) {
-                    uint64_t entry[2];
-                    std::memcpy(entry, reinterpret_cast<const void*>(callret), sizeof entry);
-                    record.callret_known = true;
-                    record.callret_rip = entry[0]; record.callret_host = entry[1];
-                    const uint64_t site = entry[1] - 4;
-                    uint64_t thunk = 0;
-                    if (entry[1] >= 4 && !maxps4_jit_held() &&
-                        guard->context->IsAddressInCodeBuffer(thread, site) &&
-                        maxps4::bl_target(site, *reinterpret_cast<const uint32_t*>(site), thunk) && !(thunk & 7) &&
-                        guard->context->IsAddressInCodeBuffer(thread, thunk) &&
-                        guard->context->IsAddressInCodeBuffer(thread, thunk + sizeof(maxps4::JumpThunk) - 1)) {
-                        maxps4::JumpThunk t;
-                        std::memcpy(&t, reinterpret_cast<const void*>(thunk), sizeof t);
-                        if (maxps4::jump_thunk_record(t, thunk, site)) {
-                            record.link_known = true;
-                            record.link_rip = t.guest_rip; record.link_host = t.host_code;
-                            read_guest(t.guest_rip, record.link_bytes, record.link_byte_count);
-                        }
-                    }
-                }
-                // A JMP/Jcc (or a CALL below an older call-ret entry) leaves no
-                // pointer to its thunk. ExitFunctionLink still marked it: the
-                // thunk now starts `ldr x0, #0x10` with HostCode 0. Scan the code
-                // buffer that holds a known JIT address (the call-ret host PC);
-                // its bounds are found page by page with IsAddressInCodeBuffer.
                 // Host reads outside known-mapped memory are probed first: write()
                 // from an unreadable page fails with EFAULT instead of faulting
                 // (async-signal-safe). One byte per 4 KiB page.
@@ -697,6 +667,53 @@ private:
                     }
                     return true;
                 };
+                auto* thread = guard->thread;
+                const uint64_t callret = thread->CurrentFrame->State.callret_sp;
+                const uint64_t base = reinterpret_cast<uint64_t>(thread->CallRetStackBase);
+                const uint64_t size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+                if (base && callret >= base && callret - base <= size - 16 && !(callret & 7) && readable(callret, 16)) {
+                    uint64_t entry[2];
+                    std::memcpy(entry, reinterpret_cast<const void*>(callret), sizeof entry);
+                    record.callret_known = true;
+                    record.callret_rip = entry[0]; record.callret_host = entry[1];
+                    record.exit_link_trace = maxps4::ExitLinkTrace::callret_entry;
+                    const uint64_t site = entry[1] - 4;
+                    if (entry[1] >= 4 && !maxps4_jit_held() &&
+                        guard->context->IsAddressInCodeBuffer(thread, site)) {
+                        record.exit_link_trace = maxps4::ExitLinkTrace::return_site_jit;
+                    }
+                    if (record.exit_link_trace == maxps4::ExitLinkTrace::return_site_jit && !readable(site, 4))
+                        record.exit_link_trace = maxps4::ExitLinkTrace::unreadable;
+                    if (record.exit_link_trace == maxps4::ExitLinkTrace::return_site_jit) {
+                        const uint32_t previous = *reinterpret_cast<const uint32_t*>(site);
+                        record.callret_previous_instruction = previous;
+                        uint64_t thunk = 0;
+                        if (maxps4::bl_target(site, previous, thunk)) {
+                            record.exit_link_trace = maxps4::ExitLinkTrace::direct_bl;
+                            if (!(thunk & 7) && guard->context->IsAddressInCodeBuffer(thread, thunk) &&
+                                guard->context->IsAddressInCodeBuffer(thread, thunk + sizeof(maxps4::JumpThunk) - 1)) {
+                                record.exit_link_trace = maxps4::ExitLinkTrace::thunk_in_jit;
+                            }
+                            if (record.exit_link_trace == maxps4::ExitLinkTrace::thunk_in_jit && !readable(thunk, sizeof(maxps4::JumpThunk)))
+                                record.exit_link_trace = maxps4::ExitLinkTrace::unreadable;
+                            if (record.exit_link_trace == maxps4::ExitLinkTrace::thunk_in_jit) {
+                                maxps4::JumpThunk t;
+                                std::memcpy(&t, reinterpret_cast<const void*>(thunk), sizeof t);
+                                if (maxps4::jump_thunk_record(t, thunk, site)) {
+                                    record.exit_link_trace = maxps4::ExitLinkTrace::validated;
+                                    record.link_known = true;
+                                    record.link_rip = t.guest_rip; record.link_host = t.host_code;
+                                    read_guest(t.guest_rip, record.link_bytes, record.link_byte_count);
+                                }
+                            }
+                        }
+                    }
+                }
+                // A JMP/Jcc (or a CALL below an older call-ret entry) leaves no
+                // pointer to its thunk. ExitFunctionLink still marked it: the
+                // thunk now starts `ldr x0, #0x10` with HostCode 0. Scan the code
+                // buffer that holds a known JIT address (the call-ret host PC);
+                // its bounds are found page by page with IsAddressInCodeBuffer.
                 // Fallback anchor: a host block from FEX's L1 lookup cache
                 // ({HostCode, GuestCode} pairs, at least MIN_L1_ENTRIES = 8192).
                 uint64_t anchor_code = 0;

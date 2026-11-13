@@ -6,6 +6,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include "maxps4_dispatch_fault.h"
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -30,6 +31,8 @@ struct FatalFault {
     // Top of FEX's call-ret stack {guest return RIP, host return PC}.
     bool callret_known = false;
     uint64_t callret_rip = 0, callret_host = 0;
+    uint32_t callret_previous_instruction = 0;
+    ExitLinkTrace exit_link_trace = ExitLinkTrace::unavailable;
     // The jump thunk the top call went through, validated: its target RIP
     // and the HostCode ExitFunctionLink stored (0: the target failed).
     bool link_known = false;
@@ -79,6 +82,8 @@ public:
         if (f.callret_known) {
             w.text(" callret-rip="); w.hex(f.callret_rip);
             w.text(" callret-host="); w.hex(f.callret_host);
+            w.text(" callret-prev="); w.hex(f.callret_previous_instruction);
+            w.text(" exit-link-trace="); w.text(exit_link_trace_name(f.exit_link_trace));
         }
         if (f.link_known) {
             w.text(" link-rip="); w.hex(f.link_rip);

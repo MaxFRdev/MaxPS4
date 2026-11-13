@@ -125,13 +125,17 @@ int main() {
         c.bytes[0] = 0xc3; c.byte_count = 1;
         c.dispatch_known = true; c.lr_insn = 0xd63f0040u; c.dispatch = 2;
         c.callret_known = true; c.callret_rip = 0x7001a10005; c.callret_host = 0x10000104;
+        c.callret_previous_instruction = 0x94000010;
+        c.exit_link_trace = maxps4::ExitLinkTrace::validated;
         c.link_known = true; c.link_rip = 0x7001a20000; c.link_host = 0;
         c.link_bytes[0] = 0x66; c.link_bytes[1] = 0xcf; c.link_byte_count = 2;
         char out[1024];
         FatalFaultLog::format(c, out, sizeof out);
         CHECK(std::strstr(out, " guest-rip=0x7001a14338 guest-bytes=c3 lr-insn=0xd63f0040 dispatch=exit-link"
-                               " callret-rip=0x7001a10005 callret-host=0x10000104"
+                               " callret-rip=0x7001a10005 callret-host=0x10000104 callret-prev=0x94000010 exit-link-trace=validated"
                                " link-rip=0x7001a20000 link-host=0x0 link-bytes=66cf\n") != nullptr);
+        CHECK(std::strcmp(maxps4::exit_link_trace_name(maxps4::ExitLinkTrace::direct_bl), "direct-bl") == 0);
+        CHECK(std::strcmp(maxps4::exit_link_trace_name(maxps4::ExitLinkTrace::unreadable), "unreadable") == 0);
     }
     // Code-buffer scan: a JMP thunk patched with HostCode 0 is found and its
     // caller validated; unlinked or non-null thunks and a wrong caller are not.
