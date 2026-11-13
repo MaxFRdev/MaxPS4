@@ -107,6 +107,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var vblanksSent = 0 // With vblankPort, under inputLock.
     private var touchesArrived = 0, touchSeconds: TimeInterval = 0 // Under inputLock.
     private var vblankPort: UInt64 = 1
+    // The menu/scene can request a pause before the native engine is attached.
+    // Remember it so initialization never silently resumes a backgrounded game.
+    private var requestedPause = false
     private var lastTicket: UInt64 = 0
     private var relocation: UInt64 = 0
     private var vblankClock = MaxPS4VideoOutClock()
@@ -330,6 +333,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     func setPaused(_ paused: Bool) {
         audio.setPaused(paused)
         inputLock.lock(); defer { inputLock.unlock() }
+        requestedPause = paused
         if let inputEngine { maxps4_fex_engine_videoout_pause(inputEngine, paused ? 1 : 0) }
     }
     // How long presses took: iOS to the app, the app to the game's read.
@@ -513,7 +517,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             let cancelled = stopped
             if ready {
                 sendInputLocked(opened)
-                inputLock.lock(); inputEngine = opened; inputLock.unlock()
+                inputLock.lock()
+                inputEngine = opened
+                maxps4_fex_engine_videoout_pause(opened, requestedPause ? 1 : 0)
+                inputLock.unlock()
             }
             if ready {
                 let timer = DispatchSource.makeTimerSource(queue: vblanks)
