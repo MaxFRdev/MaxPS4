@@ -39,6 +39,9 @@ struct FatalFault {
     // Code-buffer scan for thunks ExitFunctionLink patched with HostCode 0.
     bool scan_known = false;
     uint32_t null_links = 0;
+    // Scan coverage: distinguish no matching thunk from no readable JIT pages.
+    uint64_t scan_anchor = 0, scan_begin = 0, scan_end = 0;
+    uint32_t scan_pages = 0;
     uint64_t null_link_caller = 0;
     bool null_link_call = false;
 };
@@ -84,6 +87,10 @@ public:
         }
         if (f.scan_known) {
             w.text(" null-links="); w.dec(f.null_links);
+            w.text(" scan-anchor="); w.hex(f.scan_anchor);
+            w.text(" scan-begin="); w.hex(f.scan_begin);
+            w.text(" scan-end="); w.hex(f.scan_end);
+            w.text(" scan-pages="); w.dec(f.scan_pages);
             if (f.null_links) { w.text(" null-link-caller="); w.hex(f.null_link_caller); w.text(f.null_link_call ? " null-link-kind=call" : " null-link-kind=jump"); }
         }
         w.text("\n");
