@@ -709,9 +709,12 @@ private:
                 if (anchor_code) {
                     constexpr uint64_t step = 0x4000, limit = uint64_t(1) << 30;
                     const uint64_t anchor = anchor_code & ~(step - 1);
+                    record.scan_anchor = anchor_code;
                     uint64_t lo = anchor, hi = anchor + step;
                     while (anchor - lo < limit && lo >= step && guard->context->IsAddressInCodeBuffer(thread, lo - step)) lo -= step;
                     while (hi - anchor < limit && guard->context->IsAddressInCodeBuffer(thread, hi)) hi += step;
+                    record.scan_begin = lo;
+                    record.scan_end = hi;
                     // Scan each run of readable pages (a code buffer may hold
                     // reserved, unreadable pages).
                     maxps4::NullLinkScan scan;
@@ -719,6 +722,7 @@ private:
                         if (!readable(run, 0x1000)) { run += 0x1000; continue; }
                         uint64_t end = run + 0x1000;
                         while (end < hi && readable(end, 0x1000)) end += 0x1000;
+                        record.scan_pages += static_cast<uint32_t>((end - run) / 0x1000);
                         const auto part = maxps4::scan_null_links(run, end);
                         if (part.count && !scan.count) scan = part; else scan.count += part.count;
                         run = end;
