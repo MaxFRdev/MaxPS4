@@ -191,7 +191,8 @@ public:
         const size_t count = sizeof(stages) / sizeof(stages[0]);
         std::snprintf(line, sizeof line, "Flip VideoOut depuis %.1f s : %s%s\n", double(elapsed) / 1e6,
             stage < count ? stages[stage] : "état inconnu",
-            paused_report_.load(std::memory_order_relaxed) ? " (jeu en pause)" : "");
+            paused_report_.load(std::memory_order_relaxed)
+                ? " (pause demandee par le menu ou iOS ; attente attendue, pas une preuve de blocage)" : "");
         return line;
     }
     std::string submit_activity() const {
