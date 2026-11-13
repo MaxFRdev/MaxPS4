@@ -161,7 +161,7 @@ int main() {
         FatalFault c; c.signal = SIGILL; c.scan_known = true; c.null_links = 1; c.null_link_caller = 0x1122f0000; c.null_link_call = false;
         char out[1024];
         FatalFaultLog::format(c, out, sizeof out);
-        CHECK(std::strstr(out, " null-links=1 null-link-caller=0x1122f0000 null-link-kind=jump\n") != nullptr);
+        CHECK(std::strstr(out, " null-links=1 scan-anchor=0x0 scan-begin=0x0 scan-end=0x0 scan-pages=0 null-link-caller=0x1122f0000 null-link-kind=jump\n") != nullptr);
     }
     std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory, null-dispatch call and link target");
     return 0;
