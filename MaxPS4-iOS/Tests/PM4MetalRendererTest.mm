@@ -677,6 +677,55 @@ int main() {
                 return reader->memory.read(address,destination,count);
             }];
         assert(bridge && !bridge.failure);
+        MaxPS4GameMetalBridge* profilingBridge = [[MaxPS4GameMetalBridge alloc] initWithDevice:device
+            reader:^BOOL(uint64_t address, void* destination, size_t count) {
+                return reader->memory.read(address,destination,count);
+            }];
+        assert(profilingBridge && !profilingBridge.programProfiling && profilingBridge.profiledDraws==0);
+        assert(!profilingBridge.frameTimingProfiling && [profilingBridge.frameTimingReport containsString:@"disabled"]);
+        // Warm pipelines, then compare the same real bridge fixture with the
+        // intrusive draw profiler off/on/off. Timings are evidence only; the
+        // deterministic regression gate is the number of profiling barriers.
+        auto drainProfilingBridge=[&] {
+            id<MTLTexture> copy=[profilingBridge copyTargetAtAddress:targetB width:width height:height];
+            assert(copy);
+            while(profilingBridge.displayEvent.signaledValue<profilingBridge.displayEventValue) usleep(100);
+        };
+        assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);
+        drainProfilingBridge();
+        double beforeSubmit=profilingBridge.submitMilliseconds;
+        assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);
+        const double normalSubmit=profilingBridge.submitMilliseconds-beforeSubmit;
+        drainProfilingBridge();
+        assert(profilingBridge.profiledDraws==0 && ![profilingBridge.report containsString:@"GPU par programme"]);
+        // Frame timing is separately opt-in: it records bounded aggregate
+        // samples and does not turn on the intrusive draw-by-draw profiler.
+        profilingBridge.frameTimingProfiling=YES;
+        assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);
+        drainProfilingBridge();
+        assert(profilingBridge.frameTimingProfiling && !profilingBridge.programProfiling &&
+               [profilingBridge.frameTimingReport containsString:@"submit p50/p95/p99"] &&
+               [profilingBridge.frameTimingReport containsString:@"last 1 batches"]);
+        profilingBridge.frameTimingProfiling=NO;
+        assert(!profilingBridge.frameTimingProfiling && [profilingBridge.frameTimingReport containsString:@"disabled"]);
+        std::puts("PASS frame-time Metal diagnostics are bounded and opt-in without draw timing barriers");
+        profilingBridge.programProfiling=YES;
+        beforeSubmit=profilingBridge.submitMilliseconds;
+        assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);
+        const double profiledSubmit=profilingBridge.submitMilliseconds-beforeSubmit;
+        drainProfilingBridge();
+        const uint64_t timedDraws=profilingBridge.profiledDraws;
+        assert(profilingBridge.programProfiling && timedDraws>0);
+        profilingBridge.programProfiling=NO;
+        beforeSubmit=profilingBridge.submitMilliseconds;
+        assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);
+        const double resumedSubmit=profilingBridge.submitMilliseconds-beforeSubmit;
+        drainProfilingBridge();
+        assert(!profilingBridge.programProfiling && profilingBridge.profiledDraws==timedDraws &&
+               ![profilingBridge.report containsString:@"GPU par programme"]);
+        std::printf("PERF game Metal bridge fixture: normal %.3f ms, draw profiler %.3f ms, normal again %.3f ms; %llu diagnostic barriers (macOS CI, not game FPS)\n",
+                    normalSubmit,profiledSubmit,resumedSubmit,(unsigned long long)timedDraws);
+        std::puts("PASS draw-by-draw Metal GPU profiling is opt-in and normal submissions add no diagnostic barriers");
         for (const auto& packet : decodePM4Type3(s.words.data(),s.words.size()).packets)
             assert([bridge submit:s.words.data()+packet.headerWord count:packet.payloadCount+1]==0);
         auto readback = [&](id<MTLTexture> source, std::uint8_t* pixels) {

@@ -40,6 +40,11 @@
 #include <unistd.h>
 #include <cerrno>
 #include <mutex>
+#include "maxps4_hle_timing.h"
+#include "maxps4_fatal_fault_log.h"
+#include "maxps4_dispatch_fault.h"
+#include "maxps4_exit_link_trace.h"
+#include <fcntl.h>
 #include <new>
 #include <atomic>
 #include <chrono>
@@ -102,6 +107,8 @@ public:
     // One stderr line per HLE call (boot probe only): thousands per second,
     // which a game on the iPhone paid on its own thread, through the debugger.
     bool trace = false;
+    // Opt-in per-service and frame timing (profiling runs only).
+    maxps4::HLETiming* timing = nullptr;
     uint64_t private_stack = 0;
     size_t private_stack_size = 0;
     // Guest threads of a general run call in concurrently.
@@ -122,6 +129,9 @@ public:
     struct RecentCall {
         uint32_t service = 0; uint64_t thread = 0, a0 = 0, a1 = 0, a2 = 0, a3 = 0; int64_t result = 0;
         char path[64] = {};
+        // POSIX entry point (e.g. libc `usleep`, NID QcteRwbsnV0): it shares the
+        // service with the sce* one but returns -1 + errno instead of an SCE code.
+        bool posix = false;
     };
     std::mutex recent_lock;
     std::array<RecentCall, 128> recent {};
@@ -226,6 +236,11 @@ public:
             }
             Activity* slot = activity_slot();
             if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns(); slot->inside = true; }
+            const uint64_t timed_from = timing && timing->enabled() ? now_ns() : 0;
+            if (timed_from && (orbis == maxps4::PS4KernelService::video_submit ||
+                               orbis == maxps4::PS4KernelService::gnm_submit_flip ||
+                               orbis == maxps4::PS4KernelService::gnm_submit_flip_workload))
+                timing->frame(timed_from);
             const uint32_t stub = static_cast<uint32_t>(orbis) - maxps4::missing_import_token;
             if (static_cast<uint32_t>(orbis) >= maxps4::missing_import_token) {
                 if (missing_imports && stub < missing_imports->size()) {
@@ -273,8 +288,9 @@ public:
             }
             if (pthread) result = maxps4::pthread_result(result);
             if (slot) { slot->since = now_ns(); slot->inside = false; ++slot->returned; }
+            if (timed_from) timing->record(static_cast<uint32_t>(orbis), now_ns() - timed_from);
             if (!frequent(orbis)) {
-                RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}};
+                RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}, posix};
                 if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)
                     (void)memory->read_cstring(call.rdi, entry.path, sizeof(entry.path));
                 std::lock_guard<std::mutex> guard(recent_lock);
@@ -283,10 +299,10 @@ public:
                 else if (orbis == maxps4::PS4KernelService::open) opened[opened_next++ % opened.size()] = entry;
             }
             ++calls;
-            char path[256] = {};
-            if (trace && (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat) &&
-                memory->read_cstring(call.rdi, path, sizeof(path)))
-                std::fprintf(stderr, "hle path \"%s\"\n", path);
+            if (trace && (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)) {
+                char path[256] = {}; // Trace only: no longer zeroed on every HLE call.
+                if (memory->read_cstring(call.rdi, path, sizeof(path))) std::fprintf(stderr, "hle path \"%s\"\n", path);
+            }
             if (trace && static_cast<uint32_t>(orbis) < maxps4::missing_import_token)
                 std::fprintf(stderr, "hle %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx rsp 0x%llx -> 0x%llx\n",
                     service_name(orbis), (unsigned long long)call.rdi, (unsigned long long)call.rsi,
@@ -388,6 +404,75 @@ public:
     size_t size;
     void* address;
 };
+// #296 diagnostics (H2: in-place JIT buffer reuse during ExitFunctionLink).
+// A pass-through wrapper around FEX's ExitFunctionLink, installed per thread in
+// CpuStateFrame::Pointers.ExitFunctionLink. It never changes the arguments,
+// the call or the result; see maxps4_exit_link_trace.h.
+namespace exit_link_diag {
+maxps4::ExitLinkCalls trace;
+std::atomic<uint64_t> original {0};
+// Readability probe for the post-call read (on non-iOS hosts the old code
+// buffer may be released by then): write() of one byte from the address to a
+// non-blocking pipe fails with EFAULT instead of faulting. Created once.
+std::atomic<int> probe_read {-1}, probe_write {-1};
+void open_probe() {
+    if (probe_write.load(std::memory_order_acquire) >= 0) return;
+    int fds[2];
+    if (::pipe(fds) != 0) return;
+    for (int fd : fds) ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);
+    int expected = -1;
+    if (probe_write.compare_exchange_strong(expected, fds[1])) probe_read.store(fds[0], std::memory_order_release);
+    else { ::close(fds[0]); ::close(fds[1]); }
+}
+bool readable(uint64_t at, size_t len) {
+    const int w = probe_write.load(std::memory_order_acquire), r = probe_read.load(std::memory_order_acquire);
+    if (w < 0 || r < 0) return false;
+    const int saved = errno;
+    bool ok = true;
+    for (uint64_t p = at & ~uint64_t(0xfff); ok && p < at + len; p += 0x1000) {
+        char c;
+        ok = ::write(w, reinterpret_cast<const void*>(p < at ? at : p), 1) == 1;
+        if (ok) (void)::read(r, &c, 1);
+    }
+    errno = saved;
+    return ok;
+}
+using LinkFn = uintptr_t (*)(FEXCore::Core::CpuStateFrame*, void*);
+uintptr_t wrapper(FEXCore::Core::CpuStateFrame* frame, void* record) {
+    const auto call = reinterpret_cast<LinkFn>(original.load(std::memory_order_acquire));
+    const uint64_t rec = reinterpret_cast<uint64_t>(record);
+    // The thunk is the code that just called us: mapped and readable.
+    maxps4::JumpThunk before;
+    std::memcpy(&before, reinterpret_cast<const void*>(rec - 0x10), sizeof before);
+    maxps4::ExitLinkCall c;
+    c.record = rec; c.guest_rip = before.guest_rip;
+    c.sequence = trace.calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    c.overwrites_before = trace.overwrites.load(std::memory_order_relaxed);
+    const uintptr_t result = call(frame, record);
+    c.result = result;
+    if (!result) trace.zero_results.fetch_add(1, std::memory_order_relaxed);
+    if (readable(rec - 0x10, sizeof(maxps4::JumpThunk))) {
+        std::memcpy(&c.after, reinterpret_cast<const void*>(rec - 0x10), sizeof c.after);
+        c.state = maxps4::classify_link_record(before, c.after);
+        if (c.state == maxps4::LinkRecordState::overwritten) trace.overwrites.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        trace.unreadable.fetch_add(1, std::memory_order_relaxed);
+    }
+    c.overwrites_after = trace.overwrites.load(std::memory_order_relaxed);
+    if (auto* slot = trace.claim(reinterpret_cast<uint64_t>(frame->Thread))) maxps4::ExitLinkCalls::store(*slot, c);
+    return result;
+}
+// Same function for every thread; installed only over FEX's own value.
+void install(FEXCore::Core::InternalThreadState* thread) {
+    open_probe();
+    auto& slot = thread->CurrentFrame->Pointers.ExitFunctionLink;
+    const uint64_t self = reinterpret_cast<uint64_t>(&wrapper);
+    if (!slot || slot == self) return;
+    uint64_t expected = 0;
+    original.compare_exchange_strong(expected, slot, std::memory_order_acq_rel);
+    if (original.load(std::memory_order_acquire) == slot) slot = self;
+}
+} // namespace exit_link_diag
 // Guest fault containment for one ExecuteThread on an ARM64 host. A SIGSEGV,
 // SIGBUS, SIGILL or SIGTRAP raised by this thread's JIT code (or by the
 // dispatcher's guest-signal stubs) ends the run: the host stack is reset to
@@ -419,6 +504,11 @@ public:
         if (!available) return;
         active = this;
         if (!install) return;
+        // Where an uncontained fault is recorded before the app dies (#296).
+        if (const char* home = std::getenv("HOME")) {
+            std::string documents = std::string(home) + "/Documents";
+            maxps4::FatalFaultLog::set_path(documents.c_str());
+        }
         struct sigaction action {};
         action.sa_sigaction = handle;
         action.sa_flags = SA_SIGINFO;
@@ -590,6 +680,194 @@ private:
                 stop = guard->config.ThreadStopHandlerAddressSpillSRA;
             else if (pc >= guard->config.DispatcherBegin && pc < guard->config.DispatcherEnd)
                 stop = guard->config.ThreadStopHandlerAddress;
+            // #296: the dispatcher branched to a null block (`br x0` after
+            // CompileBlock returned 0 for a guest block FEX cannot compile).
+            // A guest fault at the RIP FEX stored, not a host crash. The static
+            // registers were refilled after the call: spill them on the way out.
+            uint64_t lr = 0;
+#if defined(__APPLE__)
+            lr = machine->uc_mcontext->__ss.__lr;
+#else
+            lr = machine->uc_mcontext.regs[30];
+#endif
+#if __has_feature(ptrauth_calls)
+            lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(lr), ptrauth_key_return_address)));
+#endif
+            if (!stop && maxps4::uncompilable_dispatch(number, pc, lr, guard->config.DispatcherBegin, guard->config.DispatcherEnd)) {
+                const uint64_t rip = guard->thread->CurrentFrame->State.rip;
+                maxps4::FatalFault record;
+                record.signal = SIGILL; record.code = maxps4::uncompilable_guest_block;
+                record.address = rip; record.pc = pc; record.lr = lr; record.sp = sp;
+                record.pc_where = maxps4::FatalFault::other; record.lr_where = maxps4::FatalFault::dispatcher;
+                record.guest_thread_known = true;
+                record.guest_thread = ProbeAddressSpace::guest_thread;
+                record.guest_rip = rip;
+                record.contained = true;
+                // Guest bytes, read only through the permission-checked guest view.
+                auto read_guest = [guard](uint64_t at, uint8_t* out, uint8_t& count) {
+                    for (uint8_t n = 16; n; n /= 2)
+                        if (guard->memory_access && guard->memory_access(at, n, 4)) {
+                            std::memcpy(out, reinterpret_cast<const void*>(at), n);
+                            count = n;
+                            return;
+                        }
+                };
+                read_guest(rip, record.bytes, record.byte_count);
+                // Which call returned 0 (dispatcher code is readable).
+                record.dispatch_known = lr - 4 >= guard->config.DispatcherBegin;
+                if (record.dispatch_known) record.lr_insn = *reinterpret_cast<const uint32_t*>(lr - 4);
+                const auto call = maxps4::dispatch_call(record.lr_insn);
+                record.dispatch = static_cast<uint8_t>(call);
+                // ExitFunctionLink compiled Record->GuestRIP, not State.rip. For a
+                // direct CALL, the top call-ret entry's host return PC follows the
+                // `bl` to the jump thunk; the thunk holds the target. Every step is
+                // validated (stack bounds, JIT ranges, thunk shape, CallerOffset).
+                // Host reads outside known-mapped memory are probed first: write()
+                // from an unreadable page fails with EFAULT instead of faulting
+                // (async-signal-safe). One byte per 4 KiB page.
+                const int saved_errno = errno;
+                int probe[2] = {-1, -1};
+                const bool can_probe = ::pipe(probe) == 0;
+                auto readable = [&](uint64_t at, uint64_t len) {
+                    if (!can_probe || !len) return false;
+                    for (uint64_t p = at & ~uint64_t(0xfff); p < at + len; p += 0x1000) {
+                        const uint64_t q = p < at ? at : p;
+                        char c;
+                        if (::write(probe[1], reinterpret_cast<const void*>(q), 1) != 1) return false;
+                        if (::read(probe[0], &c, 1) != 1) return false;
+                    }
+                    return true;
+                };
+                auto* thread = guard->thread;
+                const uint64_t callret = thread->CurrentFrame->State.callret_sp;
+                const uint64_t base = reinterpret_cast<uint64_t>(thread->CallRetStackBase);
+                const uint64_t size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+                if (base && callret >= base && callret - base <= size - 16 && !(callret & 7) && readable(callret, 16)) {
+                    uint64_t entry[2];
+                    std::memcpy(entry, reinterpret_cast<const void*>(callret), sizeof entry);
+                    record.callret_known = true;
+                    record.callret_rip = entry[0]; record.callret_host = entry[1];
+                    record.exit_link_trace = maxps4::ExitLinkTrace::callret_entry;
+                    const uint64_t site = entry[1] - 4;
+                    if (entry[1] >= 4 && !maxps4_jit_held() &&
+                        guard->context->IsAddressInCodeBuffer(thread, site)) {
+                        record.exit_link_trace = maxps4::ExitLinkTrace::return_site_jit;
+                    }
+                    if (record.exit_link_trace == maxps4::ExitLinkTrace::return_site_jit && !readable(site, 4))
+                        record.exit_link_trace = maxps4::ExitLinkTrace::unreadable;
+                    if (record.exit_link_trace == maxps4::ExitLinkTrace::return_site_jit) {
+                        const uint32_t previous = *reinterpret_cast<const uint32_t*>(site);
+                        record.callret_previous_instruction = previous;
+                        uint64_t thunk = 0;
+                        if (maxps4::bl_target(site, previous, thunk)) {
+                            record.exit_link_trace = maxps4::ExitLinkTrace::direct_bl;
+                            if (!(thunk & 7) && guard->context->IsAddressInCodeBuffer(thread, thunk) &&
+                                guard->context->IsAddressInCodeBuffer(thread, thunk + sizeof(maxps4::JumpThunk) - 1)) {
+                                record.exit_link_trace = maxps4::ExitLinkTrace::thunk_in_jit;
+                            }
+                            if (record.exit_link_trace == maxps4::ExitLinkTrace::thunk_in_jit && !readable(thunk, sizeof(maxps4::JumpThunk)))
+                                record.exit_link_trace = maxps4::ExitLinkTrace::unreadable;
+                            if (record.exit_link_trace == maxps4::ExitLinkTrace::thunk_in_jit) {
+                                maxps4::JumpThunk t;
+                                std::memcpy(&t, reinterpret_cast<const void*>(thunk), sizeof t);
+                                if (maxps4::jump_thunk_record(t, thunk, site)) {
+                                    record.exit_link_trace = maxps4::ExitLinkTrace::validated;
+                                    record.link_known = true;
+                                    record.link_rip = t.guest_rip; record.link_host = t.host_code;
+                                    read_guest(t.guest_rip, record.link_bytes, record.link_byte_count);
+                                }
+                            }
+                        }
+                    }
+                }
+                // A JMP/Jcc (or a CALL below an older call-ret entry) leaves no
+                // pointer to its thunk. ExitFunctionLink still marked it: the
+                // thunk now starts `ldr x0, #0x10` with HostCode 0. Scan the code
+                // buffer that holds a known JIT address (the call-ret host PC);
+                // its bounds are found page by page with IsAddressInCodeBuffer.
+                // Fallback anchor: a host block from FEX's L1 lookup cache
+                // ({HostCode, GuestCode} pairs, at least MIN_L1_ENTRIES = 8192).
+                uint64_t anchor_code = 0;
+                if (call == maxps4::DispatchCall::exit_link && !record.link_known && !maxps4_jit_held()) {
+                    if (record.callret_known && guard->context->IsAddressInCodeBuffer(thread, record.callret_host))
+                        anchor_code = record.callret_host;
+                    else if (const uint64_t l1 = thread->CurrentFrame->State.L1Pointer; l1 && readable(l1, 8192 * 16))
+                        for (size_t i = 0; i < 8192 && !anchor_code; ++i) {
+                            const uint64_t host = reinterpret_cast<const uint64_t*>(l1)[2 * i];
+                            if (host && guard->context->IsAddressInCodeBuffer(thread, host)) anchor_code = host;
+                        }
+                }
+                if (anchor_code) {
+                    constexpr uint64_t step = 0x4000, limit = uint64_t(1) << 30;
+                    const uint64_t anchor = anchor_code & ~(step - 1);
+                    record.scan_anchor = anchor_code;
+                    uint64_t lo = anchor, hi = anchor + step;
+                    while (anchor - lo < limit && lo >= step && guard->context->IsAddressInCodeBuffer(thread, lo - step)) lo -= step;
+                    while (hi - anchor < limit && guard->context->IsAddressInCodeBuffer(thread, hi)) hi += step;
+                    record.scan_begin = lo;
+                    record.scan_end = hi;
+                    // Scan each run of readable pages (a code buffer may hold
+                    // reserved, unreadable pages).
+                    maxps4::NullLinkScan scan;
+                    for (uint64_t run = lo; run < hi;) {
+                        if (!readable(run, 0x1000)) { run += 0x1000; continue; }
+                        uint64_t end = run + 0x1000;
+                        while (end < hi && readable(end, 0x1000)) end += 0x1000;
+                        record.scan_pages += static_cast<uint32_t>((end - run) / 0x1000);
+                        const auto part = maxps4::scan_null_links(run, end);
+                        if (part.count && !scan.count) scan = part; else scan.count += part.count;
+                        run = end;
+                    }
+                    record.scan_known = true;
+                    record.null_links = scan.count;
+                    if (scan.count) {
+                        record.null_link_caller = scan.caller;
+                        record.null_link_call = scan.call;
+                        record.link_known = true;
+                        record.link_rip = scan.guest_rip; record.link_host = 0;
+                        read_guest(scan.guest_rip, record.link_bytes, record.link_byte_count);
+                    }
+                }
+                // H2/H3: this thread's last ExitFunctionLink as the wrapper saw it.
+                // The slot is written only by this thread, so the copy is consistent.
+                {
+                    auto& t = exit_link_diag::trace;
+                    record.efl_calls = t.calls.load(std::memory_order_relaxed);
+                    record.efl_zero = t.zero_results.load(std::memory_order_relaxed);
+                    record.efl_overwrites = t.overwrites.load(std::memory_order_relaxed);
+                    record.efl_unreadable = t.unreadable.load(std::memory_order_relaxed);
+                    maxps4::ExitLinkCall c;
+                    const auto* slot = t.find(reinterpret_cast<uint64_t>(thread));
+                    if (slot && maxps4::ExitLinkCalls::load(*slot, c)) {
+                        record.efl_known = true;
+                        record.efl_seq = c.sequence; record.efl_rip = c.guest_rip;
+                        record.efl_result = c.result; record.efl_record = c.record;
+                        record.efl_state = static_cast<uint8_t>(c.state);
+                        record.efl_overwrites_before = c.overwrites_before;
+                        record.efl_overwrites_after = c.overwrites_after;
+                        // Changed between the call's return and this fault (H3)?
+                        if (c.state != maxps4::LinkRecordState::unknown && c.record >= 0x10 &&
+                            readable(c.record - 0x10, sizeof(maxps4::JumpThunk))) {
+                            maxps4::JumpThunk now;
+                            std::memcpy(&now, reinterpret_cast<const void*>(c.record - 0x10), sizeof now);
+                            record.efl_now = static_cast<uint8_t>(maxps4::classify_link_record(c.after, now));
+                        }
+                    }
+                }
+                if (can_probe) { ::close(probe[0]); ::close(probe[1]); }
+                errno = saved_errno;
+                // The failing RIP: the linked target when the thunk proves it.
+                const uint64_t failed = call == maxps4::DispatchCall::exit_link && record.link_known && !record.link_host
+                    ? record.link_rip : rip;
+                record.address = failed;
+                maxps4::FatalFaultLog::append(record);
+                guard->code = maxps4::uncompilable_guest_block;
+                guard->address = failed;
+                guard->signal.store(SIGILL);
+                sp = guard->thread->CurrentFrame->ReturningStackLocation;
+                pc = guard->config.ThreadStopHandlerAddressSpillSRA;
+                return;
+            }
             if (stop) {
                 guard->code = number == SIGURG ? 0 : info->si_code;
                 guard->address = number == SIGURG ? 0 : reinterpret_cast<uintptr_t>(info->si_addr);
@@ -598,6 +876,43 @@ private:
                 pc = stop;
                 return;
             }
+        }
+        // Not contained: the process is about to die on this fault. Record
+        // where the host was and who called it (LR), then chain unchanged.
+        if (number != SIGURG) {
+            maxps4::FatalFault fatal;
+            fatal.signal = number;
+            fatal.code = info ? info->si_code : 0;
+            fatal.address = info ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
+            fatal.pc = pc; fatal.sp = sp;
+#if defined(__APPLE__)
+            fatal.lr = machine->uc_mcontext->__ss.__lr;
+            fatal.fp = machine->uc_mcontext->__ss.__fp;
+            for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext->__ss.__x[i];
+#else
+            fatal.lr = machine->uc_mcontext.regs[30];
+            fatal.fp = machine->uc_mcontext.regs[29];
+            for (int i = 0; i < 4; ++i) fatal.x[i] = machine->uc_mcontext.regs[i];
+#endif
+#if __has_feature(ptrauth_calls)
+            fatal.lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(fatal.lr), ptrauth_key_return_address)));
+#endif
+            if (guard) {
+                const bool held = maxps4_jit_held();
+                auto classify = [&](uint64_t at) {
+                    if (!held && guard->context->IsAddressInCodeBuffer(guard->thread, at)) return maxps4::FatalFault::jit;
+                    return at >= guard->config.DispatcherBegin && at < guard->config.DispatcherEnd
+                        ? maxps4::FatalFault::dispatcher : maxps4::FatalFault::other;
+                };
+                fatal.pc_where = classify(fatal.pc);
+                fatal.lr_where = classify(fatal.lr);
+                fatal.guest_thread_known = true;
+                fatal.guest_thread = ProbeAddressSpace::guest_thread;
+                fatal.guest_rip = fatal.lr_where == maxps4::FatalFault::jit
+                    ? guard->context->RestoreRIPFromHostPC(guard->thread, fatal.lr)
+                    : guard->thread->CurrentFrame->State.rip;
+            }
+            maxps4::FatalFaultLog::append(fatal);
         }
 #endif
         for (size_t i = 0; i < signals.size(); ++i) if (signals[i] == number) {
@@ -651,10 +966,14 @@ public:
         segment->L = 1;
         segment->D = 0;
         state.cs_cached = FEXCore::Core::CPUState::CalculateGDTBase(*segment);
+        exit_link_diag::install(thread);
+        traced = reinterpret_cast<uint64_t>(thread);
         return 0;
     }
+    ~FEXThreadSetup() { if (traced) exit_link_diag::trace.release(traced); }
 private:
     size_t page;
+    uint64_t traced = 0;
     Mapping callret;
     std::array<FEXCore::Core::CPUState::gdt_segment, 32> gdt {};
 };
@@ -1004,6 +1323,7 @@ struct maxps4_fex_engine {
     std::mutex sample_lock;
     GuestFaultGuard* main_guard = nullptr;
     CPUProfile profile;
+    maxps4::HLETiming hle_timing; // Enabled with profiling.
     std::atomic<bool> profiling{false};
     uint64_t relocation = 0; // Of the loaded game, for relative profile RIPs.
     std::string update_directory; // For load_game (set_update); empty: none.
@@ -1243,6 +1563,10 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     engine->probe.missing_imports = engine->import_probe ? &engine->missing_imports : nullptr;
     engine->probe.missing_reported = engine->import_probe ? &engine->missing_reported : nullptr;
     engine->probe.trace = engine->import_trace;
+    engine->probe.timing = &engine->hle_timing;
+    engine->hle_timing.enable(false);
+    engine->hle_timing.clear();
+    engine->hle_timing.enable(engine->profiling.load());
     engine->probe.private_stack = reinterpret_cast<uintptr_t>(stack_base);
     engine->probe.private_stack_size = page;
     engine->probe.calls = 0;
@@ -1993,6 +2317,7 @@ static int32_t format_calls(maxps4_fex_engine* engine, const std::array<ProbeAdd
         } else {
             const char* known = service_name(service);
             name = known ? known : "service " + std::to_string(c.service);
+            if (c.posix) name += " [POSIX: -1 + errno]";
         }
         std::snprintf(line, sizeof(line), "t%llu %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx%s%s%s\n",
             (unsigned long long)c.thread, name.c_str(), (unsigned long long)c.a0, (unsigned long long)c.a1,
@@ -2316,7 +2641,16 @@ extern "C" int32_t maxps4_fex_engine_profile_report(maxps4_fex_engine* engine, c
         symbols.assign(p.symbols.begin(), p.symbols.end());
     }
     const uint64_t total = jit + dispatcher + host;
-    if (!total) return 0;
+    const std::string timing = engine->hle_timing.report([](uint32_t id) {
+        const char* known = service_name(static_cast<maxps4::PS4KernelService>(id));
+        return known ? known : "?";
+    });
+    auto emit = [&](const std::string& out) {
+        const size_t n = std::min(capacity - 1, out.size());
+        std::memcpy(text, out.data(), n);
+        text[n] = 0;
+    };
+    if (!total) { emit(timing); return 0; }
     auto by_count = [](const auto& a, const auto& b) { return a.second > b.second; };
     std::sort(guest.begin(), guest.end(), by_count);
     std::sort(symbols.begin(), symbols.end(), by_count);
@@ -2340,9 +2674,7 @@ extern "C" int32_t maxps4_fex_engine_profile_report(maxps4_fex_engine* engine, c
         out += line;
     }
     out += "\n";
-    const size_t n = std::min(capacity - 1, out.size());
-    std::memcpy(text, out.data(), n);
-    text[n] = 0;
+    emit(out + timing);
     return 0;
 }
 extern "C" int32_t maxps4_fex_set_tso_emulation(uint32_t enabled) {
@@ -2368,6 +2700,26 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
             engine->probe.stop_exits.load());
         out += stop;
     }
+    // Curtain-to-black-screen triage (#296): summarize the state of all guest
+    // threads at the same instant as the detailed per-thread lines below.
+    // These are observations, not proof of a deadlock: a guest can legitimately
+    // wait for an event, and a thread outside HLE may still be spinning.
+    uint32_t waiting_hle = 0, executing_guest = 0, long_hle = 0;
+    for (const auto& a : engine->probe.activity) {
+        if (!a.thread.load()) continue;
+        if (a.inside.load()) {
+            ++waiting_hle;
+            const uint64_t since = a.since.load();
+            if (now - std::min(now, since) >= 2000000000ULL) ++long_hle;
+        } else {
+            ++executing_guest;
+        }
+    }
+    char summary[192];
+    std::snprintf(summary, sizeof summary,
+        "Threads PS4 : %u dans un service HLE (%u depuis au moins 2 s) · %u hors HLE ; état instantané, blocage non confirmé\n",
+        waiting_hle, long_hle, executing_guest);
+    out += summary;
     for (const auto& a : engine->probe.activity) {
         const uint64_t thread = a.thread.load();
         if (!thread) continue;

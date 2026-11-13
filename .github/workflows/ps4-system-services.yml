@@ -90,7 +90,7 @@ jobs:
             build/ps4-linked/playable-bundle/**
             build/ps4-linked/playable-evidence/**
   services:
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
