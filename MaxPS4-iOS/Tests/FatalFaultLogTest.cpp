@@ -167,6 +167,49 @@ int main() {
         FatalFaultLog::format(c, out, sizeof out);
         CHECK(std::strstr(out, " null-links=1 scan-anchor=0x0 scan-begin=0x0 scan-end=0x0 scan-pages=0 null-link-caller=0x1122f0000 null-link-kind=jump\n") != nullptr);
     }
+    // #296 H2/H3: ExitFunctionLink record classification, per-thread slots,
+    // and the efl-* fields of the line.
+    {
+        using maxps4::LinkRecordState;
+        maxps4::JumpThunk before {{0x14000002u, 0xd61f0000u, 0x58000100u, 0xd63f0000u}, 0, 0x7000c68000, 0x40};
+        maxps4::JumpThunk after = before;
+        CHECK(maxps4::classify_link_record(before, after) == LinkRecordState::intact);
+        after.insn[0] = 0x58000080u; // FEX: ldr x0, #0x10 (out of range)
+        CHECK(maxps4::classify_link_record(before, after) == LinkRecordState::linked);
+        after.host_code = 0x1128a0000; // FEX: HostCode stored
+        CHECK(maxps4::classify_link_record(before, after) == LinkRecordState::linked);
+        maxps4::JumpThunk reused = after; reused.guest_rip = 0x7000aaaa00; // other code now
+        CHECK(maxps4::classify_link_record(before, reused) == LinkRecordState::overwritten);
+        reused = after; reused.insn[3] = 0xaa0103e0u;
+        CHECK(maxps4::classify_link_record(before, reused) == LinkRecordState::overwritten);
+        reused = before; reused.insn[0] = 0xd503201fu; // word 0 not one of FEX's values
+        CHECK(maxps4::classify_link_record(before, reused) == LinkRecordState::overwritten);
+        CHECK(std::strcmp(maxps4::link_record_state_name(LinkRecordState::overwritten), "overwritten") == 0);
+
+        static maxps4::ExitLinkCalls trace;
+        auto* a = trace.claim(0x1000);
+        auto* b = trace.claim(0x2000);
+        CHECK(a && b && a != b && trace.claim(0x1000) == a);
+        maxps4::ExitLinkCall in; in.sequence = 7; in.guest_rip = 0x7000c68000; in.record = 0x1128a2050;
+        in.state = LinkRecordState::overwritten; in.overwrites_before = 2; in.overwrites_after = 3;
+        maxps4::ExitLinkCalls::store(*a, in);
+        maxps4::ExitLinkCall out;
+        CHECK(maxps4::ExitLinkCalls::load(*trace.find(0x1000), out) && out.sequence == 7 && out.guest_rip == 0x7000c68000);
+        CHECK(!maxps4::ExitLinkCalls::load(*trace.find(0x2000), out)); // no call yet
+        trace.release(0x1000);
+        CHECK(trace.find(0x1000) == nullptr && trace.claim(0x3000) != nullptr);
+
+        FatalFault c; c.signal = SIGILL; c.contained = true;
+        c.efl_known = true; c.efl_seq = 7; c.efl_rip = 0x7000c68000; c.efl_result = 0; c.efl_record = 0x1128a2050;
+        c.efl_state = uint8_t(LinkRecordState::overwritten); c.efl_now = uint8_t(LinkRecordState::intact);
+        c.efl_overwrites_before = 2; c.efl_overwrites_after = 3;
+        c.efl_calls = 912; c.efl_zero = 1; c.efl_overwrites = 3; c.efl_unreadable = 0;
+        char out_line[1536];
+        FatalFaultLog::format(c, out_line, sizeof out_line);
+        CHECK(std::strstr(out_line, " efl-seq=7 efl-rip=0x7000c68000 efl-ret=0x0 efl-record=0x1128a2050"
+                                    " efl-after=overwritten efl-now=intact efl-ow=2..3"
+                                    " efl-calls=912 efl-zero=1 efl-overwrites=3 efl-unreadable=0\n") != nullptr);
+    }
     std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory, null-dispatch call and link target");
     return 0;
 }

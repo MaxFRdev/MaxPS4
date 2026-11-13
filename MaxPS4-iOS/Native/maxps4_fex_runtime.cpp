@@ -43,6 +43,8 @@
 #include "maxps4_hle_timing.h"
 #include "maxps4_fatal_fault_log.h"
 #include "maxps4_dispatch_fault.h"
+#include "maxps4_exit_link_trace.h"
+#include <fcntl.h>
 #include <new>
 #include <atomic>
 #include <chrono>
@@ -757,6 +759,32 @@ private:
                         read_guest(scan.guest_rip, record.link_bytes, record.link_byte_count);
                     }
                 }
+                // H2/H3: this thread's last ExitFunctionLink as the wrapper saw it.
+                // The slot is written only by this thread, so the copy is consistent.
+                {
+                    auto& t = exit_link_diag::trace;
+                    record.efl_calls = t.calls.load(std::memory_order_relaxed);
+                    record.efl_zero = t.zero_results.load(std::memory_order_relaxed);
+                    record.efl_overwrites = t.overwrites.load(std::memory_order_relaxed);
+                    record.efl_unreadable = t.unreadable.load(std::memory_order_relaxed);
+                    maxps4::ExitLinkCall c;
+                    const auto* slot = t.find(reinterpret_cast<uint64_t>(thread));
+                    if (slot && maxps4::ExitLinkCalls::load(*slot, c)) {
+                        record.efl_known = true;
+                        record.efl_seq = c.sequence; record.efl_rip = c.guest_rip;
+                        record.efl_result = c.result; record.efl_record = c.record;
+                        record.efl_state = static_cast<uint8_t>(c.state);
+                        record.efl_overwrites_before = c.overwrites_before;
+                        record.efl_overwrites_after = c.overwrites_after;
+                        // Changed between the call's return and this fault (H3)?
+                        if (c.state != maxps4::LinkRecordState::unknown && c.record >= 0x10 &&
+                            readable(c.record - 0x10, sizeof(maxps4::JumpThunk))) {
+                            maxps4::JumpThunk now;
+                            std::memcpy(&now, reinterpret_cast<const void*>(c.record - 0x10), sizeof now);
+                            record.efl_now = static_cast<uint8_t>(maxps4::classify_link_record(c.after, now));
+                        }
+                    }
+                }
                 if (can_probe) { ::close(probe[0]); ::close(probe[1]); }
                 errno = saved_errno;
                 // The failing RIP: the linked target when the thunk proves it.
@@ -841,6 +869,75 @@ private:
     std::condition_variable watch;
     bool finished = false;
 };
+// #296 diagnostics (H2: in-place JIT buffer reuse during ExitFunctionLink).
+// A pass-through wrapper around FEX's ExitFunctionLink, installed per thread in
+// CpuStateFrame::Pointers.ExitFunctionLink. It never changes the arguments,
+// the call or the result; see maxps4_exit_link_trace.h.
+namespace exit_link_diag {
+maxps4::ExitLinkCalls trace;
+std::atomic<uint64_t> original {0};
+// Readability probe for the post-call read (on non-iOS hosts the old code
+// buffer may be released by then): write() of one byte from the address to a
+// non-blocking pipe fails with EFAULT instead of faulting. Created once.
+std::atomic<int> probe_read {-1}, probe_write {-1};
+void open_probe() {
+    if (probe_write.load(std::memory_order_acquire) >= 0) return;
+    int fds[2];
+    if (::pipe(fds) != 0) return;
+    for (int fd : fds) ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);
+    int expected = -1;
+    if (probe_write.compare_exchange_strong(expected, fds[1])) probe_read.store(fds[0], std::memory_order_release);
+    else { ::close(fds[0]); ::close(fds[1]); }
+}
+bool readable(uint64_t at, size_t len) {
+    const int w = probe_write.load(std::memory_order_acquire), r = probe_read.load(std::memory_order_acquire);
+    if (w < 0 || r < 0) return false;
+    const int saved = errno;
+    bool ok = true;
+    for (uint64_t p = at & ~uint64_t(0xfff); ok && p < at + len; p += 0x1000) {
+        char c;
+        ok = ::write(w, reinterpret_cast<const void*>(p < at ? at : p), 1) == 1;
+        if (ok) (void)::read(r, &c, 1);
+    }
+    errno = saved;
+    return ok;
+}
+using LinkFn = uintptr_t (*)(FEXCore::Core::CpuStateFrame*, void*);
+uintptr_t wrapper(FEXCore::Core::CpuStateFrame* frame, void* record) {
+    const auto call = reinterpret_cast<LinkFn>(original.load(std::memory_order_acquire));
+    const uint64_t rec = reinterpret_cast<uint64_t>(record);
+    // The thunk is the code that just called us: mapped and readable.
+    maxps4::JumpThunk before;
+    std::memcpy(&before, reinterpret_cast<const void*>(rec - 0x10), sizeof before);
+    maxps4::ExitLinkCall c;
+    c.record = rec; c.guest_rip = before.guest_rip;
+    c.sequence = trace.calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    c.overwrites_before = trace.overwrites.load(std::memory_order_relaxed);
+    const uintptr_t result = call(frame, record);
+    c.result = result;
+    if (!result) trace.zero_results.fetch_add(1, std::memory_order_relaxed);
+    if (readable(rec - 0x10, sizeof(maxps4::JumpThunk))) {
+        std::memcpy(&c.after, reinterpret_cast<const void*>(rec - 0x10), sizeof c.after);
+        c.state = maxps4::classify_link_record(before, c.after);
+        if (c.state == maxps4::LinkRecordState::overwritten) trace.overwrites.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        trace.unreadable.fetch_add(1, std::memory_order_relaxed);
+    }
+    c.overwrites_after = trace.overwrites.load(std::memory_order_relaxed);
+    if (auto* slot = trace.claim(reinterpret_cast<uint64_t>(frame->Thread))) maxps4::ExitLinkCalls::store(*slot, c);
+    return result;
+}
+// Same function for every thread; installed only over FEX's own value.
+void install(FEXCore::Core::InternalThreadState* thread) {
+    open_probe();
+    auto& slot = thread->CurrentFrame->Pointers.ExitFunctionLink;
+    const uint64_t self = reinterpret_cast<uint64_t>(&wrapper);
+    if (!slot || slot == self) return;
+    uint64_t expected = 0;
+    original.compare_exchange_strong(expected, slot, std::memory_order_acq_rel);
+    if (original.load(std::memory_order_acquire) == slot) slot = self;
+}
+} // namespace exit_link_diag
 // Initial FEX state of one guest thread (main or child): zero integer
 // registers, RIP/RSP, FS base, a guarded CALL/RET stack and a GDT holding one
 // 64-bit user code segment. Owns that host memory until the thread is gone.
@@ -869,10 +966,14 @@ public:
         segment->L = 1;
         segment->D = 0;
         state.cs_cached = FEXCore::Core::CPUState::CalculateGDTBase(*segment);
+        exit_link_diag::install(thread);
+        traced = reinterpret_cast<uint64_t>(thread);
         return 0;
     }
+    ~FEXThreadSetup() { if (traced) exit_link_diag::trace.release(traced); }
 private:
     size_t page;
+    uint64_t traced = 0;
     Mapping callret;
     std::array<FEXCore::Core::CPUState::gdt_segment, 32> gdt {};
 };

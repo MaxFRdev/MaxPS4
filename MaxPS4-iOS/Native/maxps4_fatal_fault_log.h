@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include "maxps4_dispatch_fault.h"
+#include "maxps4_exit_link_trace.h"
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -45,6 +46,14 @@ struct FatalFault {
     // Scan coverage: distinguish no matching thunk from no readable JIT pages.
     uint64_t scan_anchor = 0, scan_begin = 0, scan_end = 0;
     uint32_t scan_pages = 0;
+    // This thread's last ExitFunctionLink call, seen by MaxPS4's pass-through
+    // wrapper (maxps4_exit_link_trace.h): the real target GuestRIP, the result,
+    // and whether the thunk record survived the call (H2) and until now (H3).
+    bool efl_known = false;
+    uint64_t efl_seq = 0, efl_rip = 0, efl_result = 0, efl_record = 0;
+    uint8_t efl_state = 0, efl_now = 0; // LinkRecordState
+    uint64_t efl_overwrites_before = 0, efl_overwrites_after = 0;
+    uint64_t efl_calls = 0, efl_zero = 0, efl_overwrites = 0, efl_unreadable = 0;
     uint64_t null_link_caller = 0;
     bool null_link_call = false;
 };
@@ -98,13 +107,28 @@ public:
             w.text(" scan-pages="); w.dec(f.scan_pages);
             if (f.null_links) { w.text(" null-link-caller="); w.hex(f.null_link_caller); w.text(f.null_link_call ? " null-link-kind=call" : " null-link-kind=jump"); }
         }
+        if (f.efl_known) {
+            w.text(" efl-seq="); w.dec(f.efl_seq);
+            w.text(" efl-rip="); w.hex(f.efl_rip);
+            w.text(" efl-ret="); w.hex(f.efl_result);
+            w.text(" efl-record="); w.hex(f.efl_record);
+            w.text(" efl-after="); w.text(link_record_state_name(static_cast<LinkRecordState>(f.efl_state)));
+            w.text(" efl-now="); w.text(link_record_state_name(static_cast<LinkRecordState>(f.efl_now)));
+            w.text(" efl-ow="); w.dec(f.efl_overwrites_before); w.text(".."); w.dec(f.efl_overwrites_after);
+        }
+        if (f.efl_calls) {
+            w.text(" efl-calls="); w.dec(f.efl_calls);
+            w.text(" efl-zero="); w.dec(f.efl_zero);
+            w.text(" efl-overwrites="); w.dec(f.efl_overwrites);
+            w.text(" efl-unreadable="); w.dec(f.efl_unreadable);
+        }
         w.text("\n");
         return w.finish();
     }
     // From the signal handler.
     static void append(const FatalFault& f) {
         if (!enabled_) return;
-        char line[1024];
+        char line[1536];
         const size_t n = format(f, line, sizeof line);
         const int fd = ::open(path_, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd < 0) return;

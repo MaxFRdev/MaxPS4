@@ -213,3 +213,58 @@ This is not a failing service.
 - The stop report now tags these entries `[POSIX: -1 + errno]`.
 - VideoOut pause vs. a stuck flip is handled separately (63f027b, 03e9a58,
   b08a616).
+
+## Full device line after 5547456 (2026-11-13) and the JIT-reuse diagnostics
+
+```
+... dispatch=exit-link callret-rip=0x7000c67e17 callret-host=0x1128a2040 callret-prev=0x94000a8e
+exit-link-trace=direct-bl null-links=0 scan-anchor=0x1128a2040 scan-begin=0x11257c000
+scan-end=0x113578000 scan-pages=4092
+```
+
+- **H1 (scan missed the buffer): ruled out.** The scan covered
+  0x11257c000..0x113578000: 16 MiB minus 16 KiB, all 4092 pages readable.
+  That is the whole iOS JIT buffer (`MAX_CODE_SIZE = 16 MiB`, reused in place,
+  never a second buffer). No thunk carries the HostCode-0 mark that every
+  ordinary failure of `CompileBlock` under `ExitFunctionLink` leaves.
+- **H2 (in-place reuse during ExitFunctionLink): still open.**
+  - On iOS, `CompileCode` calls `ClearCodeCache(Thread, false)` when the
+    buffer is full, and that reuses the same memory.
+  - `ExitFunctionLink`'s guard (`LookupCache->Shared != CodeBuffer->LookupCache`)
+    cannot see an in-place reuse.
+  - It then writes the thunk and the caller inside memory that was just
+    rewritten.
+- **H3 (another thread cleared the buffer before the scan): still open.**
+  MaxPS4 does not install FEX's `BeginBufferInvalidationSafepoint` /
+  `OnBufferReusedInPlace` hooks.
+
+### New fields (branch experiment/jit-cache-reuse-diagnostics)
+
+MaxPS4 replaces `CpuStateFrame::Pointers.ExitFunctionLink` for each thread with
+a pass-through wrapper (`exit_link_diag::wrapper`).
+- What it does:
+  - copies the thunk and its record before the call;
+  - calls FEX's function unchanged and returns its result;
+  - classifies the record afterwards.
+- FEX only ever rewrites word 0 and HostCode. Any other change means the
+  memory was reused during the call.
+- It makes no FEX change and no JIT or fault-handling change. It uses no locks
+  and no allocation. The post-call read is probed with a non-blocking pipe.
+
+| Field | Meaning |
+|---|---|
+| `efl-rip` | real GuestRIP passed to ExitFunctionLink by this thread (the target FEX refuses) |
+| `efl-ret` | HostCode returned (0 → the null dispatch) |
+| `efl-after` | record right after the call: `intact`, `linked` (FEX's own edit) or `overwritten` (**H2**) |
+| `efl-now` | record at fault time vs. right after the call: `overwritten` → **H3** |
+| `efl-ow=a..b` | global overwrite count before and after this call |
+| `efl-calls`, `efl-zero`, `efl-overwrites`, `efl-unreadable` | global counts since launch |
+
+Reading:
+- `efl-after=overwritten` proves H2.
+- `efl-after=linked` with `efl-now=overwritten` points to H3.
+- `efl-after=linked` with `efl-now=linked` and `efl-ret=0x0`: no reuse. FEX
+  really refuses the guest code at `efl-rip`. Decode it with that address.
+
+Cost: two system calls per ExitFunctionLink call (first link of each
+branch only).
