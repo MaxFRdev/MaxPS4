@@ -669,7 +669,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     // heartbeat is only a snapshot and does not contain FEX's link-rip/bytes.
     // Ignore old logs from earlier runs; never misattribute a stale crash.
     var sharedReport: String {
-        var text = heartbeat.isEmpty ? report : report + "\\n" + heartbeat
+        var text = heartbeat.isEmpty ? report : report + "\n" + heartbeat
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return text }
         let faultURL = documents.appendingPathComponent("maxps4-fatal-fault.txt")
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: faultURL.path),
@@ -677,7 +677,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
               let sessionStart = diagnosticSessionStart,
               modified >= sessionStart,
               let contents = try? String(contentsOf: faultURL, encoding: .utf8) else { return text }
-        text += "\\n\\nJournal FEXCore (maxps4-fatal-fault.txt) :\\n" + String(contents.suffix(16_384))
+        text += "\n\nJournal FEXCore (maxps4-fatal-fault.txt) :\n" + String(contents.suffix(16_384))
         return text
     }
     deinit { worker?.stop() }
