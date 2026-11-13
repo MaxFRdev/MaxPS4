@@ -199,3 +199,17 @@ Tests:
   `code`, instead of the stale RIP.
 
 Not fixed: the cause stays unknown until the device reports `link-bytes`.
+
+## `sceKernelUsleep(1000) = -1` (2026-11-13)
+
+This is not a failing service.
+- Both NIDs share one service, so recent calls named both `sceKernelUsleep`:
+  - `1jfXLRVzisc`, sceKernelUsleep: returns an SCE code (0 or `0x8002xxxx`).
+  - `QcteRwbsnV0`, libc `usleep`: POSIX, returns -1 + errno.
+- `PS4Threads::sleep` fails only with EINTR, and EINTR only happens once
+  `PS4Threads::interrupt()` has run. That happens at a stop (time limit,
+  guest fault, exit), not at a VideoOut pause. A guest `usleep` returning -1
+  therefore means a stop was already underway when the calls were captured.
+- The stop report now tags these entries `[POSIX: -1 + errno]`.
+- VideoOut pause vs. a stuck flip is handled separately (63f027b, 03e9a58,
+  b08a616).

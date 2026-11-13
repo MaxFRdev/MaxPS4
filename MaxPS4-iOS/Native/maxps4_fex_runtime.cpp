@@ -127,6 +127,9 @@ public:
     struct RecentCall {
         uint32_t service = 0; uint64_t thread = 0, a0 = 0, a1 = 0, a2 = 0, a3 = 0; int64_t result = 0;
         char path[64] = {};
+        // POSIX entry point (e.g. libc `usleep`, NID QcteRwbsnV0): it shares the
+        // service with the sce* one but returns -1 + errno instead of an SCE code.
+        bool posix = false;
     };
     std::mutex recent_lock;
     std::array<RecentCall, 128> recent {};
@@ -285,7 +288,7 @@ public:
             if (slot) { slot->since = now_ns(); slot->inside = false; ++slot->returned; }
             if (timed_from) timing->record(static_cast<uint32_t>(orbis), now_ns() - timed_from);
             if (!frequent(orbis)) {
-                RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}};
+                RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}, posix};
                 if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)
                     (void)memory->read_cstring(call.rdi, entry.path, sizeof(entry.path));
                 std::lock_guard<std::mutex> guard(recent_lock);
@@ -2196,6 +2199,7 @@ static int32_t format_calls(maxps4_fex_engine* engine, const std::array<ProbeAdd
         } else {
             const char* known = service_name(service);
             name = known ? known : "service " + std::to_string(c.service);
+            if (c.posix) name += " [POSIX: -1 + errno]";
         }
         std::snprintf(line, sizeof(line), "t%llu %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx%s%s%s\n",
             (unsigned long long)c.thread, name.c_str(), (unsigned long long)c.a0, (unsigned long long)c.a1,
