@@ -22,6 +22,28 @@ struct FatalFault {
     // Guest code bytes at guest_rip, when readable (uncompilable block).
     uint8_t bytes[16] {};
     uint8_t byte_count = 0;
+    // Null dispatch (#296): the instruction before LR names the dispatcher
+    // call that returned 0 (dispatch: 1 compile-block, 2 exit-link).
+    bool dispatch_known = false;
+    uint32_t lr_insn = 0;
+    uint8_t dispatch = 0;
+    // Top of FEX's call-ret stack {guest return RIP, host return PC}.
+    bool callret_known = false;
+    uint64_t callret_rip = 0, callret_host = 0;
+    // The jump thunk the top call went through, validated: its target RIP
+    // and the HostCode ExitFunctionLink stored (0: the target failed).
+    bool link_known = false;
+    uint64_t link_rip = 0, link_host = 0;
+    uint8_t link_bytes[16] {};
+    uint8_t link_byte_count = 0;
+    // Code-buffer scan for thunks ExitFunctionLink patched with HostCode 0.
+    bool scan_known = false;
+    uint32_t null_links = 0;
+    // Scan coverage: distinguish no matching thunk from no readable JIT pages.
+    uint64_t scan_anchor = 0, scan_begin = 0, scan_end = 0;
+    uint32_t scan_pages = 0;
+    uint64_t null_link_caller = 0;
+    bool null_link_call = false;
 };
 
 class FatalFaultLog {
@@ -49,12 +71,27 @@ public:
             w.text(" guest-thread="); w.dec(f.guest_thread);
             w.text(" guest-rip="); w.hex(f.guest_rip);
         } else w.text(" guest-thread=none");
-        if (f.byte_count) {
-            w.text(" guest-bytes=");
-            for (uint8_t i = 0; i < f.byte_count && i < sizeof f.bytes; ++i) {
-                w.put("0123456789abcdef"[f.bytes[i] >> 4]);
-                w.put("0123456789abcdef"[f.bytes[i] & 15]);
-            }
+        if (f.byte_count) { w.text(" guest-bytes="); w.bytes(f.bytes, f.byte_count, sizeof f.bytes); }
+        if (f.dispatch_known) {
+            w.text(" lr-insn="); w.hex(f.lr_insn);
+            w.text(" dispatch="); w.text(f.dispatch == 1 ? "compile-block" : f.dispatch == 2 ? "exit-link" : "unknown");
+        }
+        if (f.callret_known) {
+            w.text(" callret-rip="); w.hex(f.callret_rip);
+            w.text(" callret-host="); w.hex(f.callret_host);
+        }
+        if (f.link_known) {
+            w.text(" link-rip="); w.hex(f.link_rip);
+            w.text(" link-host="); w.hex(f.link_host);
+            if (f.link_byte_count) { w.text(" link-bytes="); w.bytes(f.link_bytes, f.link_byte_count, sizeof f.link_bytes); }
+        }
+        if (f.scan_known) {
+            w.text(" null-links="); w.dec(f.null_links);
+            w.text(" scan-anchor="); w.hex(f.scan_anchor);
+            w.text(" scan-begin="); w.hex(f.scan_begin);
+            w.text(" scan-end="); w.hex(f.scan_end);
+            w.text(" scan-pages="); w.dec(f.scan_pages);
+            if (f.null_links) { w.text(" null-link-caller="); w.hex(f.null_link_caller); w.text(f.null_link_call ? " null-link-kind=call" : " null-link-kind=jump"); }
         }
         w.text("\n");
         return w.finish();
@@ -62,7 +99,7 @@ public:
     // From the signal handler.
     static void append(const FatalFault& f) {
         if (!enabled_) return;
-        char line[512];
+        char line[1024];
         const size_t n = format(f, line, sizeof line);
         const int fd = ::open(path_, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd < 0) return;
@@ -85,6 +122,9 @@ private:
             char digits[16]; int k = 0;
             do { digits[k++] = "0123456789abcdef"[v & 15]; v >>= 4; } while (v);
             while (k) put(digits[--k]);
+        }
+        void bytes(const uint8_t* b, size_t count, size_t limit) {
+            for (size_t i = 0; i < count && i < limit; ++i) { put("0123456789abcdef"[b[i] >> 4]); put("0123456789abcdef"[b[i] & 15]); }
         }
         void dec(uint64_t v) {
             char digits[20]; int k = 0;

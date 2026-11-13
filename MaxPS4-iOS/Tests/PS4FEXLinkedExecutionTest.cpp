@@ -1034,7 +1034,8 @@ int main(int argc, char** argv) {
         CHECK(maxps4_fex_engine_last_guest_fault(process,&fault)==-ENOENT && !fault.signal);
         CHECK(maxps4_fex_engine_set_time_limit(process,3600*1000+1)==-EINVAL);
         CHECK(maxps4_fex_engine_set_time_limit(process,200)==0);
-        for (int kind = 0; kind < 5; ++kind) {
+        uint64_t stub_rip=0;
+        for (int kind = 0; kind < 8; ++kind) {
             auto app = orbis_execution::make_general_fault_app(kind);
             const char* dependency[] = {"provider.prx"};
             const maxps4_orbis_module modules[] = {
@@ -1054,13 +1055,28 @@ int main(int argc, char** argv) {
             CHECK(maxps4_fex_engine_last_guest_fault(process,&fault)==0);
             std::printf("guest fault kind=%d: status=%d signal=%d address=0x%llx rip=0x%llx code=0x%llx elapsed=%lldms\n",kind,ran,
                 fault.signal,(unsigned long long)fault.address,(unsigned long long)fault.rip,(unsigned long long)code,(long long)elapsed);
-            CHECK(ran==(kind==3 ? -ETIMEDOUT : kind==2 ? -EILSEQ : -EFAULT) && !observed && !cpu && !logical_entry);
+            const bool illegal = kind==2 || kind>=5;
+            CHECK(ran==(kind==3 ? -ETIMEDOUT : illegal ? -EILSEQ : -EFAULT) && !observed && !cpu && !logical_entry);
             CHECK(kind==3 ? fault.signal==SIGURG && !fault.address && elapsed>=200 && elapsed<10000 :
-                  kind==2 ? fault.signal==SIGILL || fault.signal==SIGTRAP : fault.signal==SIGSEGV || fault.signal==SIGBUS);
+                  illegal ? fault.signal==SIGILL || fault.signal==SIGTRAP : fault.signal==SIGSEGV || fault.signal==SIGBUS);
             CHECK(fault.rip>=code); // Entry block, or the startup stub placed after the image.
             if (kind==1) CHECK(fault.address==code);
             if (kind==4) CHECK(fault.address==code+1);
             if (kind==0) CHECK(fault.address>code);
+            // #296: null dispatch contained as SIGILL code 0x4d50. A linked direct
+            // CALL leaves State.rip at the caller's block (stale); the fault
+            // address is the CALL target recovered from the jump thunk.
+            // The entry itself is reached by a linked branch from the startup
+            // stub after the image: State.rip stays at that stub (as for kinds
+            // 0, 1, 3, 4), never at the block that failed.
+            if (kind==0) stub_rip=fault.rip;
+            if (kind>=5) CHECK(fault.signal==SIGILL && fault.code==0x4d50);
+            if (kind==5) CHECK(fault.address==code+6 && fault.rip==stub_rip && stub_rip>code+8);
+            // A direct JMP (6: inside the entry; 7: the stub's JMP to the entry)
+            // leaves no call-ret entry. The target comes from the code-buffer
+            // scan for the thunk ExitFunctionLink patched with HostCode 0.
+            if (kind==6) CHECK(fault.address==code+3 && fault.rip==stub_rip);
+            if (kind==7) CHECK(fault.address==code && fault.rip==stub_rip);
         }
         // Recovery: the next image runs normally and clears the fault record.
         auto app = orbis_execution::make_general_app(9);
