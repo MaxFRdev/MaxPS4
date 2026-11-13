@@ -135,6 +135,37 @@ int main() {
                                " callret-rip=0x7001a10005 callret-host=0x10000104 callret-prev=0x94000010 exit-link-trace=validated"
                                " link-rip=0x7001a20000 link-host=0x0 link-bytes=66cf\n") != nullptr);
         CHECK(std::strcmp(maxps4::exit_link_trace_name(maxps4::ExitLinkTrace::direct_bl), "direct-bl") == 0);
+        CHECK(std::strcmp(maxps4::exit_link_trace_name(maxps4::ExitLinkTrace::unreadable), "unreadable") == 0);
+    }
+    // Code-buffer scan: a JMP thunk patched with HostCode 0 is found and its
+    // caller validated; unlinked or non-null thunks and a wrong caller are not.
+    {
+        alignas(8) static uint8_t buf[0x200];
+        std::memset(buf, 0, sizeof buf);
+        const uint64_t b = reinterpret_cast<uint64_t>(buf);
+        auto put_thunk = [&](size_t off, uint32_t first, uint64_t host, uint64_t rip, size_t caller_off, uint32_t caller_op) {
+            maxps4::JumpThunk t {{first, 0xd61f0000u, 0x58000100u, 0xd63f0000u}, host, rip, uint64_t(int64_t(caller_off) - int64_t(off))};
+            std::memcpy(buf + off, &t, sizeof t);
+            const uint32_t insn = caller_op | uint32_t(((int64_t(off) - int64_t(caller_off)) / 4) & 0x03ffffff);
+            std::memcpy(buf + caller_off, &insn, 4);
+        };
+        put_thunk(0x40, 0x14000002u, 0, 0x7000000100, 0x00, 0x14000000u);  // unlinked
+        put_thunk(0x80, 0x58000080u, 0x1234, 0x7000000200, 0x04, 0x14000000u); // linked, non-null
+        auto s0 = maxps4::scan_null_links(b, b + sizeof buf);
+        CHECK(s0.count == 0);
+        put_thunk(0xc0, 0x58000080u, 0, 0x7000c67e20, 0x08, 0x14000000u);  // b -> null thunk
+        auto s1 = maxps4::scan_null_links(b, b + sizeof buf);
+        CHECK(s1.count == 1 && s1.thunk == b + 0xc0 && s1.guest_rip == 0x7000c67e20 && s1.caller == b + 0x08 && !s1.call);
+        put_thunk(0x100, 0x58000080u, 0, 0x7000c68000, 0x0c, 0x94000000u); // bl -> null thunk
+        auto s2 = maxps4::scan_null_links(b, b + sizeof buf);
+        CHECK(s2.count == 2 && s2.guest_rip == 0x7000c67e20);
+        const uint32_t other = 0x14000001u; std::memcpy(buf + 0x08, &other, 4); // caller no longer branches there
+        auto s3 = maxps4::scan_null_links(b, b + sizeof buf);
+        CHECK(s3.count == 1 && s3.guest_rip == 0x7000c68000 && s3.call);
+        FatalFault c; c.signal = SIGILL; c.scan_known = true; c.null_links = 1; c.null_link_caller = 0x1122f0000; c.null_link_call = false;
+        char out[1024];
+        FatalFaultLog::format(c, out, sizeof out);
+        CHECK(std::strstr(out, " null-links=1 scan-anchor=0x0 scan-begin=0x0 scan-end=0x0 scan-pages=0 null-link-caller=0x1122f0000 null-link-kind=jump\n") != nullptr);
     }
     std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory, null-dispatch call and link target");
     return 0;

@@ -149,3 +149,67 @@ For a direct JMP (no call-ret entry), `link-rip` is absent and `addr=` stays
 Install the new IPA, reproduce, and send the new `contained-host-fault` line.
 `link-bytes` (or, for a JMP, the guest code around `callret-rip`) gives the
 instruction FEX rejects; support for it goes into a separate change.
+
+## Device report after 88af4d6 (2026-11-12)
+
+```
+contained-host-fault signal=4 code=19792 addr=0x7001a14338 pc=0x0(other) lr=0x102be4190(dispatcher) ...
+guest-rip=0x7001a14338 guest-bytes=c34989cab8110000000f05c34989cab8 lr-insn=0xd63f0040 dispatch=exit-link
+callret-rip=0x7000c67e17 callret-host=0x1122f9a80
+```
+
+- `lr-insn=0xd63f0040` (`blr x2`) proves the null block came from
+  `Arm64JITCore::ExitFunctionLink`, not CompileBlock. ExitFunctionLink
+  compiled `Record->GuestRIP`, a direct-branch target. `State.rip`
+  (0x7001a14338, the RET after an HLE SYSCALL) is stale. The RET is not the
+  failing instruction.
+- `callret-rip` / `callret-host` are the top of FEX's call-ret shadow stack
+  (BranchOps.cpp: `adr TMP1, l_CallReturn; stp RetReg, TMP1, [callret_sp, -16]!`):
+  - `callret-rip` 0x7000c67e17 is the guest return address of the innermost
+    active direct CALL (a 5-byte `call rel32` at 0x7000c67e12). It is neither
+    a branch target nor the failing address.
+  - `callret-host` is the host PC of that call's return block, a JIT address.
+- `link-rip` is missing. The `bl` before `callret-host` does not lead to a
+  jump thunk that holds HostCode 0, so that CALL is not the failing branch:
+  it was already linked and its callee is running. The failing branch is a
+  JMP/Jcc, or a CALL without a known return block, inside that callee. Such
+  a branch pushes no call-ret entry.
+
+### New diagnostic: null-link scan
+
+When CompileBlock returns 0, ExitFunctionLink computes `BranchOffset = 0 -
+caller/4`. That offset is out of `b` range, so FEX stores HostCode 0 in the
+record and rewrites the first word of the thunk to `ldr x0, #0x10` (JIT.cpp).
+That mark stays in the code buffer for JMPs too.
+
+How the scan works:
+- The handler finds the bounds of the code buffer page by page with
+  `IsAddressInCodeBuffer`. It starts from the call-ret host PC, or else from
+  an entry in FEX's L1 cache.
+- It scans the buffer for such thunks and checks that the caller at
+  `thunk + CallerOffset` is a `b`/`bl` to that thunk.
+- The line gains `null-links=N null-link-caller= null-link-kind=jump|call`,
+  and `link-rip`/`link-bytes` give the guest target that FEX refuses.
+  `addr=` becomes that target.
+
+Tests:
+- FatalFaultLogTest covers the scan on a synthetic buffer.
+- PS4FEXLinkedExecutionTest (ARM64 FEX on macOS) now expects kind 6 (JMP to
+  `66 cf`) at `code+3` and kind 7 (entry reached through the stub's JMP) at
+  `code`, instead of the stale RIP.
+
+Not fixed: the cause stays unknown until the device reports `link-bytes`.
+
+## `sceKernelUsleep(1000) = -1` (2026-11-13)
+
+This is not a failing service.
+- Both NIDs share one service, so recent calls named both `sceKernelUsleep`:
+  - `1jfXLRVzisc`, sceKernelUsleep: returns an SCE code (0 or `0x8002xxxx`).
+  - `QcteRwbsnV0`, libc `usleep`: POSIX, returns -1 + errno.
+- `PS4Threads::sleep` fails only with EINTR, and EINTR only happens once
+  `PS4Threads::interrupt()` has run. That happens at a stop (time limit,
+  guest fault, exit), not at a VideoOut pause. A guest `usleep` returning -1
+  therefore means a stop was already underway when the calls were captured.
+- The stop report now tags these entries `[POSIX: -1 + errno]`.
+- VideoOut pause vs. a stuck flip is handled separately (63f027b, 03e9a58,
+  b08a616).

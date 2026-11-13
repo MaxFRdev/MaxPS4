@@ -107,6 +107,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var vblanksSent = 0 // With vblankPort, under inputLock.
     private var touchesArrived = 0, touchSeconds: TimeInterval = 0 // Under inputLock.
     private var vblankPort: UInt64 = 1
+    // The menu/scene can request a pause before the native engine is attached.
+    // Remember it so initialization never silently resumes a backgrounded game.
+    private var requestedPause = false
     private var lastTicket: UInt64 = 0
     private var relocation: UInt64 = 0
     private var vblankClock = MaxPS4VideoOutClock()
@@ -330,6 +333,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     func setPaused(_ paused: Bool) {
         audio.setPaused(paused)
         inputLock.lock(); defer { inputLock.unlock() }
+        requestedPause = paused
         if let inputEngine { maxps4_fex_engine_videoout_pause(inputEngine, paused ? 1 : 0) }
     }
     // How long presses took: iOS to the app, the app to the game's read.
@@ -513,7 +517,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             let cancelled = stopped
             if ready {
                 sendInputLocked(opened)
-                inputLock.lock(); inputEngine = opened; inputLock.unlock()
+                inputLock.lock()
+                inputEngine = opened
+                maxps4_fex_engine_videoout_pause(opened, requestedPause ? 1 : 0)
+                inputLock.unlock()
             }
             if ready {
                 let timer = DispatchSource.makeTimerSource(queue: vblanks)
@@ -592,6 +599,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     // whether the new run has started, for the loading screen.
     private static var draining: MaxPS4GameSource? // App-wide: a new game screen waits for it too.
     private var launched = false
+    private var diagnosticSessionStart: Date?
     func start(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false) {
         stop()
         let source = MaxPS4GameSource(), id = UUID()
@@ -599,6 +607,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         hasPresented = false; heartbeat = ""; outcome = .init()
         report = String(localized: "Chargement du jeu et préparation Metal…", bundle: .maxps4)
         launched = false
+        diagnosticSessionStart = Date()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.generation == id else { return }
@@ -656,8 +665,21 @@ final class MaxPS4GameSource: @unchecked Sendable {
         heartbeatTimer?.invalidate(); heartbeatTimer = nil
         report = String(localized: "Arrêt demandé.", bundle: .maxps4)
     }
-    // What "Partager le rapport" sends: the last image report plus live progress.
-    var sharedReport: String { heartbeat.isEmpty ? report : report + "\n" + heartbeat }
+    // Include the native fatal-fault log when exporting diagnostics. The Metal
+    // heartbeat is only a snapshot and does not contain FEX's link-rip/bytes.
+    // Ignore old logs from earlier runs; never misattribute a stale crash.
+    var sharedReport: String {
+        var text = heartbeat.isEmpty ? report : report + "\n" + heartbeat
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return text }
+        let faultURL = documents.appendingPathComponent("maxps4-fatal-fault.txt")
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: faultURL.path),
+              let modified = attributes[.modificationDate] as? Date,
+              let sessionStart = diagnosticSessionStart,
+              modified >= sessionStart,
+              let contents = try? String(contentsOf: faultURL, encoding: .utf8) else { return text }
+        text += "\n\nJournal FEXCore (maxps4-fatal-fault.txt) :\n" + String(contents.suffix(16_384))
+        return text
+    }
     deinit { worker?.stop() }
 }
 #endif

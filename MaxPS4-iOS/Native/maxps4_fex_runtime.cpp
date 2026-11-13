@@ -127,6 +127,9 @@ public:
     struct RecentCall {
         uint32_t service = 0; uint64_t thread = 0, a0 = 0, a1 = 0, a2 = 0, a3 = 0; int64_t result = 0;
         char path[64] = {};
+        // POSIX entry point (e.g. libc `usleep`, NID QcteRwbsnV0): it shares the
+        // service with the sce* one but returns -1 + errno instead of an SCE code.
+        bool posix = false;
     };
     std::mutex recent_lock;
     std::array<RecentCall, 128> recent {};
@@ -285,7 +288,7 @@ public:
             if (slot) { slot->since = now_ns(); slot->inside = false; ++slot->returned; }
             if (timed_from) timing->record(static_cast<uint32_t>(orbis), now_ns() - timed_from);
             if (!frequent(orbis)) {
-                RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}};
+                RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}, posix};
                 if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)
                     (void)memory->read_cstring(call.rdi, entry.path, sizeof(entry.path));
                 std::lock_guard<std::mutex> guard(recent_lock);
@@ -648,11 +651,27 @@ private:
                 // direct CALL, the top call-ret entry's host return PC follows the
                 // `bl` to the jump thunk; the thunk holds the target. Every step is
                 // validated (stack bounds, JIT ranges, thunk shape, CallerOffset).
+                // Host reads outside known-mapped memory are probed first: write()
+                // from an unreadable page fails with EFAULT instead of faulting
+                // (async-signal-safe). One byte per 4 KiB page.
+                const int saved_errno = errno;
+                int probe[2] = {-1, -1};
+                const bool can_probe = ::pipe(probe) == 0;
+                auto readable = [&](uint64_t at, uint64_t len) {
+                    if (!can_probe || !len) return false;
+                    for (uint64_t p = at & ~uint64_t(0xfff); p < at + len; p += 0x1000) {
+                        const uint64_t q = p < at ? at : p;
+                        char c;
+                        if (::write(probe[1], reinterpret_cast<const void*>(q), 1) != 1) return false;
+                        if (::read(probe[0], &c, 1) != 1) return false;
+                    }
+                    return true;
+                };
                 auto* thread = guard->thread;
                 const uint64_t callret = thread->CurrentFrame->State.callret_sp;
                 const uint64_t base = reinterpret_cast<uint64_t>(thread->CallRetStackBase);
                 const uint64_t size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
-                if (base && callret >= base && callret - base <= size - 16 && !(callret & 7)) {
+                if (base && callret >= base && callret - base <= size - 16 && !(callret & 7) && readable(callret, 16)) {
                     uint64_t entry[2];
                     std::memcpy(entry, reinterpret_cast<const void*>(callret), sizeof entry);
                     record.callret_known = true;
@@ -662,6 +681,10 @@ private:
                     if (entry[1] >= 4 && !maxps4_jit_held() &&
                         guard->context->IsAddressInCodeBuffer(thread, site)) {
                         record.exit_link_trace = maxps4::ExitLinkTrace::return_site_jit;
+                    }
+                    if (record.exit_link_trace == maxps4::ExitLinkTrace::return_site_jit && !readable(site, 4))
+                        record.exit_link_trace = maxps4::ExitLinkTrace::unreadable;
+                    if (record.exit_link_trace == maxps4::ExitLinkTrace::return_site_jit) {
                         const uint32_t previous = *reinterpret_cast<const uint32_t*>(site);
                         record.callret_previous_instruction = previous;
                         uint64_t thunk = 0;
@@ -670,6 +693,10 @@ private:
                             if (!(thunk & 7) && guard->context->IsAddressInCodeBuffer(thread, thunk) &&
                                 guard->context->IsAddressInCodeBuffer(thread, thunk + sizeof(maxps4::JumpThunk) - 1)) {
                                 record.exit_link_trace = maxps4::ExitLinkTrace::thunk_in_jit;
+                            }
+                            if (record.exit_link_trace == maxps4::ExitLinkTrace::thunk_in_jit && !readable(thunk, sizeof(maxps4::JumpThunk)))
+                                record.exit_link_trace = maxps4::ExitLinkTrace::unreadable;
+                            if (record.exit_link_trace == maxps4::ExitLinkTrace::thunk_in_jit) {
                                 maxps4::JumpThunk t;
                                 std::memcpy(&t, reinterpret_cast<const void*>(thunk), sizeof t);
                                 if (maxps4::jump_thunk_record(t, thunk, site)) {
@@ -682,6 +709,56 @@ private:
                         }
                     }
                 }
+                // A JMP/Jcc (or a CALL below an older call-ret entry) leaves no
+                // pointer to its thunk. ExitFunctionLink still marked it: the
+                // thunk now starts `ldr x0, #0x10` with HostCode 0. Scan the code
+                // buffer that holds a known JIT address (the call-ret host PC);
+                // its bounds are found page by page with IsAddressInCodeBuffer.
+                // Fallback anchor: a host block from FEX's L1 lookup cache
+                // ({HostCode, GuestCode} pairs, at least MIN_L1_ENTRIES = 8192).
+                uint64_t anchor_code = 0;
+                if (call == maxps4::DispatchCall::exit_link && !record.link_known && !maxps4_jit_held()) {
+                    if (record.callret_known && guard->context->IsAddressInCodeBuffer(thread, record.callret_host))
+                        anchor_code = record.callret_host;
+                    else if (const uint64_t l1 = thread->CurrentFrame->State.L1Pointer; l1 && readable(l1, 8192 * 16))
+                        for (size_t i = 0; i < 8192 && !anchor_code; ++i) {
+                            const uint64_t host = reinterpret_cast<const uint64_t*>(l1)[2 * i];
+                            if (host && guard->context->IsAddressInCodeBuffer(thread, host)) anchor_code = host;
+                        }
+                }
+                if (anchor_code) {
+                    constexpr uint64_t step = 0x4000, limit = uint64_t(1) << 30;
+                    const uint64_t anchor = anchor_code & ~(step - 1);
+                    record.scan_anchor = anchor_code;
+                    uint64_t lo = anchor, hi = anchor + step;
+                    while (anchor - lo < limit && lo >= step && guard->context->IsAddressInCodeBuffer(thread, lo - step)) lo -= step;
+                    while (hi - anchor < limit && guard->context->IsAddressInCodeBuffer(thread, hi)) hi += step;
+                    record.scan_begin = lo;
+                    record.scan_end = hi;
+                    // Scan each run of readable pages (a code buffer may hold
+                    // reserved, unreadable pages).
+                    maxps4::NullLinkScan scan;
+                    for (uint64_t run = lo; run < hi;) {
+                        if (!readable(run, 0x1000)) { run += 0x1000; continue; }
+                        uint64_t end = run + 0x1000;
+                        while (end < hi && readable(end, 0x1000)) end += 0x1000;
+                        record.scan_pages += static_cast<uint32_t>((end - run) / 0x1000);
+                        const auto part = maxps4::scan_null_links(run, end);
+                        if (part.count && !scan.count) scan = part; else scan.count += part.count;
+                        run = end;
+                    }
+                    record.scan_known = true;
+                    record.null_links = scan.count;
+                    if (scan.count) {
+                        record.null_link_caller = scan.caller;
+                        record.null_link_call = scan.call;
+                        record.link_known = true;
+                        record.link_rip = scan.guest_rip; record.link_host = 0;
+                        read_guest(scan.guest_rip, record.link_bytes, record.link_byte_count);
+                    }
+                }
+                if (can_probe) { ::close(probe[0]); ::close(probe[1]); }
+                errno = saved_errno;
                 // The failing RIP: the linked target when the thunk proves it.
                 const uint64_t failed = call == maxps4::DispatchCall::exit_link && record.link_known && !record.link_host
                     ? record.link_rip : rip;
@@ -2139,6 +2216,7 @@ static int32_t format_calls(maxps4_fex_engine* engine, const std::array<ProbeAdd
         } else {
             const char* known = service_name(service);
             name = known ? known : "service " + std::to_string(c.service);
+            if (c.posix) name += " [POSIX: -1 + errno]";
         }
         std::snprintf(line, sizeof(line), "t%llu %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx%s%s%s\n",
             (unsigned long long)c.thread, name.c_str(), (unsigned long long)c.a0, (unsigned long long)c.a1,
