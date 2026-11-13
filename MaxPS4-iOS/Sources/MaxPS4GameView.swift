@@ -370,7 +370,8 @@ struct MaxPS4GameView: View {
             gamepad = Self.gamepadConnected()
         }
         // The game waits while its menu is open.
-        .onChange(of: showingMenu) { _, open in session.setPaused(open) }
+        // Keep the guest paused if iOS is inactive, even when the menu closes.
+        .onChange(of: showingMenu) { _, open in session.setPaused(open || scenePhase != .active) }
         .onDisappear { touch = 0; leftStick = .zero; rightStick = .zero; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
         .onChange(of: scenePhase) { _, phase in
             // An interruption, Control Center included (it reached .background on an
