@@ -14,6 +14,8 @@ struct FatalFault {
     enum Where : uint8_t { other = 0, jit = 1, dispatcher = 2 };
     int signal = 0, code = 0;
     uint64_t address = 0, pc = 0, lr = 0, fp = 0, sp = 0, x[4] {};
+    uint64_t x16 = 0, x17 = 0; // AArch64 inter-procedure scratch registers: common indirect branch targets.
+    uint64_t dispatcher_begin = 0;
     Where pc_where = other, lr_where = other;
     bool guest_thread_known = false;
     uint64_t guest_thread = 0, guest_rip = 0; // guest_rip: from LR when it is in JIT code, else FEX's last stored RIP.
@@ -45,6 +47,10 @@ public:
         w.text(" lr="); w.hex(f.lr); w.text("("); w.text(where(f.lr_where)); w.text(")");
         w.text(" fp="); w.hex(f.fp); w.text(" sp="); w.hex(f.sp);
         for (int i = 0; i < 4; ++i) { w.text(" x"); w.dec(uint64_t(i)); w.text("="); w.hex(f.x[i]); }
+        w.text(" x16="); w.hex(f.x16); w.text(" x17="); w.hex(f.x17);
+        if (f.dispatcher_begin && f.lr_where == FatalFault::dispatcher && f.lr >= f.dispatcher_begin) {
+            w.text(" lr-dispatch-offset="); w.hex(f.lr - f.dispatcher_begin);
+        }
         if (f.guest_thread_known) {
             w.text(" guest-thread="); w.dec(f.guest_thread);
             w.text(" guest-rip="); w.hex(f.guest_rip);

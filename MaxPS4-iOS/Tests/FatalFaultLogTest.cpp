@@ -19,13 +19,14 @@ static std::string slurp(const char* path) {
 int main() {
     FatalFault f;
     f.signal = 11; f.code = 1; f.address = 0; f.pc = 0; f.lr = 0x1029A0C50; f.fp = 0x16f0; f.sp = 0x16e0;
+    f.x16 = 0xdead; f.x17 = 0xbeef; f.dispatcher_begin = 0x1029a0000;
     f.x[0] = 1; f.x[1] = 0xffffffffffffffffull; f.x[2] = 0; f.x[3] = 0xabc;
-    f.pc_where = FatalFault::other; f.lr_where = FatalFault::jit;
+    f.pc_where = FatalFault::other; f.lr_where = FatalFault::dispatcher;
     f.guest_thread_known = true; f.guest_thread = 7; f.guest_rip = 0x800123456;
     char line[512];
     const size_t n = FatalFaultLog::format(f, line, sizeof line);
-    const char* want = "fatal-host-fault signal=11 code=1 addr=0x0 pc=0x0(other) lr=0x1029a0c50(jit) fp=0x16f0 sp=0x16e0"
-                       " x0=0x1 x1=0xffffffffffffffff x2=0x0 x3=0xabc guest-thread=7 guest-rip=0x800123456\n";
+    const char* want = "fatal-host-fault signal=11 code=1 addr=0x0 pc=0x0(other) lr=0x1029a0c50(dispatcher) fp=0x16f0 sp=0x16e0"
+                       " x0=0x1 x1=0xffffffffffffffff x2=0x0 x3=0xabc x16=0xdead x17=0xbeef lr-dispatch-offset=0xc50 guest-thread=7 guest-rip=0x800123456\n";
     CHECK(std::strcmp(line, want) == 0 && n == std::strlen(want));
     // A host thread without a guard.
     FatalFault host; host.signal = 10; host.pc = 0x10; host.lr = 0x20;
