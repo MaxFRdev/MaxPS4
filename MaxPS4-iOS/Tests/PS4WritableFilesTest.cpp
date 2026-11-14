@@ -282,6 +282,23 @@ int main() {
     assert(resolve_libkernel("18B2NS1y9UU", "libSceRtc", "libSceRtc", 1) == S::rtc_current_tick);
     // Loaded modules: LoadStartModule by file name, Dlsym by NID, unwind info.
     assert(ps4_nid("sceGnmSetPsShader350") == "5uFKckiJYRM" && ps4_nid("sceKernelDlsym") == "LwG8g3niqwA");
+    // #296: a module prepared from the root of /app0 (MK Legacy Kollection's
+    // libretro core) is found by its path, as sce_module ones are. NIDs of the
+    // libretro names as the core exports them (checked against the real PRX).
+    assert(ps4_nid("retro_api_version") == "vEqjBlzw7nU" && ps4_nid("retro_run") == "ujVffbwB73g");
+    kernel.set_modules({{"libc.prx", 0x10000, 0x18000, 0, 0, {}, {}},
+                        {"pancake_libretro_ps4.prx", 0x18000, 0x20000, 0, 0, {{ps4_nid("retro_api_version"), 0x18440}}, {}}});
+    assert(call(S::module_load_start, path("/app0/pancake_libretro_ps4.prx"), 0, 0, 0) == 2);
+    assert(call(S::module_load_start, path("pancake_libretro_ps4.prx"), 0, 0, 0) == 2);        // relative
+    assert(call(S::module_load_start, path("/app0/sce_module/libc.prx"), 0, 0, 0) == 1);
+    assert(call(S::module_load_start, path("/app0/libmipsaot-absent.prx"), 0, 0, 0) == kernel_error(noent));
+    assert(call(S::module_load_start, path("/app0/"), 0, 0, 0) == kernel_error(noent));          // no file name
+    assert(memory.write(0x11c40, "retro_api_version", 18) && memory.write(0x11c60, "retro_missing", 14));
+    assert(call(S::module_dlsym, 2, 0x11c40, 0x11c80) == 0);
+    { uint8_t found[8]{}; assert(memory.read(0x11c80, found, 8) && get_le(found, 8) == 0x18440); }
+    assert(call(S::module_dlsym, 2, 0x11c60, 0x11c80) == kernel_error(srch));                  // not exported
+    assert(call(S::module_dlsym, 1, 0x11c40, 0x11c80) == kernel_error(srch));                  // other module
+    assert(call(S::module_dlsym, 0, 0x11c40, 0x11c80) == kernel_error(srch));                  // null handle
     kernel.set_modules({{"libfoo.prx", 0x10000, 0x20000, 0, 0, {{ps4_nid("fooFunction"), 0x12345}}, {}}});
     assert(call(S::module_load_start, path("/app0/sce_module/LIBFOO.prx"), 0, 0, 0) == 1);
     assert(call(S::module_load_start, path("/app0/sce_module/libbar.prx"), 0, 0, 0) == kernel_error(noent));

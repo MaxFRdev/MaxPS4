@@ -314,3 +314,47 @@ Re-check them whenever FEX is updated.
 A `cand-*` path needs supporting evidence before it counts as a cause:
 `ind-rsp-slot=0x0` for a RET, and the guest code at `efl-rip` showing a RET
 or an indirect JMP that can reach it.
+
+## Step 5: root-level PRX files of /app0
+
+Static analysis of the eboot (CUSA53178) showed the cause of the jump to 0.
+The loader at eboot 0x669360 calls
+`sceKernelLoadStartModule("/app0/pancake_libretro_ps4.prx")`. MaxPS4 only
+prepared `sce_module/*.prx`, so the HLE call returned ENOENT. The game's
+wrapper then returned a NULL handle, every `retro_*` dlsym returned 0, and
+`retro_api_version()` was called through `jmp [rdi+0x18]` (eboot 0x6696c0)
+with a null pointer.
+
+`maxps4_app_modules.h` now discovers modules as follows:
+
+- regular `*.prx` files directly in `/app0` and in `/app0/sce_module` (no
+  other subfolders);
+- identified by file name; `sce_module` wins over the root of the same folder;
+- the update folder replaces the game's modules of the same name and adds its
+  own.
+
+Root-level modules are optional:
+
+- unreadable files, files the Orbis metadata parser rejects, and non-PRX files
+  are skipped;
+- a root-level file that provides the same module as one already kept is not
+  prepared. MK ships two variants of module `libmipsaot`
+  (`SLUS00330_TRILOGY.EXE` and `SLUS00824`, one per PS1 title, same exports),
+  and the linker refuses duplicate exports, so the first one by name is kept;
+- if preparation still fails with them, the game is prepared again without
+  them, as before (stderr keeps the reason).
+
+`sceKernelLoadStartModule` and `sceKernelDlsym` are unchanged:
+
+- they already match modules by file name and look exports up by NID;
+- the 25 `retro_*` NIDs match the 25 exports of `pancake_libretro_ps4.prx`.
+
+Limits:
+
+- modules are prepared and their `module_start` runs at boot, not when the
+  game calls LoadStartModule;
+- only one variant of a module can be loaded per boot: the second `libmipsaot`
+  title stays unsupported;
+- eboot imports exported by root-level modules (Party, PlayFab) now resolve to
+  those modules instead of import-probe stubs;
+- the guest image grows (CUSA53178: about 94 MB validated instead of 21 MB).
