@@ -33,3 +33,50 @@ struct MaxPS4ControllerSlots<Key: Hashable> {
     func controller(for player: Int) -> Key? { assigned.first { $0.value == player }?.key }
     func isConnected(player: Int) -> Bool { controller(for: player) != nil }
 }
+
+// Which input sources drive each player, per control mode. Pure, so the
+// routing is tested without GameController (Tests/ControllerSlotsTest.swift).
+enum MaxPS4PadMode: String, CaseIterable {
+    case solo           // every controller and the touch controls: player 1
+    case twoControllers // controller 1 (+ touch): player 1, controller 2: player 2
+    case hybrid         // controller 1: player 1, touch controls: player 2
+
+    // Stored value of the game menu's setting; unknown values are Solo.
+    init(stored: String) { self = MaxPS4PadMode(rawValue: stored) ?? .solo }
+    // How many controllers get a player of their own.
+    var controllerPlayers: Int { self == .twoControllers ? 2 : 1 }
+}
+
+struct MaxPS4InputSources<Key: Hashable>: Equatable {
+    var touch = false
+    var controllers: [Key] = []
+    var isEmpty: Bool { !touch && controllers.isEmpty }
+}
+
+struct MaxPS4InputRoute<Key: Hashable>: Equatable {
+    var player1 = MaxPS4InputSources<Key>()
+    // nil: no player 2 (its controller, if it had one, is reported disconnected).
+    var player2: MaxPS4InputSources<Key>?
+
+    // `connected`: controllers present now, in iOS order; `slots` keeps their
+    // players stable across calls (sized with mode.controllerPlayers).
+    static func route(mode: MaxPS4PadMode, connected: [Key], slots: inout MaxPS4ControllerSlots<Key>) -> Self {
+        if slots.players != mode.controllerPlayers { slots = MaxPS4ControllerSlots<Key>(players: mode.controllerPlayers) }
+        slots.update(connected: connected)
+        let first = slots.controller(for: 0).map { [$0] } ?? []
+        switch mode {
+        case .solo:
+            // Unchanged single-player behaviour: everything is player 1.
+            return Self(player1: .init(touch: true, controllers: connected), player2: nil)
+        case .twoControllers:
+            let second = slots.controller(for: 1).map { [$0] } ?? []
+            return Self(player1: .init(touch: true, controllers: first),
+                        player2: second.isEmpty ? nil : .init(touch: false, controllers: second))
+        case .hybrid:
+            // Player 2 is the touch screen, always present; player 1 only ever
+            // gets the first controller, never a touch.
+            return Self(player1: .init(touch: false, controllers: first),
+                        player2: .init(touch: true, controllers: []))
+        }
+    }
+}
