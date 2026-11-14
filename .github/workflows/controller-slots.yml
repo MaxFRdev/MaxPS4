@@ -10,7 +10,10 @@ permissions:
   contents: read
 jobs:
   slots:
-    runs-on: macos-14
+    # macos-14 is refused ("macos-14-arm64-us-default is not supported"): every
+    # run was cancelled within seconds, with no runner. macos-latest is the
+    # label the PS4 system services macOS job runs on.
+    runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
