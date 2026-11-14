@@ -2581,6 +2581,12 @@ extern "C" int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint3
     if (!engine || connected > 1) return -EINVAL;
     return engine->libkernel.pad().update(buttons, {{lx, ly, rx, ry}}, l2, r2, connected != 0);
 }
+extern "C" int32_t maxps4_fex_engine_pad_status(maxps4_fex_engine* engine, uint32_t player, maxps4_pad_player_status* status) {
+    if (!engine || !status || player >= maxps4::PS4Pad::players) return -EINVAL;
+    const auto s = engine->libkernel.pad().status(player);
+    *status = {s.logged_in ? 1u : 0u, s.connected ? 1u : 0u, s.handle, s.buttons, s.reads, s.connections};
+    return 0;
+}
 extern "C" int32_t maxps4_fex_engine_pad_update_player(maxps4_fex_engine* engine, uint32_t player, uint32_t buttons,
     uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected) {
     if (!engine || connected > 1 || player >= maxps4::PS4Pad::players) return -EINVAL;

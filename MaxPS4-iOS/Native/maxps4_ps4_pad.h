@@ -68,7 +68,7 @@ public:
         ps4::put_le(wire.data(), 80, uint64_t(now), 8);
         wire[104] = s.connections;
         if (!memory_.write(output, wire.data(), wire.size())) return error(1);
-        s.tapped = s.unread = 0;
+        s.tapped = s.unread = 0; ++s.reads;
         if (s.pressed_at) { const uint64_t delay = uint64_t(now) - s.pressed_at; s.pressed_at = 0; ++s.press_reads; s.press_total += delay; s.press_most = std::max(s.press_most, delay); }
         return state ? 0 : 1;
     }
@@ -121,6 +121,20 @@ public:
         std::lock_guard<std::mutex> lock(lock_);
         return player < players && slots_[player].connected;
     }
+    // One player's slot for the session report: who is logged in, the handle
+    // the game opened for that user, how often the game read it, and the
+    // buttons it would read now.
+    struct Status { bool logged_in = false, connected = false; int32_t handle = 0; uint32_t buttons = 0;
+                    uint64_t reads = 0; uint8_t connections = 0; };
+    Status status(size_t player) {
+        std::lock_guard<std::mutex> lock(lock_);
+        Status out;
+        if (player >= players) return out;
+        const Slot& s = slots_[player];
+        out.logged_in = s.logged_in; out.connected = s.connected; out.handle = s.handle;
+        out.buttons = s.connected ? s.buttons | s.tapped : 0; out.reads = s.reads; out.connections = s.connections;
+        return out;
+    }
     // Player 1's press-to-read delays (the latency report).
     void latency(uint64_t& reads, uint64_t& total, uint64_t& most) {
         std::lock_guard<std::mutex> lock(lock_);
@@ -141,6 +155,7 @@ private:
         uint32_t buttons = 0, unread = 0, tapped = 0;
         // When the oldest unread press came, and how long presses waited for a read.
         uint64_t pressed_at = 0, press_reads = 0, press_total = 0, press_most = 0;
+        uint64_t reads = 0; // scePadRead/ReadState calls on this slot's handle
         std::array<uint8_t, 4> axes{{128,128,128,128}};
         uint8_t l2 = 0, r2 = 0, connections = 0;
     };

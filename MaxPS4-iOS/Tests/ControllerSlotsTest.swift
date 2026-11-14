@@ -103,6 +103,70 @@ struct ControllerSlotsTest {
         }
         check(MaxPS4PadMode(stored: "unknown") == .solo && MaxPS4PadMode(stored: "hybrid") == .hybrid, "stored mode")
 
+        // Owner of the touch controls (immediate touch updates, #309).
+        var owner = MaxPS4ControllerSlots<String>(players: 1)
+        check(Route.route(mode: .solo, connected: ["A"], slots: &owner).touchPlayer == 0, "solo: touch is player 1's")
+        check(Route.route(mode: .twoControllers, connected: ["A", "B"], slots: &owner).touchPlayer == 0, "two controllers: touch is player 1's")
+        check(Route.route(mode: .hybrid, connected: ["A"], slots: &owner).touchPlayer == 1, "hybrid: touch is player 2's")
+        check(Route.route(mode: .hybrid, connected: [], slots: &owner).touchPlayer == 1, "hybrid without controller: still player 2's")
+
+        // #309 reproduction: touch events between polls, hybrid mode. Each
+        // player's last state is a set of sources ("pad" or "touch"). The old
+        // dispatch sent every touch update to player 1; the new one sends it to
+        // route.touchPlayer with that player's whole state.
+        func simulate(newDispatch: Bool, events: [String]) -> (touchOnPlayer1: Bool, padOnPlayer2: Bool, player1LostPad: Bool) {
+            var slots = MaxPS4ControllerSlots<String>(players: 1)
+            var mode = MaxPS4PadMode.hybrid
+            var connected = ["A"]
+            var touching = false
+            var state: [[String]] = [[], []]
+            var result = (touchOnPlayer1: false, padOnPlayer2: false, player1LostPad: false)
+            func sources(_ s: MaxPS4InputSources<String>) -> [String] { (s.touch && touching ? ["touch"] : []) + s.controllers.map { _ in "pad" } }
+            func send(_ player: Int, _ value: [String]) {
+                state[player] = value
+                if mode == .hybrid {
+                    if player == 0 && value.contains("touch") { result.touchOnPlayer1 = true }
+                    if player == 1 && value.contains("pad") { result.padOnPlayer2 = true }
+                    if player == 0 && !connected.isEmpty && !value.contains("pad") { result.player1LostPad = true }
+                }
+            }
+            for event in events {
+                let route = Route.route(mode: mode, connected: connected, slots: &slots)
+                switch event {
+                case "poll":
+                    send(0, sources(route.player1))
+                    if let p2 = route.player2 { send(1, sources(p2)) }
+                case "down", "up":
+                    touching = event == "down"
+                    if newDispatch {
+                        switch route.touchPlayer {
+                        case 0?: send(0, sources(route.player1))
+                        case 1?: send(1, sources(route.player2!))
+                        default: break
+                        }
+                    } else {
+                        send(0, touching ? ["touch"] : [])          // old: session.input(touchPad)
+                    }
+                case "solo": mode = .solo; touching = false
+                case "hybrid": mode = .hybrid; touching = false
+                case "unplug": connected = []
+                case "plug": connected = ["A2"]
+                default: break
+                }
+            }
+            return result
+        }
+        // Repeated and rapid taps, a long hold, a mode change during a press,
+        // a Bluetooth disconnection and reconnection during play.
+        let session = ["poll", "down", "up", "poll", "down", "poll", "up", "down", "up", "down", "poll", "poll", "poll", "up",
+                       "down", "solo", "poll", "hybrid", "poll", "down", "unplug", "poll", "up", "plug", "poll", "down", "up", "poll"]
+        let old = simulate(newDispatch: false, events: session)
+        check(old.touchOnPlayer1 && old.player1LostPad, "old dispatch reproduces #309: touch on player 1, player 1's pad blanked")
+        let fixed = simulate(newDispatch: true, events: session)
+        check(!fixed.touchOnPlayer1, "fixed dispatch: no touch ever reaches player 1 in hybrid mode")
+        check(!fixed.padOnPlayer2, "fixed dispatch: no controller input ever reaches player 2 in hybrid mode")
+        check(!fixed.player1LostPad, "fixed dispatch: player 1 keeps its controller during touches")
+
         print("PASS controller slots: none, one, two, order, extra, disconnect, reconnect, solo; routes: solo, hybrid, two controllers, mode changes, no mixing")
     }
 }
