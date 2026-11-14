@@ -93,6 +93,13 @@ int main() {
             assert(!(ps4::get_le(a,4) & 0x20a0) && !(ps4::get_le(b,4) & 0x4010));
         }
         both.join();
+        // The producer may finish after the loop's last read: its final update
+        // (i = 999: player 1 0x4010, player 2 0x2080) can still hold presses no
+        // read has seen, and PS4Pad reports such a press once (see the
+        // reproduction below). Consume them with one read per pad, so the exact
+        // states checked next do not depend on thread timing (it passed on
+        // Windows by chance and failed on the Linux runners, #310).
+        assert(multi.read(p1,output,1,true) == 0 && multi.read(p2,output+0x100,1,true) == 0);
         // Player 2 disconnects: its pad reads as disconnected, user 2 stays
         // logged in and keeps its handle; player 1 is unaffected.
         assert(multi.update_player(1,0x2000,{{9,9,9,9}},9,9,false) == 0);
@@ -112,6 +119,31 @@ int main() {
         // Reset: only user 1 remains; old handles are stale.
         multi.reset(); assert(multi.logged_in_users() == 1 && multi.initialize() == 0);
         assert(multi.read(p1,output,1,true) == PS4Pad::error(3) && multi.open(2,0,0,0) == ps4::signed32(0x809b0081U));
+    }
+    {
+        // Contract behind the #310 CI failure, deterministic: a press released
+        // before any read is reported by the next read, once, then the pad
+        // reads its current state. Same on every player's slot.
+        PS4Pad tap(memory);
+        assert(tap.initialize() == 0);
+        const int32_t t1 = int32_t(tap.open(1,0,0,0));
+        assert(tap.update_player(1,0,{{128,128,128,128}},0,0,true) == 0);
+        const int32_t t2 = int32_t(tap.open(2,0,0,0));
+        uint8_t w[120]{};
+        for (const int32_t handle : {t1, t2}) {
+            const size_t player = handle == t1 ? 0 : 1;
+            assert(tap.update_player(player,0x4000,{{128,128,128,128}},0,0,true) == 0);
+            assert(tap.read(handle,output,1,true) == 0);
+            assert(tap.update_player(player,0x4010,{{128,128,128,128}},0,0,true) == 0);   // 0x10 pressed...
+            assert(tap.update_player(player,0x4000,{{128,128,128,128}},0,0,true) == 0);   // ...released before a read
+            assert(tap.read(handle,output,1,true) == 0 && memory.read(output,w,120) && ps4::get_le(w,4) == 0x4010);
+            assert(tap.read(handle,output,1,true) == 0 && memory.read(output,w,120) && ps4::get_le(w,4) == 0x4000);
+            // A press already read and then released is not repeated.
+            assert(tap.update_player(player,0x4010,{{128,128,128,128}},0,0,true) == 0);
+            assert(tap.read(handle,output,1,true) == 0);
+            assert(tap.update_player(player,0x4000,{{128,128,128,128}},0,0,true) == 0);
+            assert(tap.read(handle,output,1,true) == 0 && memory.read(output,w,120) && ps4::get_le(w,4) == 0x4000);
+        }
     }
     {
         // Hybrid mode (controller = player 1, touch = player 2) and mode
