@@ -1,6 +1,7 @@
 #include "maxps4_guest_frame.h"
 #include "maxps4_fex_runtime.h"
 #include "maxps4_guest_stack.h"
+#include "maxps4_app_modules.h"
 #include "maxps4_orbis_v4_execution_gate.h"
 #include <algorithm>
 #include <map>
@@ -2227,71 +2228,118 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
         if (diagnostic && capacity) { const size_t n = std::min(capacity - 1, text.size()); std::memcpy(diagnostic, text.data(), n); diagnostic[n] = 0; }
     };
     struct Module { std::string name; std::vector<uint8_t> bytes; maxps4::OrbisMetadata metadata;
-                    std::vector<std::string> dependencies; std::vector<const char*> pointers; };
+                    std::vector<std::string> dependencies; std::vector<const char*> pointers;
+                    bool optional = false; };
     try {
         const std::filesystem::path root(directory), update(engine->update_directory);
-        std::vector<std::filesystem::path> files;
         std::error_code error;
-        // The update's modules replace the game's of the same name and add its own.
-        std::map<std::string, std::filesystem::path> prx;
-        for (const auto& folder : {root, update}) {
-            if (folder.empty()) continue;
-            std::error_code missing;
-            for (const auto& entry : std::filesystem::directory_iterator(folder / "sce_module", missing))
-                if (entry.path().extension() == ".prx") prx[entry.path().filename().string()] = entry.path();
-        }
-        for (const auto& [name, path] : prx) files.push_back(path);
-        files.push_back(!update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin");
-        // Providers first (the linker wants a module's dependencies before it).
-        std::vector<Module> modules(files.size());
-        for (size_t i = 0; i < files.size(); ++i) {
-            std::ifstream in(files[i], std::ios::binary);
-            if (!in) { report(files[i].filename().string() + ": unreadable"); return -ENOENT; }
-            modules[i].bytes.assign(std::istreambuf_iterator<char>(in), {});
-            modules[i].name = files[i].filename().string();
-            if (!modules[i].metadata.parse(modules[i].bytes.data(), modules[i].bytes.size())) {
-                report(modules[i].name + ": " + modules[i].metadata.error);
+        // PRX files of /app0/sce_module and of the root of /app0 (loaded by the
+        // game through sceKernelLoadStartModule, e.g. MK Legacy Kollection's
+        // /app0/pancake_libretro_ps4.prx); the update's replace the game's of
+        // the same name and add its own (maxps4_app_modules.h).
+        struct File { std::filesystem::path path; bool optional; };
+        std::vector<File> files;
+        for (const auto& found : maxps4::discover_app_modules(root, update)) files.push_back({found.path, found.root_level});
+        files.push_back({!update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin", false});
+        // A root-level file is optional: one that is unreadable, not an ELF/SELF
+        // the metadata parser accepts, or not a PRX (0xfe18) is skipped, and the
+        // game boots as before. sce_module modules and the eboot stay required.
+        std::vector<Module> modules;
+        modules.reserve(files.size());
+        std::string skipped;
+        for (const auto& file : files) {
+            Module m;
+            m.name = file.path.filename().string();
+            m.optional = file.optional;
+            std::ifstream in(file.path, std::ios::binary);
+            if (!in) {
+                if (m.optional) { skipped += " " + m.name + " (unreadable)"; continue; }
+                report(m.name + ": unreadable"); return -ENOENT;
+            }
+            m.bytes.assign(std::istreambuf_iterator<char>(in), {});
+            if (!m.metadata.parse(m.bytes.data(), m.bytes.size())) {
+                if (m.optional) { skipped += " " + m.name + " (" + m.metadata.error + ")"; continue; }
+                report(m.name + ": " + m.metadata.error);
                 return -ENOEXEC;
             }
+            if (m.optional && m.metadata.type != 0xfe18) { skipped += " " + m.name + " (not a PRX)"; continue; }
+            modules.push_back(std::move(m));
         }
+        // One variant per module name (maxps4_app_modules.h): a root-level file
+        // providing the same module as one already kept is not prepared, and
+        // sceKernelLoadStartModule keeps failing for it, as before.
+        {
+            std::vector<maxps4::ModuleIdentity> identities;
+            for (const auto& m : modules) {
+                std::string provided;
+                for (const auto& identity : m.metadata.modules) if (identity.exported) { provided = identity.name; break; }
+                identities.push_back({m.name, provided, m.optional});
+            }
+            const auto duplicates = maxps4::duplicate_providers(identities);
+            std::vector<Module> kept;
+            kept.reserve(modules.size());
+            for (size_t i = 0; i < modules.size(); ++i) {
+                if (!duplicates[i].empty()) { skipped += " " + modules[i].name + " (same module as " + duplicates[i] + ")"; continue; }
+                kept.push_back(std::move(modules[i]));
+            }
+            modules = std::move(kept);
+        }
+        if (!skipped.empty()) std::fprintf(stderr, "maxps4: /app0 modules skipped:%s\n", skipped.c_str());
+        // Providers first: the Orbis linker orders the modules by dependency.
         // 1 MiB aligned, 1 MiB apart, as ps4-orbis-analyze places them.
-        std::vector<maxps4_orbis_module> table;
-        uint64_t bias = 0x400000;
-        for (auto& m : modules) {
-            for (const auto& needed : m.metadata.needed)
-                for (const auto& other : modules)
-                    if (&other != &m && other.name == needed) m.dependencies.push_back(needed);
-            // libSceLibcInternal imports link to libc.prx (OrbisLinker), which
-            // must be loaded and initialized first, as the system module is.
-            const bool internal = std::any_of(m.metadata.libraries.begin(), m.metadata.libraries.end(),
-                [](const auto& l) { return !l.exported && l.name == "libSceLibcInternal"; });
-            if (internal && m.name != "libc.prx" &&
-                std::find(m.dependencies.begin(), m.dependencies.end(), "libc.prx") == m.dependencies.end())
-                for (const auto& other : modules)
-                    if (other.name == "libc.prx") {
-                        // Unless libc.prx needs this module, directly or not (Fios2).
-                        std::set<std::string> seen;
-                        std::vector<std::string> pending(other.metadata.needed.begin(), other.metadata.needed.end());
-                        bool cycle = false;
-                        while (!pending.empty() && !cycle) {
-                            const std::string name = pending.back(); pending.pop_back();
-                            if (!seen.insert(name).second) continue;
-                            cycle = name == m.name;
-                            for (const auto& next : modules)
-                                if (next.name == name) pending.insert(pending.end(), next.metadata.needed.begin(), next.metadata.needed.end());
+        auto prepare = [&](bool with_optional) -> int32_t {
+            std::vector<Module*> set;
+            for (auto& m : modules) if (with_optional || !m.optional) { m.dependencies.clear(); m.pointers.clear(); set.push_back(&m); }
+            std::vector<maxps4_orbis_module> table;
+            uint64_t bias = 0x400000;
+            for (auto* module : set) {
+                auto& m = *module;
+                for (const auto& needed : m.metadata.needed)
+                    for (const auto* other : set)
+                        if (other != &m && other->name == needed) m.dependencies.push_back(needed);
+                // libSceLibcInternal imports link to libc.prx (OrbisLinker), which
+                // must be loaded and initialized first, as the system module is.
+                const bool internal = std::any_of(m.metadata.libraries.begin(), m.metadata.libraries.end(),
+                    [](const auto& l) { return !l.exported && l.name == "libSceLibcInternal"; });
+                if (internal && m.name != "libc.prx" &&
+                    std::find(m.dependencies.begin(), m.dependencies.end(), "libc.prx") == m.dependencies.end())
+                    for (const auto* other : set)
+                        if (other->name == "libc.prx") {
+                            // Unless libc.prx needs this module, directly or not (Fios2).
+                            std::set<std::string> seen;
+                            std::vector<std::string> pending(other->metadata.needed.begin(), other->metadata.needed.end());
+                            bool cycle = false;
+                            while (!pending.empty() && !cycle) {
+                                const std::string name = pending.back(); pending.pop_back();
+                                if (!seen.insert(name).second) continue;
+                                cycle = name == m.name;
+                                for (const auto* next : set)
+                                    if (next->name == name) pending.insert(pending.end(), next->metadata.needed.begin(), next->metadata.needed.end());
+                            }
+                            if (!cycle) m.dependencies.push_back(other->name);
+                            break;
                         }
-                        if (!cycle) m.dependencies.push_back(other.name);
-                        break;
-                    }
-            for (const auto& d : m.dependencies) m.pointers.push_back(d.c_str());
-            table.push_back({m.name.c_str(), m.bytes.data(), m.bytes.size(), bias, m.pointers.data(), m.pointers.size()});
-            uint64_t end = 0;
-            for (const auto& s : m.metadata.segments)
-                if (s.type == 1 || s.type == 0x61000010) end = std::max(end, s.address + s.memsz);
-            bias += ((end + 0xfffff) & ~uint64_t{0xfffff}) + 0x100000;
+                for (const auto& d : m.dependencies) m.pointers.push_back(d.c_str());
+                table.push_back({m.name.c_str(), m.bytes.data(), m.bytes.size(), bias, m.pointers.data(), m.pointers.size()});
+                uint64_t end = 0;
+                for (const auto& s : m.metadata.segments)
+                    if (s.type == 1 || s.type == 0x61000010) end = std::max(end, s.address + s.memsz);
+                bias += ((end + 0xfffff) & ~uint64_t{0xfffff}) + 0x100000;
+            }
+            return maxps4_fex_engine_prepare_orbis_general(engine, table.data(), table.size(),
+                                                           "eboot.bin", relocation, diagnostic, capacity);
+        };
+        const bool any_optional = std::any_of(modules.begin(), modules.end(), [](const Module& m) { return m.optional; });
+        int32_t prepared = prepare(true);
+        // A game whose root-level modules do not link still boots as it did
+        // before they were loaded (preparation resets the engine first); the
+        // reason is kept on stderr. sceKernelLoadStartModule then fails for
+        // them, as it always did.
+        if (prepared && any_optional) {
+            std::fprintf(stderr, "maxps4: /app0 root modules not prepared (%d: %s); retrying without them\n",
+                         prepared, diagnostic && capacity ? diagnostic : "");
+            prepared = prepare(false);
         }
-        const int32_t prepared = maxps4_fex_engine_prepare_orbis_general(engine, table.data(), table.size(),
-                                                                         "eboot.bin", relocation, diagnostic, capacity);
         if (prepared) return prepared;
         const int64_t mounted = maxps4_fex_engine_mount_app0(engine, root.string().c_str());
         if (mounted) return int32_t(mounted);
