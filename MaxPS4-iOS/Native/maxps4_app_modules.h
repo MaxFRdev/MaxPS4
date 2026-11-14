@@ -57,30 +57,62 @@ inline std::vector<AppModuleFile> discover_app_modules(const std::filesystem::pa
     return out;
 }
 
-// Variants of one module cannot share a boot-time image. MK Legacy Kollection
-// ships libmipsaot-SLUS00330_TRILOGY.EXE_ps4.prx and libmipsaot-SLUS00824_ps4.prx:
-// both provide module "libmipsaot" with the same exports, and the game loads
-// only the one of the title it starts. Preparing both is refused by the linker
-// (duplicate export). Required modules (sce_module, eboot) are kept first; then
-// each optional module is kept unless a module already kept provides the same
-// module name. For each entry: empty when kept, else the file it duplicates.
+// Variants of one module. MK Legacy Kollection ships
+// libmipsaot-SLUS00330_TRILOGY.EXE_ps4.prx and libmipsaot-SLUS00824_ps4.prx:
+// both provide module "libmipsaot" with the same exports, one per PS1 title,
+// and the game loads the one it needs by path (sceKernelLoadStartModule) and
+// reaches its exports only through sceKernelDlsym, by handle.
+//
+// Decisions, for optional (root-level) modules only:
+//  * keep: no other module provides the same module name.
+//  * private_exports: two or more optional modules provide the same module and
+//    no other kept module imports a library they export. All are prepared;
+//    their exports serve sceKernelDlsym only, not NID imports
+//    (OrbisLinker::Input::privateExports), so they cannot collide. The game's
+//    own path then selects the variant.
+//  * skip: a required module (sce_module, eboot) provides the same module, or
+//    another module imports a library of the variants (a NID import could
+//    not tell them apart). Such modules are not prepared, as before #307.
+// Required modules are always kept; two required providers are left to the
+// linker, which refuses duplicate exports as before.
 struct ModuleIdentity {
     std::string file;      // file name
     std::string provided;  // name of the module it provides (empty: unknown)
     bool optional = false;
+    std::vector<std::string> exported_libraries, imported_libraries;
 };
-inline std::vector<std::string> duplicate_providers(const std::vector<ModuleIdentity>& modules) {
-    std::vector<std::string> out(modules.size());
-    std::map<std::string, std::string> kept; // provided module -> file
-    for (const bool optional : {false, true})
-        for (size_t i = 0; i < modules.size(); ++i) {
-            const auto& m = modules[i];
-            if (m.optional != optional || m.provided.empty()) continue;
-            const auto found = kept.find(m.provided);
-            if (found == kept.end()) kept.emplace(m.provided, m.file);
-            else if (optional) out[i] = found->second;
-            // Two required providers: left to the linker, as before.
+enum class ModuleChoice { keep, private_exports, skip };
+struct ModuleDecision { ModuleChoice choice = ModuleChoice::keep; std::string reason; };
+inline std::vector<ModuleDecision> choose_modules(const std::vector<ModuleIdentity>& modules) {
+    std::vector<ModuleDecision> out(modules.size());
+    std::map<std::string, std::string> required; // provided module -> file
+    std::map<std::string, std::vector<size_t>> groups; // optional, by provided module
+    for (size_t i = 0; i < modules.size(); ++i) {
+        const auto& m = modules[i];
+        if (m.provided.empty()) continue;
+        if (!m.optional) required.emplace(m.provided, m.file);
+        else groups[m.provided].push_back(i);
+    }
+    for (const auto& [provided, members] : groups) {
+        const auto owner = required.find(provided);
+        if (owner != required.end()) {
+            for (auto i : members) out[i] = {ModuleChoice::skip, "same module as " + owner->second};
+            continue;
         }
+        if (members.size() < 2) continue; // keep
+        bool imported = false;
+        std::string importer;
+        for (size_t j = 0; j < modules.size() && !imported; ++j) {
+            if (modules[j].optional && modules[j].provided == provided) continue;
+            for (const auto& library : modules[j].imported_libraries)
+                for (auto i : members)
+                    for (const auto& exported : modules[i].exported_libraries)
+                        if (library == exported) { imported = true; importer = modules[j].file; }
+        }
+        for (auto i : members)
+            out[i] = imported ? ModuleDecision{ModuleChoice::skip, "variant of " + provided + " imported by " + importer}
+                              : ModuleDecision{ModuleChoice::private_exports, {}};
+    }
     return out;
 }
 

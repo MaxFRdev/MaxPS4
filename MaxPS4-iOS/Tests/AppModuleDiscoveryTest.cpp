@@ -94,36 +94,54 @@ int main() {
         CHECK(!empty.parse(nullptr, 0));
     }
 
-    // 7. Variants of one module (MK's two libmipsaot PRX): the first optional
-    //    one by name is kept, later ones are reported as duplicates. Required
-    //    modules keep priority; distinct or unknown providers are all kept.
+    // 7. Variants of one module (MK's two libmipsaot PRX), decided by what
+    //    imports them, never by name order.
     {
         using maxps4::ModuleIdentity;
+        using maxps4::ModuleChoice;
+        // Real shape of CUSA53178: the eboot imports Party but nothing imports
+        // libmipsaot or pancake (reached through Dlsym only).
         const std::vector<ModuleIdentity> mk = {
-            {"Party.prx", "Party", true},
-            {"libc.prx", "libc", false},
-            {"libmipsaot-SLUS00330_TRILOGY.EXE_ps4.prx", "libmipsaot", true},
-            {"libmipsaot-SLUS00824_ps4.prx", "libmipsaot", true},
-            {"pancake_libretro_ps4.prx", "pancake_libretro_ps4", true},
-            {"eboot.bin", "", false},
+            {"Party.prx", "Party", true, {"Party"}, {"libkernel"}},
+            {"libc.prx", "libc", false, {"libc"}, {"libkernel"}},
+            {"libmipsaot-SLUS00330_TRILOGY.EXE_ps4.prx", "libmipsaot", true, {"libmipsaot"}, {"libkernel", "libc"}},
+            {"libmipsaot-SLUS00824_ps4.prx", "libmipsaot", true, {"libmipsaot"}, {"libkernel", "libc"}},
+            {"pancake_libretro_ps4.prx", "pancake_libretro_ps4", true, {"pancake_libretro_ps4"}, {"libkernel", "libc"}},
+            {"eboot.bin", "", false, {}, {"libkernel", "Party", "libc"}},
         };
-        const auto d = maxps4::duplicate_providers(mk);
+        auto d = maxps4::choose_modules(mk);
         CHECK(d.size() == mk.size());
-        CHECK(d[0].empty() && d[1].empty() && d[2].empty() && d[4].empty() && d[5].empty());
-        CHECK(d[3] == "libmipsaot-SLUS00330_TRILOGY.EXE_ps4.prx");
-        // A root-level file cannot displace a required module of the same name.
-        const auto r = maxps4::duplicate_providers({{"a_libc_copy.prx", "libc", true}, {"libc.prx", "libc", false}});
-        CHECK(r[0] == "libc.prx" && r[1].empty());
+        CHECK(d[0].choice == ModuleChoice::keep && d[1].choice == ModuleChoice::keep);
+        CHECK(d[2].choice == ModuleChoice::private_exports && d[3].choice == ModuleChoice::private_exports);
+        CHECK(d[4].choice == ModuleChoice::keep && d[5].choice == ModuleChoice::keep);
+        // Same decision whatever the order of the entries (no name order).
+        std::vector<ModuleIdentity> reversed(mk.rbegin(), mk.rend());
+        d = maxps4::choose_modules(reversed);
+        CHECK(d[2].choice == ModuleChoice::private_exports && d[3].choice == ModuleChoice::private_exports);
+        // If another module imports a library of the variants, a NID import
+        // could not tell them apart: none is prepared.
+        auto imported = mk; imported[5].imported_libraries.push_back("libmipsaot");
+        d = maxps4::choose_modules(imported);
+        CHECK(d[2].choice == ModuleChoice::skip && d[3].choice == ModuleChoice::skip);
+        CHECK(d[2].reason.find("eboot.bin") != std::string::npos);
+        CHECK(d[0].choice == ModuleChoice::keep && d[4].choice == ModuleChoice::keep);
+        // A variant importing its own library does not count as an importer.
+        auto self = mk; self[2].imported_libraries.push_back("libmipsaot");
+        d = maxps4::choose_modules(self);
+        CHECK(d[2].choice == ModuleChoice::private_exports && d[3].choice == ModuleChoice::private_exports);
+        // A root-level file cannot replace a required module of the same name.
+        d = maxps4::choose_modules({{"a_libc_copy.prx", "libc", true, {"libc"}, {}}, {"libc.prx", "libc", false, {"libc"}, {}}});
+        CHECK(d[0].choice == ModuleChoice::skip && d[0].reason == "same module as libc.prx" && d[1].choice == ModuleChoice::keep);
         // Two required providers: both kept (the linker decides, as before).
-        const auto q = maxps4::duplicate_providers({{"x.prx", "same", false}, {"y.prx", "same", false}});
-        CHECK(q[0].empty() && q[1].empty());
-        // Unknown providers are never treated as duplicates.
-        const auto u = maxps4::duplicate_providers({{"a.prx", "", true}, {"b.prx", "", true}});
-        CHECK(u[0].empty() && u[1].empty());
+        d = maxps4::choose_modules({{"x.prx", "same", false, {}, {}}, {"y.prx", "same", false, {}, {}}});
+        CHECK(d[0].choice == ModuleChoice::keep && d[1].choice == ModuleChoice::keep);
+        // Unknown providers and single optional modules are kept as they are.
+        d = maxps4::choose_modules({{"a.prx", "", true, {}, {}}, {"b.prx", "", true, {}, {}}, {"c.prx", "c", true, {"c"}, {}}});
+        CHECK(d[0].choice == ModuleChoice::keep && d[1].choice == ModuleChoice::keep && d[2].choice == ModuleChoice::keep);
     }
 
     std::error_code ignored;
     fs::remove_all(base, ignored);
-    std::puts("PASS app modules: sce_module only, root-level PRX, several, update precedence, missing folders, invalid file");
+    std::puts("PASS app modules: sce_module only, root-level PRX, several, update precedence, missing folders, invalid file, module variants");
     return 0;
 }
