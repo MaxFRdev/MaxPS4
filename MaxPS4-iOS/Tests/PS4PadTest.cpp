@@ -149,5 +149,60 @@ int main() {
         // Player 1 never saw any of player 2's buttons.
         assert(hybrid.read(h1,output,1,true) == 0 && memory.read(output,a,120) && ps4::get_le(a,4) == 0x4000);
     }
-    std::puts("PASS PS4 Pad lifecycle, wire layout, host input, disconnect, concurrency, stale handles and local multiplayer");
+    {
+        // #309 bug: in hybrid mode, touch controls sometimes acted on player 1.
+        // The iOS touch callbacks sent the touch state straight to player 1
+        // (pad_update) between 120 Hz polls; the next poll restored player 1's
+        // controller state. PS4Pad reports a press released before any read
+        // once (a short tap must reach the game), so player 1 still saw it.
+        uint8_t a[120]{}, b[120]{};
+        PS4Pad old(memory);
+        assert(old.initialize() == 0);
+        const int32_t o1 = int32_t(old.open(1,0,0,0));
+        assert(old.update_player(1,0,{{128,128,128,128}},0,0,true) == 0);
+        const int32_t o2 = int32_t(old.open(2,0,0,0));
+        assert(old.update(0x4000,{{128,128,128,128}},0,0,true) == 0);              // poll: controller holds cross
+        assert(old.read(o1,output,1,true) == 0);
+        assert(old.update(0x2000,{{128,128,128,128}},0,0,true) == 0);              // old touch callback -> player 1
+        assert(old.update(0x4000,{{128,128,128,128}},0,0,true) == 0);              // next poll -> controller again
+        assert(old.read(o1,output,1,true) == 0 && memory.read(output,a,120));
+        assert(ps4::get_le(a,4) & 0x2000);                                       // reproduced: touch circle on player 1
+        // The same callback also released player 1's held cross until the poll.
+        assert(old.update(0,{{128,128,128,128}},0,0,true) == 0 && old.read(o1,output,1,true) == 0 &&
+               memory.read(output,a,120) && !(ps4::get_le(a,4) & 0x4000));
+        (void)o2;
+
+        // Fixed sequence (MaxPS4GameView.touchChanged): an immediate touch
+        // update goes to the touch owner only (player 2 in hybrid mode), with
+        // that player's whole state. Repeated, rapid and held touches,
+        // controller held throughout: player 1 never sees a touch button and
+        // never loses its own.
+        PS4Pad fixed(memory);
+        assert(fixed.initialize() == 0);
+        const int32_t f1 = int32_t(fixed.open(1,0,0,0));
+        assert(fixed.update_player(1,0,{{128,128,128,128}},0,0,true) == 0);
+        const int32_t f2 = int32_t(fixed.open(2,0,0,0));
+        const uint32_t touch_bits[] = {0x2000, 0x1000, 0x8000, 0x4000, 0x80, 0x10, 0x400, 0x800, 0x8};
+        for (int round = 0; round < 200; ++round) {
+            const uint32_t t = touch_bits[round % 9] | (round % 3 == 0 ? 0x100 : 0);   // some with L2 held too
+            assert(fixed.update(0x4000 | 0x20,{{128,128,128,128}},0,0,true) == 0);        // poll: controller
+            assert(fixed.update_player(1,t,{{0,255,128,128}},0,0,true) == 0);            // touch press
+            if (round % 2) assert(fixed.update_player(1,0,{{128,128,128,128}},0,0,true) == 0); // rapid release before a read
+            assert(fixed.read(f1,output,1,true) == 0 && memory.read(output,a,120));
+            assert(fixed.read(f2,output+0x100,1,true) == 0 && memory.read(output+0x100,b,120));
+            assert(ps4::get_le(a,4) == (0x4000 | 0x20));                               // player 1: controller only
+            assert(ps4::get_le(b,4) & t);                                              // player 2: its touch (held or tapped)
+            assert(!(ps4::get_le(b,4) & 0x20) || (t & 0x20));                          // no controller bit on player 2
+        }
+        // Status for the session report: handles, reads, and logged-in users.
+        const auto s1 = fixed.status(0), s2 = fixed.status(1), s3 = fixed.status(2);
+        assert(s1.logged_in && s1.handle == f1 && s1.reads == 200 && s1.buttons == (0x4000 | 0x20));
+        assert(s2.logged_in && s2.connected && s2.handle == f2 && s2.reads == 200);
+        assert(!s3.logged_in && s3.handle == 0 && fixed.status(9).handle == 0);
+        // The user / handle association is stable across mode changes.
+        assert(fixed.update_player(1,0x2000,{{128,128,128,128}},0,0,false) == 0);      // Solo: player 2 away
+        assert(fixed.update_player(1,0,{{128,128,128,128}},0,0,true) == 0);            // hybrid again
+        assert(fixed.get_handle(1,0,0) == f1 && fixed.get_handle(2,0,0) == f2 && fixed.status(1).connections == 2);
+    }
+    std::puts("PASS PS4 Pad lifecycle, wire layout, host input, disconnect, concurrency, stale handles, local multiplayer and the #309 touch routing");
 }

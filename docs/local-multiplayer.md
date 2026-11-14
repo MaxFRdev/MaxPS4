@@ -98,3 +98,49 @@ established.
 
 Nothing here has run on an iPhone in hybrid or two-controller mode. MK
 Trilogy has not been seen to give player 2 its own fighter.
+
+## #309: touch controls sometimes acting on player 1 (fixed)
+
+**Cause.** The touch controls had an immediate path besides the 120 Hz poll.
+Every press, release and stick move called `session.input(touchPad)`, which
+always updates player 1, at six call sites in `MaxPS4GameView.swift`. In
+hybrid mode:
+
+- the touch state reached player 1 until the next poll, and the vblank timer
+  (`tick`) re-sent it meanwhile;
+- `PS4Pad` reports a press released before any read once, so player 1 still
+  saw the touch press after the poll had restored the controller state;
+- player 1's held controller buttons were blanked until that poll.
+
+**Fix.** The immediate path goes through the route. `touchChanged()` sends
+the touch owner's whole state, touch plus that player's own controllers, to
+`MaxPS4InputRoute.touchPlayer` only: player 2 in hybrid mode, player 1
+otherwise. It refreshes the route first, so the current mode applies even
+before the first poll.
+
+Opening the menu and app interruptions release player 2's buttons too
+(`releaseInputs`). Before, a touch held at that moment stayed pressed on
+player 2.
+
+**Diagnostics** in the session report, written on changes, never per poll:
+
+- `Joueurs :` the mode, each player's sources, and the number of immediate
+  touch updates sent to player 1 and player 2. In hybrid mode, the count for
+  player 1 must stay 0.
+- `Manettes PS4 :` for each logged-in user, connected or not, the scePad
+  handle the game opened for it, the number of game reads, and the current
+  buttons (`maxps4_fex_engine_pad_status`). This also shows whether MK Trilogy
+  reads user 2's pad at all.
+
+**Tests.**
+
+- `PS4PadTest`:
+  - reproduces the leak with the old sequence;
+  - checks the fixed sequence over 200 rounds of repeated, rapid and held
+    touches with the controller held;
+  - checks pad status and stable handles across mode changes.
+- `ControllerSlotsTest.swift`:
+  - `touchPlayer` for each mode;
+  - an event simulation: the old dispatch reproduces the bug, the new one
+    never puts touch on player 1 or controller input on player 2, and never
+    blanks player 1's controller.
