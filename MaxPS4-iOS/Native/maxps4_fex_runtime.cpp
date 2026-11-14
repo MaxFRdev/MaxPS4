@@ -464,15 +464,21 @@ uintptr_t wrapper(FEXCore::Core::CpuStateFrame* frame, void* record) {
     if (auto* slot = trace.claim(reinterpret_cast<uint64_t>(frame->Thread))) maxps4::ExitLinkCalls::store(*slot, c);
     return result;
 }
-// Same function for every thread; installed only over FEX's own value.
-void install(FEXCore::Core::InternalThreadState* thread) {
+// Same function for every thread; installed only over FEX's own value, and
+// only when the trace is enabled (maxps4::exit_link_trace_enabled). Returns
+// whether this thread is traced.
+bool install(FEXCore::Core::InternalThreadState* thread) {
+    if (!maxps4::exit_link_trace_enabled().load(std::memory_order_relaxed)) return false;
     open_probe();
     auto& slot = thread->CurrentFrame->Pointers.ExitFunctionLink;
     const uint64_t self = reinterpret_cast<uint64_t>(&wrapper);
-    if (!slot || slot == self) return;
+    if (!slot) return false;
+    if (slot == self) return true;
     uint64_t expected = 0;
     original.compare_exchange_strong(expected, slot, std::memory_order_acq_rel);
-    if (original.load(std::memory_order_acquire) == slot) slot = self;
+    if (original.load(std::memory_order_acquire) != slot) return false;
+    slot = self;
+    return true;
 }
 } // namespace exit_link_diag
 // Guest fault containment for one ExecuteThread on an ARM64 host. A SIGSEGV,
@@ -832,15 +838,16 @@ private:
                 }
                 // H2/H3: this thread's last ExitFunctionLink as the wrapper saw it.
                 // The slot is written only by this thread, so the copy is consistent.
-                {
+                // Only for a traced thread (opt-in): an untraced fault line has
+                // no efl-* field at all, not stale counters of earlier threads.
+                if (const auto* slot = exit_link_diag::trace.find(reinterpret_cast<uint64_t>(thread))) {
                     auto& t = exit_link_diag::trace;
                     record.efl_calls = t.calls.load(std::memory_order_relaxed);
                     record.efl_zero = t.zero_results.load(std::memory_order_relaxed);
                     record.efl_overwrites = t.overwrites.load(std::memory_order_relaxed);
                     record.efl_unreadable = t.unreadable.load(std::memory_order_relaxed);
                     maxps4::ExitLinkCall c;
-                    const auto* slot = t.find(reinterpret_cast<uint64_t>(thread));
-                    if (slot && maxps4::ExitLinkCalls::load(*slot, c)) {
+                    if (maxps4::ExitLinkCalls::load(*slot, c)) {
                         record.efl_known = true;
                         record.efl_seq = c.sequence; record.efl_rip = c.guest_rip;
                         record.efl_result = c.result; record.efl_record = c.record;
@@ -1013,8 +1020,7 @@ public:
         segment->L = 1;
         segment->D = 0;
         state.cs_cached = FEXCore::Core::CPUState::CalculateGDTBase(*segment);
-        exit_link_diag::install(thread);
-        traced = reinterpret_cast<uint64_t>(thread);
+        if (exit_link_diag::install(thread)) traced = reinterpret_cast<uint64_t>(thread);
         return 0;
     }
     ~FEXThreadSetup() { if (traced) exit_link_diag::trace.release(traced); }
@@ -2015,6 +2021,11 @@ extern "C" int32_t maxps4_fex_engine_prepare_orbis_general(maxps4_fex_engine* en
         if (!status) *relocation = engine->relocation = moved;
         return status;
     } catch (const std::bad_alloc&) { message("Orbis allocation failed"); return -ENOMEM; }
+}
+extern "C" int32_t maxps4_fex_engine_set_exit_link_trace(maxps4_fex_engine* engine, uint32_t enabled) {
+    if (!engine || enabled > 1) return -EINVAL;
+    maxps4::exit_link_trace_enabled().store(enabled != 0, std::memory_order_relaxed);
+    return 0;
 }
 extern "C" int32_t maxps4_fex_engine_set_import_probe(maxps4_fex_engine* engine, uint32_t enabled) {
     if (!engine || enabled > 2) return -EINVAL;

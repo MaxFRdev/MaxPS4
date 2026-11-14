@@ -318,6 +318,22 @@ int main() {
         CHECK(efl && ind && efl < ind && std::strstr(line, "(reconstructed)\n"));
         std::printf("max line length %zu of %zu\n", n, sizeof line);
     }
-    std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory, null-dispatch call and link target");
+    {
+        // The ExitFunctionLink trace is opt-in: off by default. An untraced
+        // fault record (efl_known false, no counters) prints no efl-* field,
+        // and keeps its ind-* fields.
+        CHECK(!maxps4::exit_link_trace_enabled().load());
+        FatalFault untraced; untraced.signal = SIGILL; untraced.contained = true;
+        untraced.dispatch_known = true; untraced.dispatch = 2;
+        untraced.indirect.known = true; untraced.indirect.x28 = untraced.indirect.frame = 0x10a000000;
+        maxps4::classify_indirect(untraced.indirect, untraced.efl_known, false);
+        char line[2048];
+        FatalFaultLog::format(untraced, line, sizeof line);
+        CHECK(std::strstr(line, " dispatch=exit-link") && !std::strstr(line, " efl-") && std::strstr(line, " ind-path="));
+        maxps4::exit_link_trace_enabled().store(true);
+        CHECK(maxps4::exit_link_trace_enabled().load());
+        maxps4::exit_link_trace_enabled().store(false);
+    }
+    std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory, null-dispatch call and link target, opt-in exit-link trace");
     return 0;
 }

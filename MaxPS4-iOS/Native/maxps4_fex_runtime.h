@@ -332,6 +332,12 @@ int32_t maxps4_fex_engine_prepare_orbis_general(maxps4_fex_engine *engine,
 // 2 keeps the stubs without that trace (thousands of lines per second).
 // It shows how far a game gets; it never makes it correct.
 int32_t maxps4_fex_engine_set_import_probe(maxps4_fex_engine *engine, uint32_t enabled);
+// Investigation only (#296): 1 routes ExitFunctionLink through a pass-through
+// wrapper that records every link (efl-* fields of contained fault lines);
+// 0, the default, leaves FEX's ExitFunctionLink untouched (no wrapper, no
+// probe syscall on the JIT link path). Process-wide, read when a FEX thread is
+// prepared: set it before the run.
+int32_t maxps4_fex_engine_set_exit_link_trace(maxps4_fex_engine *engine, uint32_t enabled);
 // The loaded game's imports that neither its modules nor the HLE provide
 // (stubbed, returning 0): one "<library> <NID> <calls>" line each, most
 // called first, as many whole lines as fit. Returns how many there are.

@@ -24,6 +24,16 @@
 
 namespace maxps4 {
 
+// Opt-in, off by default (maxps4_fex_engine_set_exit_link_trace). Off, no
+// thread gets the wrapper: FEX's own ExitFunctionLink runs, with no probe pipe
+// and no syscall on the JIT link path, and fault lines carry no efl-* fields.
+// Read when a FEX thread is prepared, so it applies to threads created after
+// the change.
+inline std::atomic<bool>& exit_link_trace_enabled() {
+    static std::atomic<bool> enabled {false};
+    return enabled;
+}
+
 enum class LinkRecordState : uint8_t {
     unknown = 0,   // not checked (e.g. unreadable after the call)
     intact = 1,    // byte-identical

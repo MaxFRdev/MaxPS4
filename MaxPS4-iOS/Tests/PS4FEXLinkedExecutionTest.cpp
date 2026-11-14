@@ -1053,6 +1053,11 @@ int main(int argc, char** argv) {
             return last;
         };
         auto hex = [](uint64_t v) { char b[32]; std::snprintf(b, sizeof b, "0x%llx", (unsigned long long)v); return std::string(b); };
+        // The ExitFunctionLink trace is opt-in (off by default): enable it for
+        // the efl-* checks of kinds 5-7.
+        CHECK(maxps4_fex_engine_set_exit_link_trace(nullptr,1)==-EINVAL);
+        CHECK(maxps4_fex_engine_set_exit_link_trace(process,2)==-EINVAL);
+        CHECK(maxps4_fex_engine_set_exit_link_trace(process,1)==0);
         for (int kind = 0; kind < 8; ++kind) {
             auto app = orbis_execution::make_general_fault_app(kind);
             const char* dependency[] = {"provider.prx"};
@@ -1119,6 +1124,31 @@ int main(int argc, char** argv) {
                 CHECK(line.find(" ind-path=dispatcher-or-unknown ") != std::string::npos ||
                       line.find(" ind-path=cand-l1-zero-or-dispatcher ") != std::string::npos);
             }
+        }
+        {
+            // Default (trace off): the same null dispatch (kind 5) runs on FEX's
+            // own ExitFunctionLink. The fault is still contained and classified,
+            // the ind-* fields are still there, and no efl-* field appears (not
+            // even counters left by the traced runs above).
+            CHECK(maxps4_fex_engine_set_exit_link_trace(process,0)==0);
+            auto app = orbis_execution::make_general_fault_app(5);
+            const char* dependency[] = {"provider.prx"};
+            const maxps4_orbis_module modules[] = {
+                {"app.elf",app.data(),app.size(),orbis_execution::app_bias,dependency,1},
+                {"provider.prx",provider.data(),provider.size(),orbis_execution::provider_bias,nullptr,0}};
+            char diagnostic[512]{};
+            uint64_t relocation=0;
+            CHECK(maxps4_fex_engine_prepare_orbis_general(process,modules,2,"app.elf",&relocation,diagnostic,sizeof(diagnostic))==0);
+            const uint64_t code = orbis_execution::entry+relocation;
+            uint64_t observed=99, logical_entry=99; uint32_t cpu=99;
+            CHECK(maxps4_fex_engine_run_orbis(process,&observed,&cpu,&logical_entry)==-EILSEQ);
+            CHECK(maxps4_fex_engine_last_guest_fault(process,&fault)==0);
+            CHECK(fault.signal==SIGILL && fault.code==0x4d50 && fault.address==code+6);
+            const std::string line = last_fault_line();
+            std::printf("fault line kind=5, trace off: %s\n", line.c_str());
+            CHECK(line.find(" dispatch=exit-link") != std::string::npos);
+            CHECK(line.find(" efl-") == std::string::npos);
+            CHECK(line.find(" ind-x0=0x0 ") != std::string::npos && line.find(" ind-frame=match ") != std::string::npos);
         }
         if (saved_home_env) ::setenv("HOME", saved_home.c_str(), 1); else ::unsetenv("HOME");
         std::filesystem::remove_all(efl_home);
