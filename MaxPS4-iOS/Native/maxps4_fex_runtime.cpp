@@ -854,6 +854,51 @@ private:
                         }
                     }
                 }
+                // Which branch reached pc=0: the dispatcher's `br x0`, or a JIT
+                // inline RET / L1 lookup that matched a {0,0} entry
+                // (maxps4_indirect_zero_trace.h). Register roles: FEX f2b679f.
+                // Reads only: context registers; this thread's call-ret stack
+                // and L1 slot 0 (bounds-checked, then probed); the guest stack
+                // through the permission-checked guest view. Anything not read
+                // safely stays "na".
+                {
+                    auto& t = record.indirect;
+#if defined(__APPLE__)
+                    const auto& ss = machine->uc_mcontext->__ss;
+                    t.x0 = ss.__x[0]; t.x1 = ss.__x[1]; t.x8 = ss.__x[8]; t.x25 = ss.__x[25]; t.x28 = ss.__x[28];
+#else
+                    const auto& regs = machine->uc_mcontext.regs;
+                    t.x0 = regs[0]; t.x1 = regs[1]; t.x8 = regs[8]; t.x25 = regs[25]; t.x28 = regs[28];
+#endif
+                    t.known = true;
+                    t.frame = reinterpret_cast<uint64_t>(thread->CurrentFrame);
+                    t.state_callret_sp = callret;
+                    // The entry a RET just popped: x25 - 0x10, inside the stack.
+                    if (t.state_ok() && base && t.x25 >= base + 16 && t.x25 - base <= size && !(t.x25 & 7) &&
+                        readable(t.x25 - 16, 16)) {
+                        uint64_t e[2];
+                        std::memcpy(e, reinterpret_cast<const void*>(t.x25 - 16), sizeof e);
+                        t.popped_known = true; t.popped_guest = e[0]; t.popped_host = e[1];
+                    }
+                    // L1 slot 0, the only slot guest RIP 0 maps to.
+                    if (t.state_ok()) {
+                        const uint64_t l1 = thread->CurrentFrame->State.L1Pointer;
+                        if (l1 && !(l1 & 7) && readable(l1, 16)) {
+                            uint64_t e[2];
+                            std::memcpy(e, reinterpret_cast<const void*>(l1), sizeof e);
+                            t.l1_known = true; t.l1_host = e[0]; t.l1_guest = e[1];
+                        }
+                    }
+                    // Guest return slot a RET popped (RSP already advanced): the
+                    // guest view must permit it AND the host page must be readable
+                    // (read_guest's direct access, plus the probe).
+                    if (t.state_ok() && t.x8 >= 8 && !(t.x8 & 7) && guard->memory_access &&
+                        guard->memory_access(t.x8 - 8, 8, 4) && readable(t.x8 - 8, 8)) {
+                        std::memcpy(&t.rsp_slot, reinterpret_cast<const void*>(t.x8 - 8), 8);
+                        t.rsp_slot_known = true;
+                    }
+                    maxps4::classify_indirect(t, record.efl_known, record.efl_result != 0);
+                }
                 if (can_probe) { ::close(probe[0]); ::close(probe[1]); }
                 errno = saved_errno;
                 // The failing RIP: the linked target when the thunk proves it.

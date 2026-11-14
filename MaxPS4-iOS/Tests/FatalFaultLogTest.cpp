@@ -210,6 +210,114 @@ int main() {
                                     " efl-after=overwritten efl-now=intact efl-ow=2..3"
                                     " efl-calls=912 efl-zero=1 efl-overwrites=3 efl-unreadable=0\n") != nullptr);
     }
+    {
+        // #296 step 2: which branch reached pc=0. Classification and format
+        // only; these tests do not exercise the runtime capture.
+        using maxps4::IndirectBranchTrace;
+        using maxps4::IndirectPath;
+        auto base = [] {
+            IndirectBranchTrace t; t.known = true; t.x28 = t.frame = 0x10a000000;
+            t.state_callret_sp = 0x10b000ff0; t.x25 = t.state_callret_sp;
+            return t;
+        };
+        IndirectBranchTrace t;
+        maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::unavailable && !t.target_known);
+
+        t = base(); t.x28 = 0x1234; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::state_mismatch);
+
+        t = base(); t.x0 = 5; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::other_branch);
+
+        // RET popped {0,0} and branched to x1 = 0.
+        t = base(); t.x25 += 0x10; t.popped_known = true; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::ret_callret_zero && t.target_known && t.target == 0);
+
+        // RET missed the call-ret entry, then L1 slot 0 {0,0} matched.
+        t = base(); t.x25 += 0x10; t.popped_known = true; t.popped_guest = 0x7000c67e17; t.popped_host = 0x113bc7950;
+        t.l1_known = true; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::ret_miss_l1_zero && t.target_known);
+
+        // Same pop, but L1 slot 0 holds a real block: unexplained, no target.
+        t.l1_host = 0x113000000; t.l1_guest = 0x7000000000; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::ret_unexplained && !t.target_known);
+
+        // One pop but the entry was not readable.
+        t = base(); t.x25 += 0x10; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::ret_unexplained);
+
+        // No pop, L1 slot 0 {0,0}: the dispatcher is excluded only by a non-null efl-ret.
+        t = base(); t.l1_known = true; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::l1_zero && t.target_known);
+        maxps4::classify_indirect(t, true, false);
+        CHECK(t.path == IndirectPath::l1_zero_or_dispatcher);
+        maxps4::classify_indirect(t, false, false);
+        CHECK(t.path == IndirectPath::l1_zero_or_dispatcher);
+
+        // L1 slot 0 unreadable, or x1 != 0: nothing reconstructed.
+        t = base(); maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::dispatcher_or_unknown && !t.target_known);
+        t = base(); t.l1_known = true; t.x1 = 1; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::dispatcher_or_unknown);
+
+        // Two pops or a push: not one of the modelled paths.
+        t = base(); t.x25 += 0x20; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::callret_delta_other);
+        t = base(); t.x25 -= 0x10; maxps4::classify_indirect(t, true, true);
+        CHECK(t.path == IndirectPath::callret_delta_other && t.callret_delta() == -0x10);
+
+        // Format: every memory field unreadable -> "na", target unknown.
+        FatalFault c; c.signal = SIGILL; c.contained = true;
+        c.indirect = base(); c.indirect.x25 -= 0x10; c.indirect.x8 = 0x7ffff000;
+        maxps4::classify_indirect(c.indirect, false, false);
+        char line[2048];
+        FatalFaultLog::format(c, line, sizeof line);
+        CHECK(std::strstr(line, " ind-path=callret-delta-other ind-x0=0x0 ind-x1=0x0 ind-x8=0x7ffff000"
+                                " ind-x25=0x10b000fe0 ind-x28=0x10a000000 ind-frame=match"
+                                " ind-callret-sp=0x10b000ff0 ind-callret-delta=-0x10"
+                                " ind-popped=na ind-l1-0=na ind-rsp-slot=na ind-target=unknown\n") != nullptr);
+        // Observed memory and a reconstructed target.
+        c.indirect = base(); c.indirect.x25 += 0x10; c.indirect.popped_known = true;
+        c.indirect.l1_known = true; c.indirect.l1_host = 0x113000000; c.indirect.l1_guest = 0x7000000000;
+        c.indirect.rsp_slot_known = true;
+        maxps4::classify_indirect(c.indirect, true, true);
+        FatalFaultLog::format(c, line, sizeof line);
+        CHECK(std::strstr(line, " ind-path=cand-ret-callret-zero ") != nullptr);
+        CHECK(std::strstr(line, " ind-callret-delta=+0x10 ind-popped=0x0:0x0 ind-l1-0=0x113000000:0x7000000000"
+                                " ind-rsp-slot=0x0 ind-target=0x0(reconstructed)\n") != nullptr);
+        c.indirect.x28 = 1;
+        FatalFaultLog::format(c, line, sizeof line);
+        CHECK(std::strstr(line, " ind-frame=mismatch") != nullptr);
+        // Not captured: no ind-* field at all.
+        c.indirect = IndirectBranchTrace{};
+        FatalFaultLog::format(c, line, sizeof line);
+        CHECK(std::strstr(line, " ind-") == nullptr);
+
+        // Every field set at maximum width: the efl-* fields stay present, the
+        // ind-* fields follow them, and the line is not truncated.
+        FatalFault m; m.signal = SIGILL; m.contained = true; m.code = -1;
+        m.address = m.pc = m.lr = m.fp = m.sp = ~0ull; for (auto& x : m.x) x = ~0ull;
+        m.guest_thread_known = true; m.guest_thread = ~0ull; m.guest_rip = ~0ull; m.byte_count = 16;
+        m.dispatch_known = true; m.lr_insn = ~0u; m.dispatch = 2;
+        m.callret_known = true; m.callret_rip = m.callret_host = ~0ull; m.callret_previous_instruction = ~0u;
+        m.link_known = true; m.link_rip = m.link_host = ~0ull; m.link_byte_count = 16;
+        m.scan_known = true; m.null_links = ~0u; m.scan_anchor = m.scan_begin = m.scan_end = ~0ull; m.scan_pages = ~0u;
+        m.null_link_caller = ~0ull;
+        m.efl_known = true; m.efl_seq = m.efl_rip = m.efl_result = m.efl_record = ~0ull;
+        m.efl_overwrites_before = m.efl_overwrites_after = ~0ull;
+        m.efl_calls = m.efl_zero = m.efl_overwrites = m.efl_unreadable = ~0ull;
+        auto& w = m.indirect; w.known = true; w.x0 = w.x1 = w.x8 = w.x25 = ~0ull; w.x28 = w.frame = ~0ull;
+        w.state_callret_sp = 0; w.popped_known = w.l1_known = w.rsp_slot_known = true;
+        w.popped_guest = w.popped_host = w.l1_host = w.l1_guest = w.rsp_slot = ~0ull;
+        w.path = IndirectPath::l1_zero_or_dispatcher; w.target_known = true; w.target = ~0ull;
+        const size_t n = FatalFaultLog::format(m, line, sizeof line);
+        CHECK(n + 1 < sizeof line && line[n - 1] == '\n');
+        const char* efl = std::strstr(line, " efl-unreadable=");
+        const char* ind = std::strstr(line, " ind-path=cand-l1-zero-or-dispatcher");
+        CHECK(efl && ind && efl < ind && std::strstr(line, "(reconstructed)\n"));
+        std::printf("max line length %zu of %zu\n", n, sizeof line);
+    }
     std::puts("PASS fatal fault log: exact format, bounded truncation, append-only, disabled without a directory, null-dispatch call and link target");
     return 0;
 }

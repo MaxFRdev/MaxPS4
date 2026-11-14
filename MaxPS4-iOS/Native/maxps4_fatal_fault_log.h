@@ -8,6 +8,7 @@
 #include <cstdint>
 #include "maxps4_dispatch_fault.h"
 #include "maxps4_exit_link_trace.h"
+#include "maxps4_indirect_zero_trace.h"
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -56,6 +57,9 @@ struct FatalFault {
     uint64_t efl_calls = 0, efl_zero = 0, efl_overwrites = 0, efl_unreadable = 0;
     uint64_t null_link_caller = 0;
     bool null_link_call = false;
+    // Which branch reached pc=0 (maxps4_indirect_zero_trace.h): registers,
+    // call-ret pop, L1 slot 0, guest stack slot, and a candidate path.
+    IndirectBranchTrace indirect;
 };
 
 class FatalFaultLog {
@@ -122,13 +126,36 @@ public:
             w.text(" efl-overwrites="); w.dec(f.efl_overwrites);
             w.text(" efl-unreadable="); w.dec(f.efl_unreadable);
         }
+        if (f.indirect.known) {
+            // Observed: ind-x*, ind-frame, ind-callret-*, ind-popped, ind-l1-0,
+            // ind-rsp-slot ("na": not read safely). Reconstructed: ind-target.
+            // Hypothesis: ind-path (cand-*), never a confirmation.
+            const auto& t = f.indirect;
+            w.text(" ind-path="); w.text(indirect_path_name(t.path));
+            w.text(" ind-x0="); w.hex(t.x0);
+            w.text(" ind-x1="); w.hex(t.x1);
+            w.text(" ind-x8="); w.hex(t.x8);
+            w.text(" ind-x25="); w.hex(t.x25);
+            w.text(" ind-x28="); w.hex(t.x28);
+            w.text(t.state_ok() ? " ind-frame=match" : " ind-frame=mismatch");
+            w.text(" ind-callret-sp="); w.hex(t.state_callret_sp);
+            w.text(" ind-callret-delta="); w.shex(t.callret_delta());
+            w.text(" ind-popped=");
+            if (t.popped_known) { w.hex(t.popped_guest); w.text(":"); w.hex(t.popped_host); } else w.text("na");
+            w.text(" ind-l1-0=");
+            if (t.l1_known) { w.hex(t.l1_host); w.text(":"); w.hex(t.l1_guest); } else w.text("na");
+            w.text(" ind-rsp-slot=");
+            if (t.rsp_slot_known) w.hex(t.rsp_slot); else w.text("na");
+            w.text(" ind-target=");
+            if (t.target_known) { w.hex(t.target); w.text("(reconstructed)"); } else w.text("unknown");
+        }
         w.text("\n");
         return w.finish();
     }
     // From the signal handler.
     static void append(const FatalFault& f) {
         if (!enabled_) return;
-        char line[1536];
+        char line[2048];
         const size_t n = format(f, line, sizeof line);
         const int fd = ::open(path_, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd < 0) return;
@@ -155,6 +182,7 @@ private:
         void bytes(const uint8_t* b, size_t count, size_t limit) {
             for (size_t i = 0; i < count && i < limit; ++i) { put("0123456789abcdef"[b[i] >> 4]); put("0123456789abcdef"[b[i] & 15]); }
         }
+        void shex(int64_t v) { if (v < 0) { put('-'); hex(uint64_t(0) - uint64_t(v)); } else { put('+'); hex(uint64_t(v)); } }
         void dec(uint64_t v) {
             char digits[20]; int k = 0;
             do { digits[k++] = char('0' + v % 10); v /= 10; } while (v);

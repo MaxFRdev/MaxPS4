@@ -268,3 +268,49 @@ Reading:
 
 Cost: two system calls per ExitFunctionLink call (first link of each
 branch only).
+
+## Step 2: which branch reached pc=0 (`ind-*` fields)
+
+The device line after PR #305 showed `efl-zero=0` and `efl-ret=0x113bca384`:
+the last ExitFunctionLink of the faulting thread returned a non-null host
+address, so the dispatcher's `br x0` that followed it did not branch to 0.
+The `dispatch=exit-link` label only proves that no BL/BLR ran since that call
+returned. JIT inline indirect branches keep LR too and have no null check
+(FEX f2b679f, `BranchOps.cpp:186-231`):
+
+```
+RET: ldp x0, x1, [x25], #0x10 ; sub x0, x0, rip ; cbz x0, hit
+L1:  ldp x1, x0, [L1 + (rip & mask) * 16] ; sub x0, x0, rip ; cbz x0, hit
+hit: ret x1 / br x1
+```
+
+A match leaves `x0 = 0` and branches to `x1`. An entry `{guest 0, host 0}`
+(call-ret: a CALL without a return block pushes `stp xzr, xzr`; L1: a slot
+never filled) matches only guest RIP 0, which maps to L1 slot 0.
+
+Register roles in FEX f2b679f (non-arm64ec): `x28` STATE, `x25`
+REG_CALLRET_SP, `x0`/`x1` TMP1/TMP2, `x8` guest RSP (`x64::SRA[REG_RSP]`).
+Re-check them whenever FEX is updated.
+
+| Field | Kind | Meaning |
+|---|---|---|
+| `ind-x0`, `ind-x1`, `ind-x8`, `ind-x25`, `ind-x28` | observed | signal-context registers |
+| `ind-frame` | observed | `match` when x28 is this thread's CpuStateFrame |
+| `ind-callret-sp` | observed | `State.callret_sp`, spilled at the last dispatcher call |
+| `ind-callret-delta` | observed | `x25 - State.callret_sp`: `+0x0` no pop, `+0x10` one RET pop |
+| `ind-popped` | observed or `na` | `guest:host` at `x25 - 0x10` (bounds-checked, probed) |
+| `ind-l1-0` | observed or `na` | L1 slot 0 `host:guest` (probed) |
+| `ind-rsp-slot` | observed or `na` | guest qword at `x8 - 8` (guest view check + probe) |
+| `ind-target` | reconstructed | guest RIP implied by the matched entry, or `unknown` |
+| `ind-path` | hypothesis | see below; never a confirmation |
+
+`ind-path` values: `cand-ret-callret-zero` (one pop of `{0,0}`, x1 = 0),
+`cand-ret-l1-zero` (one pop that missed, then L1 slot 0 `{0,0}`),
+`cand-l1-zero` (no pop, L1 slot 0 `{0,0}`, dispatcher excluded by a non-null
+`efl-ret`), `cand-l1-zero-or-dispatcher` (same, dispatcher not excluded),
+`dispatcher-or-unknown`, `ret-unexplained`, `callret-delta-other`,
+`other-branch` (x0 != 0), `state-mismatch` (x28 is not the frame).
+
+A `cand-*` path needs supporting evidence before it counts as a cause:
+`ind-rsp-slot=0x0` for a RET, and the guest code at `efl-rip` showing a RET
+or an indirect JMP that can reach it.
