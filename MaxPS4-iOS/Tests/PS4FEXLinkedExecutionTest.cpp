@@ -1106,6 +1106,18 @@ int main(int argc, char** argv) {
                 CHECK(line.find(" efl-after=linked") != std::string::npos || line.find(" efl-after=intact") != std::string::npos);
                 CHECK(line.find(" efl-now=overwritten") == std::string::npos);
                 CHECK(line.find(" efl-overwrites=0 ") != std::string::npos);
+                // #296 step 2: this is the dispatcher's own `br x0` (ExitFunctionLink
+                // returned 0). The capture must see this thread's frame in x28,
+                // x25 refilled from State.callret_sp (no pop), x0 = 0, readable
+                // L1 slot 0 and guest stack (x8 = guest RSP), and must never
+                // name a JIT inline path, since efl-ret=0 keeps the dispatcher in.
+                CHECK(line.find(" ind-x0=0x0 ") != std::string::npos);
+                CHECK(line.find(" ind-frame=match ") != std::string::npos);
+                CHECK(line.find(" ind-callret-delta=+0x0 ") != std::string::npos);
+                CHECK(line.find(" ind-l1-0=na") == std::string::npos);
+                CHECK(line.find(" ind-rsp-slot=na") == std::string::npos);
+                CHECK(line.find(" ind-path=dispatcher-or-unknown ") != std::string::npos ||
+                      line.find(" ind-path=cand-l1-zero-or-dispatcher ") != std::string::npos);
             }
         }
         if (saved_home_env) ::setenv("HOME", saved_home.c_str(), 1); else ::unsetenv("HOME");
