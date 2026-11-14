@@ -92,6 +92,9 @@ jobs:
   services:
     timeout-minutes: 20
     strategy:
+      # Each OS reports its own result: a macOS failure cancelled the Linux job
+      # of #311 before it finished, leaving Linux unverified.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
