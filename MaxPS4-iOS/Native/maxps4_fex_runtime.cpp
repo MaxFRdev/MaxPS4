@@ -2581,6 +2581,11 @@ extern "C" int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint3
     if (!engine || connected > 1) return -EINVAL;
     return engine->libkernel.pad().update(buttons, {{lx, ly, rx, ry}}, l2, r2, connected != 0);
 }
+extern "C" int32_t maxps4_fex_engine_pad_update_player(maxps4_fex_engine* engine, uint32_t player, uint32_t buttons,
+    uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected) {
+    if (!engine || connected > 1 || player >= maxps4::PS4Pad::players) return -EINVAL;
+    return engine->libkernel.pad().update_player(player, buttons, {{lx, ly, rx, ry}}, l2, r2, connected != 0);
+}
 extern "C" int32_t maxps4_fex_engine_audio_read(maxps4_fex_engine* engine, float* samples, uint32_t frames) {
     if (!engine || !samples || frames > 16384) return -EINVAL;
     return int32_t(engine->libkernel.audio().read(samples, frames));

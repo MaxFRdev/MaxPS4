@@ -189,6 +189,12 @@ struct MaxPS4GameView: View {
     @AppStorage("maxps4.touch.opacity") private var touchOpacity = 0.85
     @AppStorage("maxps4.pad.stickDpad") private var stickAsDpad = true
     @AppStorage("maxps4.touch.rightStick") private var rightStickShown = true
+    // Local multiplayer (off by default: every controller then drives player
+    // 1, as before). On: the first controller and the touch controls are
+    // player 1, the second controller player 2 (PS4 user 2).
+    @AppStorage("maxps4.pad.localMultiplayer") private var localMultiplayer = false
+    @State private var controllers = MaxPS4ControllerRouter()
+    @State private var playerNames: [String?] = [nil, nil]
     @State private var hasLaunched = false
     @State private var gamepad = MaxPS4GameView.gamepadConnected()
     @AppStorage("maxps4.metal.nativeTextures") private var nativeTextures = true
@@ -216,6 +222,7 @@ struct MaxPS4GameView: View {
         _touchOpacity = AppStorage(wrappedValue: value("maxps4.touch.opacity", 0.85), own("maxps4.touch.opacity"))
         _stickAsDpad = AppStorage(wrappedValue: value("maxps4.pad.stickDpad", true), own("maxps4.pad.stickDpad"))
         _rightStickShown = AppStorage(wrappedValue: value("maxps4.touch.rightStick", true), own("maxps4.touch.rightStick"))
+        _localMultiplayer = AppStorage(wrappedValue: value("maxps4.pad.localMultiplayer", false), own("maxps4.pad.localMultiplayer"))
         _nativeTextures = AppStorage(wrappedValue: value("maxps4.metal.nativeTextures", true), own("maxps4.metal.nativeTextures"))
         _tso = AppStorage(wrappedValue: value("maxps4.fex.tso", true), own("maxps4.fex.tso"))
         _scaling = AppStorage(wrappedValue: value("maxps4.display.scaling", "fit"), own("maxps4.display.scaling"))
@@ -317,6 +324,15 @@ struct MaxPS4GameView: View {
                                 Text("Commandes").font(.headline)
                                 Toggle("Stick gauche comme croix directionnelle", isOn: $stickAsDpad)
                                 Toggle("Stick droit tactile", isOn: $rightStickShown)
+                                Toggle("Multijoueur local (2 manettes)", isOn: $localMultiplayer)
+                                if localMultiplayer {
+                                    Text("Joueur 1 : " + (playerNames[0].map { $0 + " + commandes tactiles" } ?? "commandes tactiles"))
+                                        .foregroundStyle(.secondary)
+                                    Text("Joueur 2 : " + (playerNames[1] ?? "aucune manette"))
+                                        .foregroundStyle(playerNames[1] == nil ? .orange : .secondary)
+                                    Text("La première manette connectée est le joueur 1, la deuxième le joueur 2.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                                 Text("Taille des commandes tactiles")
                                 Slider(value: $touchScale, in: 0.7...1.5)
                                 Text("Opacité des commandes tactiles")
@@ -361,13 +377,28 @@ struct MaxPS4GameView: View {
 #if MAXPS4_FEX_APP
         .onReceive(poll) { _ in
             guard session.running, scenePhase == .active, !showingMenu else { return }
-            session.input(Self.padState(touchPad, touchLeft: leftStick, touchRight: rightStick, stickAsDpad: stickAsDpad))
+            guard localMultiplayer else {
+                session.input(Self.padState(touchPad, touchLeft: leftStick, touchRight: rightStick, stickAsDpad: stickAsDpad))
+                session.inputPlayer2(nil)
+                return
+            }
+            controllers.refresh()
+            session.input(Self.padState(touchPad, touchLeft: leftStick, touchRight: rightStick, stickAsDpad: stickAsDpad,
+                                        controllers: controllers.controllers(for: 0)))
+            let second = controllers.controllers(for: 1)
+            session.inputPlayer2(second.isEmpty ? nil : Self.padState(MaxPS4PadState(), touchLeft: .zero, touchRight: .zero,
+                                                                     stickAsDpad: stickAsDpad, controllers: second))
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidConnect)) { _ in
             gamepad = Self.gamepadConnected(); if gamepad { touch = 0; leftStick = .zero; rightStick = .zero }
+            controllers.refresh(); playerNames = controllers.names(multiplayer: localMultiplayer)
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in
             gamepad = Self.gamepadConnected()
+            controllers.refresh(); playerNames = controllers.names(multiplayer: localMultiplayer)
+        }
+        .onChange(of: localMultiplayer) { _, _ in
+            controllers.refresh(); playerNames = controllers.names(multiplayer: localMultiplayer)
         }
         // The game waits while its menu is open.
         // Keep the guest paused if iOS is inactive, even when the menu closes.
@@ -455,7 +486,7 @@ struct MaxPS4GameView: View {
     // `stickAsDpad` also presses the D-pad with the left stick (2D games that
     // read only the D-pad); the stick's analog position is always sent.
     private static func padState(_ touchPad: MaxPS4PadState, touchLeft: CGPoint, touchRight: CGPoint,
-                                 stickAsDpad: Bool) -> MaxPS4PadState {
+                                 stickAsDpad: Bool, controllers: [GCController] = GCController.controllers()) -> MaxPS4PadState {
         typealias P = MaxPS4PadState
         var state = touchPad
         // Deflection to beat (dead zone first); the touch sticks compete too.
@@ -463,7 +494,7 @@ struct MaxPS4GameView: View {
         var right = max(0.1, Float(abs(touchRight.x) + abs(touchRight.y)))
         func axis(_ value: Float) -> UInt8 { UInt8(max(0, min(255, ((value + 1) * 127.5).rounded()))) }
         func analog(_ value: Float) -> UInt8 { UInt8(max(0, min(255, (value * 255).rounded()))) }
-        for controller in GCController.controllers() {
+        for controller in controllers {
             var b: UInt32 = 0
             if let pad = controller.extendedGamepad {
                 let lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value
@@ -761,6 +792,39 @@ private struct StickTouchLayer: UIViewRepresentable {
     }
     func updateUIView(_ surface: Surface, context: Context) {
         surface.moved = moved; surface.clicked = clicked; surface.arrived = arrived
+    }
+}
+#endif
+
+#if MAXPS4_FEX_APP
+// Local multiplayer: which GCController drives which player. A reference type
+// held in @State, so the 120 Hz input poll updates it without redrawing the
+// view; `names` feeds the menu only when controllers change.
+final class MaxPS4ControllerRouter {
+    private var slots = MaxPS4ControllerSlots<ObjectIdentifier>(players: 2)
+    private var byKey: [ObjectIdentifier: GCController] = [:]
+    func refresh() {
+        let present = GCController.controllers().filter { $0.extendedGamepad != nil || $0.microGamepad != nil }
+        byKey = Dictionary(uniqueKeysWithValues: present.map { (ObjectIdentifier($0), $0) })
+        slots.update(connected: present.map(ObjectIdentifier.init))
+        // The controller's own player light, when it has one.
+        for controller in present {
+            let index: GCControllerPlayerIndex
+            switch slots.player(of: ObjectIdentifier(controller)) {
+            case 0?: index = .index1
+            case 1?: index = .index2
+            default: index = .indexUnset
+            }
+            if controller.playerIndex != index { controller.playerIndex = index }
+        }
+    }
+    func controllers(for player: Int) -> [GCController] {
+        guard let key = slots.controller(for: player), let controller = byKey[key] else { return [] }
+        return [controller]
+    }
+    func names(multiplayer: Bool) -> [String?] {
+        guard multiplayer else { return [nil, nil] }
+        return (0..<2).map { player in controllers(for: player).first.map { $0.vendorName ?? "Manette" } }
     }
 }
 #endif

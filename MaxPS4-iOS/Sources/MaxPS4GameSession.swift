@@ -81,6 +81,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var missingSince: Date?
     private var lockWait: TimeInterval = 0 // Last snapshot's wait for `lock`.
     private var pad = MaxPS4PadState()
+    // Local multiplayer: player 2's controller (nil: none). Under inputLock.
+    private var pad2: MaxPS4PadState?, pad2Reported = false
     private var lastBeat = "" // The last heartbeat() text, under lock.
     // Where the run or its stop is, for the next session's loading screen.
     private let stageLock = NSLock()
@@ -353,9 +355,19 @@ final class MaxPS4GameSource: @unchecked Sendable {
         self.pad = pad
         if let inputEngine { pad.send(to: inputEngine) }
     }
+    // Player 2 (PS4 user 2) from its own controller. The first state logs
+    // user 2 in; nil afterwards reports its controller disconnected (user 2
+    // stays logged in, as on a PS4). Never mixed into player 1's input.
+    func inputPlayer2(_ state: MaxPS4PadState?) {
+        inputLock.lock(); defer { inputLock.unlock() }
+        if state == nil && !pad2Reported { return }
+        pad2 = state; pad2Reported = true
+        if let inputEngine { MaxPS4PadState.send(state, player: 1, to: inputEngine) }
+    }
     private func sendInputLocked(_ engine: OpaquePointer) {
-        inputLock.lock(); let latest = pad; inputLock.unlock()
+        inputLock.lock(); let latest = pad, second = pad2, reported = pad2Reported; inputLock.unlock()
         latest.send(to: engine)
+        if reported { MaxPS4PadState.send(second, player: 1, to: engine) }
     }
     private func snapshotTarget() throws -> (maxps4_videoout_frame, UInt64, MaxPS4GameMetalBridge)? {
         let asked = ProcessInfo.processInfo.systemUptime
@@ -652,6 +664,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         }
     }
     func input(_ pad: MaxPS4PadState) { worker?.input(pad) }
+    func inputPlayer2(_ state: MaxPS4PadState?) { worker?.inputPlayer2(state) }
     func touchArrived(_ seconds: TimeInterval) { worker?.touchArrived(seconds) }
     func presented(_ text: String) { if running { hasPresented = true; report = text } }
     func failed(_ text: String) { stop(); stopping = nil; report = text }
@@ -702,6 +715,11 @@ struct MaxPS4PadState: Equatable {
 #if MAXPS4_FEX_APP
     func send(to engine: OpaquePointer) {
         _ = maxps4_fex_engine_pad_update(engine, buttons, lx, ly, rx, ry, l2, r2, 1)
+    }
+    // Player 1...3 (PS4 users 2...4); nil reports that player's controller gone.
+    static func send(_ state: MaxPS4PadState?, player: UInt32, to engine: OpaquePointer) {
+        let s = state ?? MaxPS4PadState()
+        _ = maxps4_fex_engine_pad_update_player(engine, player, s.buttons, s.lx, s.ly, s.rx, s.ry, s.l2, s.r2, state == nil ? 0 : 1)
     }
 #endif
 }
