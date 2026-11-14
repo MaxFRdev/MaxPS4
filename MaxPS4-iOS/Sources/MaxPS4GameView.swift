@@ -189,6 +189,14 @@ struct MaxPS4GameView: View {
     @AppStorage("maxps4.touch.opacity") private var touchOpacity = 0.85
     @AppStorage("maxps4.pad.stickDpad") private var stickAsDpad = true
     @AppStorage("maxps4.touch.rightStick") private var rightStickShown = true
+    // Control mode (MaxPS4PadMode), Solo by default: every controller and the
+    // touch controls drive player 1, as before. "twoControllers": controller 1
+    // (+ touch) is player 1, controller 2 is player 2. "hybrid": controller 1
+    // is player 1, the touch controls are player 2 (PS4 user 2).
+    @AppStorage("maxps4.pad.mode") private var padModeStored = MaxPS4PadMode.solo.rawValue
+    private var padMode: MaxPS4PadMode { MaxPS4PadMode(stored: padModeStored) }
+    @State private var controllers = MaxPS4ControllerRouter()
+    @State private var playerNames: [String?] = [nil, nil]
     @State private var hasLaunched = false
     @State private var gamepad = MaxPS4GameView.gamepadConnected()
     @AppStorage("maxps4.metal.nativeTextures") private var nativeTextures = true
@@ -196,6 +204,7 @@ struct MaxPS4GameView: View {
     @AppStorage("maxps4.display.scaling") private var scaling = "fit"
     @AppStorage("maxps4.video.height") private var outputHeight = 1080
     @AppStorage("maxps4.fex.profile") private var profiling = false
+    @AppStorage("maxps4.metal.frameTiming") private var frameTiming = false
     // The images-per-second counter in the top right corner (all games).
     @AppStorage("maxps4.display.fpsCounter") private var fpsCounter = false
     @State private var fps = 0.0
@@ -215,6 +224,10 @@ struct MaxPS4GameView: View {
         _touchOpacity = AppStorage(wrappedValue: value("maxps4.touch.opacity", 0.85), own("maxps4.touch.opacity"))
         _stickAsDpad = AppStorage(wrappedValue: value("maxps4.pad.stickDpad", true), own("maxps4.pad.stickDpad"))
         _rightStickShown = AppStorage(wrappedValue: value("maxps4.touch.rightStick", true), own("maxps4.touch.rightStick"))
+        // A game that had "Multijoueur local (2 manettes)" on keeps two controllers.
+        let legacyTwo = defaults.bool(forKey: own("maxps4.pad.localMultiplayer")) || defaults.bool(forKey: "maxps4.pad.localMultiplayer")
+        _padModeStored = AppStorage(wrappedValue: value("maxps4.pad.mode", legacyTwo ? MaxPS4PadMode.twoControllers.rawValue : MaxPS4PadMode.solo.rawValue),
+                                    own("maxps4.pad.mode"))
         _nativeTextures = AppStorage(wrappedValue: value("maxps4.metal.nativeTextures", true), own("maxps4.metal.nativeTextures"))
         _tso = AppStorage(wrappedValue: value("maxps4.fex.tso", true), own("maxps4.fex.tso"))
         _scaling = AppStorage(wrappedValue: value("maxps4.display.scaling", "fit"), own("maxps4.display.scaling"))
@@ -248,7 +261,8 @@ struct MaxPS4GameView: View {
                     .accessibilityIdentifier("maxps4.game.fps")
                 }
                 // A connected controller replaces the touch controls.
-                if session.running && !showingMenu && !gamepad { screenControls }
+                // Hybrid mode: the touch controls are player 2's, shown beside the controller.
+                if session.running && !showingMenu && (!gamepad || padMode == .hybrid) { screenControls }
                 if session.running && !session.hasPresented {
                     VStack(spacing: 12) {
                         ProgressView().tint(.cyan)
@@ -270,7 +284,7 @@ struct MaxPS4GameView: View {
                 HStack {
                     Button {
 #if MAXPS4_FEX_APP
-                        touch = 0; leftStick = .zero; rightStick = .zero; session.input(MaxPS4PadState())
+                        releaseInputs()
 #endif
                         showingMenu = true
                     } label: {
@@ -316,6 +330,30 @@ struct MaxPS4GameView: View {
                                 Text("Commandes").font(.headline)
                                 Toggle("Stick gauche comme croix directionnelle", isOn: $stickAsDpad)
                                 Toggle("Stick droit tactile", isOn: $rightStickShown)
+                                Picker("Joueurs", selection: $padModeStored) {
+                                    Text("Solo").tag(MaxPS4PadMode.solo.rawValue)
+                                    Text("2 manettes").tag(MaxPS4PadMode.twoControllers.rawValue)
+                                    Text("Manette + tactile").tag(MaxPS4PadMode.hybrid.rawValue)
+                                }.pickerStyle(.segmented)
+                                switch padMode {
+                                case .solo:
+                                    EmptyView()
+                                case .twoControllers:
+                                    Text("Joueur 1 : " + (playerNames[0].map { $0 + " + commandes tactiles" } ?? "commandes tactiles"))
+                                        .foregroundStyle(.secondary)
+                                    Text("Joueur 2 : " + (playerNames[1] ?? "aucune manette"))
+                                        .foregroundStyle(playerNames[1] == nil ? .orange : .secondary)
+                                    Text("La première manette connectée est le joueur 1, la deuxième le joueur 2.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                case .hybrid:
+                                    Text("Joueur 1 : " + (playerNames[0].map { "manette Bluetooth (" + $0 + ")" } ?? "aucune manette Bluetooth connectée"))
+                                        .foregroundStyle(playerNames[0] == nil ? .orange : .secondary)
+                                    Text("Joueur 2 : écran tactile").foregroundStyle(.secondary)
+                                    if playerNames[0] == nil {
+                                        Text("Connectez une manette Bluetooth pour le joueur 1 (Réglages iOS, Bluetooth).")
+                                            .font(.caption).foregroundStyle(.orange)
+                                    }
+                                }
                                 Text("Taille des commandes tactiles")
                                 Slider(value: $touchScale, in: 0.7...1.5)
                                 Text("Opacité des commandes tactiles")
@@ -360,23 +398,38 @@ struct MaxPS4GameView: View {
 #if MAXPS4_FEX_APP
         .onReceive(poll) { _ in
             guard session.running, scenePhase == .active, !showingMenu else { return }
-            session.input(Self.padState(touchPad, touchLeft: leftStick, touchRight: rightStick, stickAsDpad: stickAsDpad))
+            // Each player's state is rebuilt from its own sources on every poll
+            // (MaxPS4InputRoute): nothing is ever merged across players.
+            if controllers.refresh(mode: padMode) { routingChanged() }
+            let route = controllers.route
+            session.input(padState(for: route.player1))
+            session.inputPlayer2(route.player2.map { padState(for: $0) })
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidConnect)) { _ in
-            gamepad = Self.gamepadConnected(); if gamepad { touch = 0; leftStick = .zero; rightStick = .zero }
+            gamepad = Self.gamepadConnected()
+            // The touch controls hide for a controller, except player 2's in hybrid mode.
+            if gamepad && padMode != .hybrid { touch = 0; leftStick = .zero; rightStick = .zero }
+            controllers.refresh(mode: padMode); routingChanged()
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in
             gamepad = Self.gamepadConnected()
+            controllers.refresh(mode: padMode); routingChanged()
+        }
+        .onChange(of: padModeStored) { _, _ in
+            // A mode change releases every touch button and stick, so nothing
+            // held under the old mode reaches another player.
+            touch = 0; leftStick = .zero; rightStick = .zero
+            controllers.refresh(mode: padMode); routingChanged()
         }
         // The game waits while its menu is open.
-        .onChange(of: showingMenu) { _, open in session.setPaused(open) }
+        // Keep the guest paused if iOS is inactive, even when the menu closes.
+        .onChange(of: showingMenu) { _, open in session.setPaused(open || scenePhase != .active) }
         .onDisappear { touch = 0; leftStick = .zero; rightStick = .zero; session.stop(); UIApplication.shared.isIdleTimerDisabled = false }
         .onChange(of: scenePhase) { _, phase in
             // An interruption, Control Center included (it reached .background on an
             // iPhone 15 Pro Max), only pauses the game: its flips wait for the return.
             guard phase != .active else { session.setPaused(showingMenu); return }
-            touch = 0; leftStick = .zero; rightStick = .zero
-            session.input(MaxPS4PadState()); session.setPaused(true)
+            releaseInputs(); session.setPaused(true)
         }
         // A running game keeps the screen awake: auto-lock would stop it.
         .onChange(of: session.running, initial: true) { _, running in UIApplication.shared.isIdleTimerDisabled = running }
@@ -418,7 +471,8 @@ struct MaxPS4GameView: View {
                 // (Sonic Mania stutters without TSO), the profiler off.
                 session.start(url: directory, update: update, addons: addons, device: device,
                               nativeTextures: !developer || nativeTextures, tso: !developer || tso,
-                              outputHeight: outputHeight, profiling: developer && profiling)
+                              outputHeight: outputHeight, profiling: developer && profiling,
+                              frameTiming: developer && frameTiming)
             }.buttonStyle(.borderedProminent).tint(.cyan)
             Picker("Affichage", selection: $scaling) {
                 Text("Ajuster").tag("fit")
@@ -436,7 +490,9 @@ struct MaxPS4GameView: View {
                     .font(.footnote).frame(maxWidth: 320)
                 Toggle("Ordre mémoire x86 (TSO)", isOn: $tso)
                     .font(.footnote).frame(maxWidth: 320)
-                Toggle("Profileur processeur (diagnostic)", isOn: $profiling)
+                Toggle("Profileur processeur/GPU (diagnostic)", isOn: $profiling)
+                    .font(.footnote).frame(maxWidth: 320)
+                Toggle("Mesures de régularité Metal (diagnostic)", isOn: $frameTiming)
                     .font(.footnote).frame(maxWidth: 320)
             }
             Text("Ces réglages sont mémorisés pour ce jeu.")
@@ -449,8 +505,56 @@ struct MaxPS4GameView: View {
     // The touch controls plus every connected controller, as one DualShock 4.
     // `stickAsDpad` also presses the D-pad with the left stick (2D games that
     // read only the D-pad); the stick's analog position is always sent.
+    // Immediate touch update (between 120 Hz polls), for the player that owns
+    // the touch controls only, with that player's whole state (touch plus its
+    // own controllers). Sending the touch state to player 1 here put every
+    // hybrid-mode touch on player 1 until the next poll, where PS4Pad kept it
+    // as a tap, and blanked player 1's held controller buttons meanwhile.
+    private func touchChanged() {
+        // The current mode, even before the first poll of a session.
+        if controllers.refresh(mode: padMode) { routingChanged() }
+        let route = controllers.route
+        switch route.touchPlayer {
+        case 0?: session.input(padState(for: route.player1)); session.noteTouch(player: 0)
+        case 1?: if let second = route.player2 { session.inputPlayer2(padState(for: second)); session.noteTouch(player: 1) }
+        default: break
+        }
+    }
+    // The menu's player lines and the session report's routing line, on
+    // changes only (never per poll).
+    private func routingChanged() {
+        playerNames = controllers.names
+        let modeName: String
+        switch padMode {
+        case .solo: modeName = "Solo"
+        case .twoControllers: modeName = "2 manettes"
+        case .hybrid: modeName = "Manette + tactile"
+        }
+        func describe(_ sources: MaxPS4InputSources<ObjectIdentifier>?) -> String {
+            guard let sources, !sources.isEmpty else { return "aucune entrée" }
+            var parts = controllers.controllers(sources).map { $0.vendorName ?? "manette" }
+            if sources.touch { parts.append("tactile") }
+            return parts.joined(separator: " + ")
+        }
+        session.setInputRouting("mode \(modeName) · J1 " + describe(controllers.route.player1)
+            + " · J2 " + (controllers.route.player2 == nil ? "absent" : describe(controllers.route.player2)))
+    }
+    // Menu or interruption: every player's buttons and sticks are released,
+    // player 2's too (a held hybrid-mode touch must not stay pressed there).
+    private func releaseInputs() {
+        touch = 0; leftStick = .zero; rightStick = .zero
+        session.input(MaxPS4PadState())
+        if controllers.route.player2 != nil { session.inputPlayer2(MaxPS4PadState()) }
+    }
+    // One player's state from its sources only: the touch controls when they
+    // are this player's, and this player's controllers.
+    private func padState(for sources: MaxPS4InputSources<ObjectIdentifier>) -> MaxPS4PadState {
+        Self.padState(sources.touch ? touchPad : MaxPS4PadState(),
+                      touchLeft: sources.touch ? leftStick : .zero, touchRight: sources.touch ? rightStick : .zero,
+                      stickAsDpad: stickAsDpad, controllers: controllers.controllers(sources))
+    }
     private static func padState(_ touchPad: MaxPS4PadState, touchLeft: CGPoint, touchRight: CGPoint,
-                                 stickAsDpad: Bool) -> MaxPS4PadState {
+                                 stickAsDpad: Bool, controllers: [GCController] = GCController.controllers()) -> MaxPS4PadState {
         typealias P = MaxPS4PadState
         var state = touchPad
         // Deflection to beat (dead zone first); the touch sticks compete too.
@@ -458,7 +562,7 @@ struct MaxPS4GameView: View {
         var right = max(0.1, Float(abs(touchRight.x) + abs(touchRight.y)))
         func axis(_ value: Float) -> UInt8 { UInt8(max(0, min(255, ((value + 1) * 127.5).rounded()))) }
         func analog(_ value: Float) -> UInt8 { UInt8(max(0, min(255, (value * 255).rounded()))) }
-        for controller in GCController.controllers() {
+        for controller in controllers {
             var b: UInt32 = 0
             if let pad = controller.extendedGamepad {
                 let lx = pad.leftThumbstick.xAxis.value, ly = pad.leftThumbstick.yAxis.value
@@ -556,7 +660,7 @@ struct MaxPS4GameView: View {
                         }
                         controlFace("↓", label: "Bas", bit: 0x40, size: size)
                     }.overlay(ControlTouchLayer(reading: ControlTouchLayer.arrows,
-                                                  changed: { bits in touch = touch & ~0xf0 | bits; session.input(touchPad) },
+                                                  changed: { bits in touch = touch & ~0xf0 | bits; touchChanged() },
                                                   arrived: { session.touchArrived($0) }).accessibilityHidden(true))
                     stickControl($leftStick, name: "L", label: "Stick gauche", click: MaxPS4PadState.l3, size: size * 2)
                 }
@@ -599,16 +703,16 @@ struct MaxPS4GameView: View {
         .contentShape(Circle())
         .accessibilityLabel(label)
         .overlay(StickTouchLayer(moved: { point in
-            guard let point else { stick.wrappedValue = .zero; session.input(touchPad); return }
+            guard let point else { stick.wrappedValue = .zero; touchChanged(); return }
             var x = (point.x - radius) / (radius * 0.8)
             var y = (point.y - radius) / (radius * 0.8)
             let length = (x * x + y * y).squareRoot()
             if length > 1 { x /= length; y /= length }
             stick.wrappedValue = CGPoint(x: x, y: y)
-            session.input(touchPad)
+            touchChanged()
         }, clicked: { down in
             touch = down ? touch | click : touch & ~click
-            session.input(touchPad)
+            touchChanged()
         }, arrived: { session.touchArrived($0) }).accessibilityHidden(true))
     }
 
@@ -616,7 +720,7 @@ struct MaxPS4GameView: View {
     private func control(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
         controlFace(name, label: label, bit: bit, size: size)
             .overlay(ControlTouchLayer(reading: { _, _ in bit },
-                                       changed: { bits in touch = touch & ~bit | bits; session.input(touchPad) },
+                                       changed: { bits in touch = touch & ~bit | bits; touchChanged() },
                                        arrived: { session.touchArrived($0) }).accessibilityHidden(true))
     }
 
@@ -632,7 +736,7 @@ struct MaxPS4GameView: View {
             .contentShape(Circle())
             .accessibilityLabel(label).accessibilityAddTraits(.isButton)
             .accessibilityAction {
-                touch |= bit; session.input(touchPad)
+                touch |= bit; touchChanged()
                 touch &= ~bit
             }
     }
@@ -756,6 +860,48 @@ private struct StickTouchLayer: UIViewRepresentable {
     }
     func updateUIView(_ surface: Surface, context: Context) {
         surface.moved = moved; surface.clicked = clicked; surface.arrived = arrived
+    }
+}
+#endif
+
+#if MAXPS4_FEX_APP
+// Which GCController drives which player (MaxPS4InputRoute). A reference type
+// held in @State, so the 120 Hz input poll updates it without redrawing the
+// view; `names` feeds the menu only when controllers or the mode change.
+final class MaxPS4ControllerRouter {
+    private var slots = MaxPS4ControllerSlots<ObjectIdentifier>(players: 1)
+    private var byKey: [ObjectIdentifier: GCController] = [:]
+    private var mode = MaxPS4PadMode.solo
+    private(set) var route = MaxPS4InputRoute<ObjectIdentifier>()
+    // True when the route or the mode changed since the previous call.
+    @discardableResult
+    func refresh(mode: MaxPS4PadMode) -> Bool {
+        let previous = (route, self.mode)
+        let present = GCController.controllers().filter { $0.extendedGamepad != nil || $0.microGamepad != nil }
+        byKey = Dictionary(uniqueKeysWithValues: present.map { (ObjectIdentifier($0), $0) })
+        self.mode = mode
+        route = .route(mode: mode, connected: present.map(ObjectIdentifier.init), slots: &slots)
+        let changed = previous.0 != route || previous.1 != mode
+        // The controller's own player light, outside Solo (left as it was there).
+        guard mode != .solo else { return changed }
+        for controller in present {
+            let key = ObjectIdentifier(controller)
+            let index: GCControllerPlayerIndex = route.player1.controllers.contains(key) ? .index1
+                : route.player2?.controllers.contains(key) == true ? .index2 : .indexUnset
+            if controller.playerIndex != index { controller.playerIndex = index }
+        }
+        return changed
+    }
+    func controllers(_ sources: MaxPS4InputSources<ObjectIdentifier>) -> [GCController] {
+        sources.controllers.compactMap { byKey[$0] }
+    }
+    // Controller names of players 1 and 2 for the menu (nil: none).
+    var names: [String?] {
+        guard mode != .solo else { return [nil, nil] }
+        func name(_ sources: MaxPS4InputSources<ObjectIdentifier>?) -> String? {
+            sources.flatMap { controllers($0).first }.map { $0.vendorName ?? "Manette" }
+        }
+        return [name(route.player1), name(route.player2)]
     }
 }
 #endif

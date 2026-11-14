@@ -53,6 +53,15 @@ int main() {
         put(f, 0x5c4, off, 4);
         assert(parse() && !pkg.resolveNames(read, names, why) && names.empty());
     }
+    // A failed name lookup must not leak names from an earlier successful lookup.
+    f = original; put(f, 0x5c4, 1, 4);
+    assert(parse() && pkg.resolveNames(read, names, why) && names[1] == "eboot.bin");
+    put(f, 0x5c4, UINT32_MAX, 4);
+    assert(parse() && !pkg.resolveNames(read, names, why) && names.empty());
+    // Malformed protected metadata must never trigger a payload read.
+    f = original; put(f, 0x5a8, 0x80000000U, 4);
+    assert(parse()); reads = 0;
+    assert(!pkg.extract(0, read, output, why) && output.empty() && reads == 0);
     f = original; put(f, 0x5c4, 1, 4); f[0x609] = 'x';
     std::fill(f.begin() + 0x60a, f.begin() + 0x610, 'x');
     assert(parse() && !pkg.resolveNames(read, names, why));

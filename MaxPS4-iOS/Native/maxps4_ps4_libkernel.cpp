@@ -2267,9 +2267,10 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
     case S::audio_output: return audio_.output(signed32(c.rdi), c.rsi);
     case S::user_terminate: return user_service_.terminate();
     case S::user_initial: return user_service_.initial_user(c.rdi);
-    case S::user_login_list: return user_service_.login_users(c.rdi);
-    case S::user_event: return user_service_.event(c.rdi);
-    case S::user_name: return user_service_.user_name(signed32(c.rdi), c.rsi, c.rdx);
+    // Local multiplayer: users 2..4 exist once their controller was reported.
+    case S::user_login_list: return user_service_.login_users(c.rdi, pad_.logged_in_users());
+    case S::user_event: return user_service_.event(c.rdi, pad_.logged_in_users());
+    case S::user_name: return user_service_.user_name(signed32(c.rdi), c.rsi, c.rdx, pad_.logged_in_users());
     case S::video_open: return videoout_.open(signed32(c.rsi), signed32(c.rdx), c.rcx);
     case S::video_close: return videoout_.close(c.rdi);
     case S::video_attribute: {

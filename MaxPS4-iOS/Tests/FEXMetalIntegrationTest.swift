@@ -7,9 +7,12 @@ struct FEXMetalIntegrationTest {
     static func main() throws {
         var state = MaxPS4FEXMetalState()
         var offsets = [SIMD2<Float>]()
+        var guestDurationsMs = [Double]()
         for _ in 0..<8 {
             for initial in [UInt32(0), 750, 1500] {
+                let guestStart = ProcessInfo.processInfo.systemUptime
                 let result = try MaxPS4FEXMetalExecution.run(initial: initial)
+                guestDurationsMs.append((ProcessInfo.processInfo.systemUptime - guestStart) * 1000)
                 precondition(result.backend == UInt32(MAXPS4_CPU_FEX_ARM64_JIT))
                 precondition(result.rax == UInt64(initial) + 250)
                 try state.accept(result)
@@ -23,6 +26,10 @@ struct FEXMetalIntegrationTest {
             do { _ = try MaxPS4SyntheticELFFEXBridge.run(file: bad); preconditionFailure("bad ELF accepted") } catch {}
             precondition(maxps4_jit_leases() == 0)
         }
+        let sortedGuestMs = guestDurationsMs.sorted()
+        let p50GuestMs = sortedGuestMs[sortedGuestMs.count / 2]
+        let p95GuestMs = sortedGuestMs[min(sortedGuestMs.count - 1, Int(Double(sortedGuestMs.count - 1) * 0.95))]
+        print(String(format: "PERF guest FEX invocation (macOS CI, n=%d): p50=%.2f ms, p95=%.2f ms", guestDurationsMs.count, p50GuestMs, p95GuestMs))
         print("PASS actual ELF bytes -> FEX ARM64 JIT -> RAX -> bounded renderer offsets; repeated execution/errors and zero leases")
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw NSError(domain: "FEXMetalIntegration", code: 1, userInfo: [NSLocalizedDescriptionKey: "Metal device required for CPU/GPU integration proof"])
@@ -62,7 +69,9 @@ struct FEXMetalIntegrationTest {
             precondition(count > 0)
             return (pixels, sum / count)
         }
+        let renderStart = ProcessInfo.processInfo.systemUptime
         let left = try draw(offsets[0]), center = try draw(offsets[1]), right = try draw(offsets[2])
+        print(String(format: "PERF Metal 3 offscreen draws + readback (macOS CI): %.2f ms total", (ProcessInfo.processInfo.systemUptime - renderStart) * 1000))
         precondition(left.0 != center.0 && center.0 != right.0)
         precondition(left.1 + 10 < center.1 && center.1 + 10 < right.1)
         print("PASS real Metal completed commands and readback: FEX-computed positions move textured object left/center/right")

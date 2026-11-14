@@ -1,5 +1,7 @@
 #include "../Native/maxps4_ps4_audio_out.h"
 #include "GuestELFFixture.h"
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -54,14 +56,43 @@ int main() {
     // first returns at once, then each waits for the previous buffer.
     assert(audio.close(stereo) == 0 && audio.close(stereo) == PS4AudioOut::error(0x03));
     const int32_t paced = int32_t(audio.open(1,0,0,256,48000,1));
-    auto start = Clock::now();
-    for (int i = 0; i < 20; ++i) assert(audio.output(paced, 0) == 0);
-    const double elapsed = milliseconds(start);
-    assert(elapsed > 19 * 5.33 * 0.9);
-    assert(elapsed < 20 * 5.33 * 3);
+    constexpr double period = 256.0 * 1000.0 / 48000.0; // 5.33 ms
+    constexpr uint64_t period_us = 256ull * 1000000 / 48000;
+    auto timed = [](auto&& body) {
+        std::array<double, 20> each{};
+        for (double& duration : each) { const auto before = Clock::now(); body(); duration = milliseconds(before); }
+        std::array<double, 20> sorted = each;
+        std::sort(sorted.begin(), sorted.end());
+        double total = 0; for (double d : each) total += d;
+        struct { double total, median, most; } out{total, sorted[sorted.size() / 2], sorted.back()};
+        return out;
+    };
+    // Reference: the same wait primitive Output uses (PS4Threads::sleep for one
+    // period), on this machine, right now. Wake-up accuracy is a property of
+    // the host, not of AudioOut: Windows rounds waits to its timer tick (calls
+    // up to 16 ms measured), loaded macOS runners under ASan coalesce timers.
+    const auto reference = timed([&] { assert(threads.sleep(period_us) == ps4::ok); });
+    const auto output = timed([&] { assert(audio.output(paced, 0) == 0); });
+    std::printf("AudioOut pacing: 20 outputs in %.2f ms (per call median %.2f, max %.2f) | "
+                "20 sleeps of one period (%.2f ms) in %.2f ms (median %.2f, max %.2f)\n",
+                output.total, output.median, output.most, period, reference.total, reference.median, reference.most);
+    // Output really blocks: never earlier than the 19 deadlines it waits for
+    // (the first returns at once, each next one waits for the previous buffer).
+    assert(output.total > 19 * period * 0.9);
+    // One period per call, not more: a call never waits longer than this host
+    // takes to sleep one period. Deadlines are absolute (port due time), so a
+    // late wake-up shortens the next wait instead of adding up. A pacing bug
+    // that waits two periods per call doubles the median on any host with a
+    // timer finer than the period. Medians ignore a few stalled wake-ups.
+    // This replaces a fixed bound on the total (20 * 5.33 * 3 ms) that failed
+    // on loaded macOS runners (#311) and did not even catch such a bug (two
+    // periods per call total about 213 ms).
+    assert(output.median <= 1.5 * reference.median + 0.5);
+    // No call blocks indefinitely (a lost wake-up).
+    assert(output.most < 1000);
     // An interrupted run (stop request) does not wait.
     threads.interrupt();
-    start = Clock::now();
+    auto start = Clock::now();
     for (int i = 0; i < 20; ++i) assert(audio.output(paced, 0) == 0);
     assert(milliseconds(start) < 20);
     threads.resume();

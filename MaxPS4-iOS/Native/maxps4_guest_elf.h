@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -89,9 +90,14 @@ public:
     // HLE gate for the FEX SYSCALL callback: true only when the host RIP is
     // exactly the SYSCALL of a linker-synthesized trampoline carrying `token`.
     bool hle_gate(uint64_t host_rip, uint32_t token) const {
-        for (const auto& t : thunks)
-            if (t.token == token && reinterpret_cast<uintptr_t>(
-                    translate(t.address + OrbisLinker::syscallOffset, 2, 5)) == host_rip) return true;
+        uint64_t guest_rip = 0;
+        if (!guest_address(host_rip, guest_rip) || guest_rip < OrbisLinker::syscallOffset) return false;
+        const uint64_t address = guest_rip - OrbisLinker::syscallOffset;
+        auto found = std::lower_bound(thunks.begin(), thunks.end(), address,
+            [](const OrbisLinker::Thunk& thunk, uint64_t value) { return thunk.address < value; });
+        for (; found != thunks.end() && found->address == address; ++found)
+            if (found->token == token && reinterpret_cast<uintptr_t>(
+                    translate(guest_rip, 2, 5)) == host_rip) return true;
         return false;
     }
     bool has_hle() const { return !thunks.empty(); }

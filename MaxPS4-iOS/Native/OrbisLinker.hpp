@@ -70,7 +70,12 @@ public:
     // that exact token; the token is the HLE service number.
     struct Thunk { uint64_t address; uint32_t token; };
     static constexpr uint64_t thunkSize = 11, syscallOffset = 8;
-    struct Input { PS4PKGRuntimePlan::ModuleBytes file; uint64_t bias = 0; };
+    // privateExports: the module's exports are published for a runtime's
+    // sceKernelDlsym (Image::exported, per module) but take no part in NID
+    // import resolution. Used for variants of one module that a game loads by
+    // path, one at a time (MK Legacy Kollection's libmipsaot-*.prx), which no
+    // module imports. Duplicate checks still apply to every other module.
+    struct Input { PS4PKGRuntimePlan::ModuleBytes file; uint64_t bias = 0; bool privateExports = false; };
     struct Module { std::string path; uint64_t bias = 0, entry = 0; PS4ExecutableImage image; };
     struct Mapping { uint64_t address, size; uint32_t permissions; const uint8_t* data; };
     // Static TLS, x86-64 variant II (FreeBSD/Orbis): each block ends at or below
@@ -347,6 +352,7 @@ private:
         std::vector<size_t> order; std::string error;
         require(PS4PKGRuntimePlan::orderModules(requests, order, error), error);
         std::vector<Dynamic> dynamic;
+        std::vector<bool> privateExports; // Parallel to dynamic.
         report.phase = "ELF/segments";
         // Check the complete segment budget before allocating any staged image.
         // The existing loader still validates every field independently below.
@@ -439,6 +445,7 @@ private:
             }
             report.phase = "dynamic metadata";
             dynamic.push_back(parse(in, m, tlsMemory, symbolBudget, relocationBudget)); out.modules.push_back(std::move(m));
+            privateExports.push_back(in.privateExports);
         }
         report.phase = "PRX dependencies";
         // Validate even unused module descriptors: symbols alone cannot prove a
@@ -497,7 +504,7 @@ private:
         struct Export { uint64_t address; size_t owner; };
         std::map<Identity, Export> exports, hleExports; // HLE keys have module version 0.
         // TLS exports carry their block offset; the owner gives the TLS module.
-        for (size_t i = 0; i < dynamic.size(); ++i) for (const auto& s : dynamic[i].symbols) if (s.defined && !s.local)
+        for (size_t i = 0; i < dynamic.size(); ++i) for (const auto& s : dynamic[i].symbols) if (s.defined && !s.local && !privateExports[i])
             require(exports.emplace(s.identity, Export{s.type == 6 ? s.value : add(out.modules[i].bias, s.value), i}).second,
                     "duplicate or ambiguous export: " + s.identity.nid);
         for (size_t i = 0; i < dynamic.size(); ++i) for (const auto& s : dynamic[i].symbols)

@@ -20,6 +20,25 @@ int main() {
     std::mt19937_64 random(42);
     size_t step = 0;
     auto expect = [&](uint64_t address) -> int { auto it = model.find(address); return it == model.end() ? -1 : it->second; };
+    {
+        // munmap/mprotect over three adjacent regions (FreeBSD semantics):
+        // accepted when every page is mapped, refused untouched over a hole.
+        uint64_t a = 0, b = 0, c = 0;
+        CHECK(vm.place(0, page, 0, 3, false, a) == ps4::ok);
+        CHECK(vm.place(0, 2 * page, 0, 1, false, b) == ps4::ok && b == a + page);
+        CHECK(vm.place(0, page, 0, 3, false, c) == ps4::ok && c == a + 3 * page);
+        CHECK(vm.protect(a, 4 * page, 1) == ps4::ok);
+        for (uint64_t i = 0; i < 4; ++i) CHECK(vm.translate(a + i * page, 1, 4) && !vm.translate(a + i * page, 1, 2));
+        CHECK(vm.protect(a + page, 3 * page, 3) == ps4::ok);
+        CHECK(!vm.translate(a, 1, 2) && vm.translate(a + page, page, 2) && vm.translate(a + 2 * page, page, 2) && vm.translate(a + 3 * page, page, 2));
+        CHECK(vm.unmap(a + 2 * page, page) == ps4::ok);           // hole in the middle region
+        CHECK(vm.unmap(a, 4 * page) == ps4::nomem);               // refused over the hole...
+        CHECK(vm.protect(a, 4 * page, 1) == ps4::nomem);
+        CHECK(vm.translate(a, 1, 4) && vm.translate(a + page, 1, 2) && vm.translate(a + 3 * page, 1, 2)); // ...untouched
+        CHECK(vm.unmap(a, 2 * page) == ps4::ok && vm.unmap(a + 3 * page, page) == ps4::ok);
+        for (uint64_t i = 0; i < 4; ++i) CHECK(!vm.translate(a + i * page, 1, 4));
+        CHECK(vm.allocated() == 0);
+    }
     for (step = 0; step < 20000; ++step) {
         const unsigned op = unsigned(random() % 10);
         if (op < 4 || spans.empty()) {
@@ -40,9 +59,9 @@ int main() {
             bool mapped = true;
             for (uint64_t i = 0; i < count; ++i) mapped = mapped && model.count(at + i * page);
             const auto e = vm.unmap(at, count * page);
-            // A span crossing two regions is refused even when all its pages are mapped.
+            // Spans over adjacent regions succeed exactly when every page is mapped.
             if (e == ps4::ok) { CHECK(mapped); for (uint64_t i = 0; i < count; ++i) model.erase(at + i * page); }
-            else CHECK(e == ps4::nomem);
+            else CHECK(e == ps4::nomem && !mapped);
         } else {
             auto& s = spans[random() % spans.size()];
             const uint64_t first = random() % s.second, count = 1 + random() % (s.second - first);
@@ -51,9 +70,9 @@ int main() {
             bool mapped = true;
             for (uint64_t i = 0; i < count; ++i) mapped = mapped && model.count(at + i * page);
             const auto e = vm.protect(at, count * page, protection);
-            // A span crossing two regions is refused even when all its pages are mapped.
+            // Spans over adjacent regions succeed exactly when every page is mapped.
             if (e == ps4::ok) { CHECK(mapped); for (uint64_t i = 0; i < count; ++i) model[at + i * page] = uint8_t(protection); }
-            else CHECK(e == ps4::nomem);
+            else CHECK(e == ps4::nomem && !mapped);
         }
         // Check a few random known pages and the neighbourhood of a span.
         for (int k = 0; k < 4 && !spans.empty(); ++k) {

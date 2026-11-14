@@ -249,7 +249,14 @@ inline std::vector<uint8_t> make_general_fault_app(int kind) {
     else if (kind == 1) code={0xc7,0x05,0xf6,0xff,0xff,0xff,0,0,0,0, 0xf4};
     else if (kind == 2) code={0x0f,0x0b, 0xf4};
     else if (kind == 3) code={0xeb,0xfe, 0xf4};
-    else code={0xf0,0x48,0x83,0x05,0xf8,0xff,0xff,0xff,1,0xf4};
+    else if (kind == 4) code={0xf0,0x48,0x83,0x05,0xf8,0xff,0xff,0xff,1,0xf4};
+    // #296: FEX decodes `66 cf` (IRET with an operand-size override) but its
+    // handler reports a decode failure, so CompileBlock returns 0 for a block
+    // that starts there. 5: reached by a direct CALL (ExitFunctionLink, target
+    // code+6); 6: by a direct JMP (target code+3); 7: at the entry itself.
+    else if (kind == 5) code={0xe8,0x01,0,0,0, 0xf4, 0x66,0xcf};
+    else if (kind == 6) code={0xeb,0x01, 0xf4, 0x66,0xcf};
+    else code={0x66,0xcf, 0xf4};
     std::fill(b.begin()+0x200,b.begin()+0x300,0);
     std::copy(code.begin(),code.end(),b.begin()+0x200);
     put(b,64+32,code.size()); put(b,64+40,code.size());

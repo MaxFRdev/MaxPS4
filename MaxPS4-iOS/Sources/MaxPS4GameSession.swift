@@ -81,6 +81,11 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var missingSince: Date?
     private var lockWait: TimeInterval = 0 // Last snapshot's wait for `lock`.
     private var pad = MaxPS4PadState()
+    // Local multiplayer: player 2's controller (nil: none). Under inputLock.
+    private var pad2: MaxPS4PadState?, pad2Reported = false
+    // Input routing for the report (changes only): the mode and each player's
+    // sources, and immediate touch updates sent to player 1 / player 2.
+    private var routing = "", touchSends = [0, 0]
     private var lastBeat = "" // The last heartbeat() text, under lock.
     // Where the run or its stop is, for the next session's loading screen.
     private let stageLock = NSLock()
@@ -107,6 +112,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var vblanksSent = 0 // With vblankPort, under inputLock.
     private var touchesArrived = 0, touchSeconds: TimeInterval = 0 // Under inputLock.
     private var vblankPort: UInt64 = 1
+    // The menu/scene can request a pause before the native engine is attached.
+    // Remember it so initialization never silently resumes a backgrounded game.
+    private var requestedPause = false
     private var lastTicket: UInt64 = 0
     private var relocation: UInt64 = 0
     private var vblankClock = MaxPS4VideoOutClock()
@@ -162,7 +170,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let missing = missingImports(engine)
         let compatibility = missing.called.isEmpty ? "" : "Fonctions PS4 manquantes appelées : \(missing.called.count) sur \(missing.total) absentes · "
             + missing.called.prefix(5).joined(separator: " · ") + "\n"
-        let text = compatibility + inputDelays(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
+        let text = compatibility + inputDelays(engine) + padPlayers(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
         if let liveReport {
             MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
@@ -284,7 +292,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     }
     // The CPU profile since the run started; empty unless profiling was asked.
     private func profile(_ engine: OpaquePointer) -> String {
-        var text = [CChar](repeating: 0, count: 2048)
+        var text = [CChar](repeating: 0, count: 4096)
         _ = maxps4_fex_engine_profile_report(engine, &text, text.count)
         return String(cString: text)
     }
@@ -330,11 +338,34 @@ final class MaxPS4GameSource: @unchecked Sendable {
     func setPaused(_ paused: Bool) {
         audio.setPaused(paused)
         inputLock.lock(); defer { inputLock.unlock() }
+        requestedPause = paused
         if let inputEngine { maxps4_fex_engine_videoout_pause(inputEngine, paused ? 1 : 0) }
     }
     // How long presses took: iOS to the app, the app to the game's read.
     func touchArrived(_ seconds: TimeInterval) {
         inputLock.lock(); touchesArrived += 1; touchSeconds += seconds; inputLock.unlock()
+    }
+    // Called by the game view when the mode or a player's controller changes
+    // (not per poll), and for each immediate touch update with its player.
+    func setInputRouting(_ text: String) { inputLock.lock(); routing = text; inputLock.unlock() }
+    func noteTouch(player: Int) {
+        inputLock.lock(); if touchSends.indices.contains(player) { touchSends[player] += 1 }; inputLock.unlock()
+    }
+    // Each logged-in PS4 user's virtual pad: the handle the game opened for it
+    // and how often the game read it (does the game read player 2 at all?).
+    private func padPlayers(_ engine: OpaquePointer) -> String {
+        inputLock.lock(); let route = routing, sends = touchSends; inputLock.unlock()
+        var players: [String] = []
+        for player in 0..<4 {
+            var status = maxps4_pad_player_status()
+            guard maxps4_fex_engine_pad_status(engine, UInt32(player), &status) == 0, status.logged_in != 0 else { continue }
+            players.append("J\(player + 1) " + (status.connected != 0 ? "connecté" : "déconnecté")
+                + (status.handle > 0 ? " · handle \(status.handle) · \(status.reads) lectures" : " · non ouvert par le jeu")
+                + String(format: " · boutons 0x%x", status.buttons))
+        }
+        guard players.count > 1 || !route.isEmpty else { return "" }
+        return "Joueurs : " + (route.isEmpty ? "" : route + " · ") + "tactile vers J1 \(sends[0]), vers J2 \(sends[1])\n"
+            + "Manettes PS4 : " + players.joined(separator: " | ") + "\n"
     }
     private func inputDelays(_ engine: OpaquePointer) -> String {
         var count: UInt64 = 0, total: UInt64 = 0, most: UInt64 = 0
@@ -349,9 +380,19 @@ final class MaxPS4GameSource: @unchecked Sendable {
         self.pad = pad
         if let inputEngine { pad.send(to: inputEngine) }
     }
+    // Player 2 (PS4 user 2) from its own controller. The first state logs
+    // user 2 in; nil afterwards reports its controller disconnected (user 2
+    // stays logged in, as on a PS4). Never mixed into player 1's input.
+    func inputPlayer2(_ state: MaxPS4PadState?) {
+        inputLock.lock(); defer { inputLock.unlock() }
+        if state == nil && !pad2Reported { return }
+        pad2 = state; pad2Reported = true
+        if let inputEngine { MaxPS4PadState.send(state, player: 1, to: inputEngine) }
+    }
     private func sendInputLocked(_ engine: OpaquePointer) {
-        inputLock.lock(); let latest = pad; inputLock.unlock()
+        inputLock.lock(); let latest = pad, second = pad2, reported = pad2Reported; inputLock.unlock()
         latest.send(to: engine)
+        if reported { MaxPS4PadState.send(second, player: 1, to: engine) }
     }
     private func snapshotTarget() throws -> (maxps4_videoout_frame, UInt64, MaxPS4GameMetalBridge)? {
         let asked = ProcessInfo.processInfo.systemUptime
@@ -434,7 +475,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         }
         setStage("fermée")
     }
-    func run(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, progress: @escaping @Sendable (String) -> Void) -> String {
+    func run(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false, progress: @escaping @Sendable (String) -> Void) -> String {
         dispatchPrecondition(condition: .onQueue(MaxPS4FEXMetalExecution.queue))
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -486,6 +527,12 @@ final class MaxPS4GameSource: @unchecked Sendable {
             }, nativeTextures: nativeTextures) else { throw failure("Création du renderer Metal", -ENOMEM) }
             // A new screen's pipelines build on Metal's threads: the game goes on meanwhile.
             metal.asynchronousPipelines = true
+            // Draw-by-draw GPU waits are a developer diagnostic, never a cost
+            // paid by normal game execution.
+            metal.programProfiling = profiling
+            // A separate low-overhead distribution for repeatable combat
+            // traces. It is opt-in and does not add GPU completion waits.
+            metal.frameTimingProfiling = frameTiming
             let attached = maxps4_fex_engine_gnm_host_consumer(opened,
                 Unmanaged.passUnretained(metal).toOpaque(), { context, words, count in
                     guard let context, let words else { return -EINVAL }
@@ -507,7 +554,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             let cancelled = stopped
             if ready {
                 sendInputLocked(opened)
-                inputLock.lock(); inputEngine = opened; inputLock.unlock()
+                inputLock.lock()
+                inputEngine = opened
+                maxps4_fex_engine_videoout_pause(opened, requestedPause ? 1 : 0)
+                inputLock.unlock()
             }
             if ready {
                 let timer = DispatchSource.makeTimerSource(queue: vblanks)
@@ -534,8 +584,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
             // The last live report, not a new one: reading the engine now would
             // sample the main guest thread, which is this very thread.
             lock.lock(); let live = lastBeat; lock.unlock()
+            let metalReport = metal.report + (frameTiming ? "\n" + metal.frameTimingReport : "")
             defer {
-                let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP),
+                let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP),
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
                             missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
                             "Derniers appels PS4 en échec :", failedCalls(opened), "",
@@ -547,7 +598,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
                 lock.lock(); let liveFile = liveReport; liveReport = nil; lock.unlock()
                 if let liveFile { try? FileManager.default.removeItem(at: liveFile) }
             }
-            return result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metal.report, fault: fault, relative: relativeRIP)
+            return result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP)
         } catch {
             let text = String(localized: "Échec : \(error.localizedDescription)", bundle: .maxps4)
             outcome = Outcome(missing: [], crashed: true, report: MaxPS4Reports.save(text, for: url))
@@ -559,7 +610,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             if wasStopped {
                 return "Arrêté après \(frames) images présentées. \(metal)\nThread principal interrompu à RIP 0x\(String(fault.rip, radix: 16)) (relatif 0x\(String(relativeRIP, radix: 16)), relocation 0x\(String(relocation, radix: 16)))."
             }
-            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16))."
+            // 0x4d50 (maxps4_dispatch_fault.h): FEX could not compile the guest block at RIP.
+            let uncompilable = fault.code == 0x4d50
+                ? "\nInstruction x86 non prise en charge par FEX à RIP 0x\(String(fault.rip, radix: 16)) : octets dans Documents/maxps4-fatal-fault.txt." : ""
+            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\(uncompilable)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16))."
     }
     private func failure(_ text: String, _ code: Int32) -> NSError {
         NSError(domain: "MaxPS4.Game", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "\(text) (\(code))"])
@@ -582,13 +636,15 @@ final class MaxPS4GameSource: @unchecked Sendable {
     // whether the new run has started, for the loading screen.
     private static var draining: MaxPS4GameSource? // App-wide: a new game screen waits for it too.
     private var launched = false
-    func start(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false) {
+    private var diagnosticSessionStart: Date?
+    func start(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false) {
         stop()
         let source = MaxPS4GameSource(), id = UUID()
         generation = id; self.source = source; worker = source; running = true
         hasPresented = false; heartbeat = ""; outcome = .init()
         report = String(localized: "Chargement du jeu et préparation Metal…", bundle: .maxps4)
         launched = false
+        diagnosticSessionStart = Date()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.generation == id else { return }
@@ -614,7 +670,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
             }
         }
         MaxPS4FEXMetalExecution.queue.async { [weak self] in
-            let result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling) { [weak self] text in
+            let result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling, frameTiming: frameTiming) { [weak self] text in
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.generation == id, self.running else { return }
                     self.launched = true; Self.draining = nil
@@ -633,6 +689,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
         }
     }
     func input(_ pad: MaxPS4PadState) { worker?.input(pad) }
+    func inputPlayer2(_ state: MaxPS4PadState?) { worker?.inputPlayer2(state) }
+    func setInputRouting(_ text: String) { worker?.setInputRouting(text) }
+    func noteTouch(player: Int) { worker?.noteTouch(player: player) }
     func touchArrived(_ seconds: TimeInterval) { worker?.touchArrived(seconds) }
     func presented(_ text: String) { if running { hasPresented = true; report = text } }
     func failed(_ text: String) { stop(); stopping = nil; report = text }
@@ -646,8 +705,21 @@ final class MaxPS4GameSource: @unchecked Sendable {
         heartbeatTimer?.invalidate(); heartbeatTimer = nil
         report = String(localized: "Arrêt demandé.", bundle: .maxps4)
     }
-    // What "Partager le rapport" sends: the last image report plus live progress.
-    var sharedReport: String { heartbeat.isEmpty ? report : report + "\n" + heartbeat }
+    // Include the native fatal-fault log when exporting diagnostics. The Metal
+    // heartbeat is only a snapshot and does not contain FEX's link-rip/bytes.
+    // Ignore old logs from earlier runs; never misattribute a stale crash.
+    var sharedReport: String {
+        var text = heartbeat.isEmpty ? report : report + "\n" + heartbeat
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return text }
+        let faultURL = documents.appendingPathComponent("maxps4-fatal-fault.txt")
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: faultURL.path),
+              let modified = attributes[.modificationDate] as? Date,
+              let sessionStart = diagnosticSessionStart,
+              modified >= sessionStart,
+              let contents = try? String(contentsOf: faultURL, encoding: .utf8) else { return text }
+        text += "\n\nJournal FEXCore (maxps4-fatal-fault.txt) :\n" + String(contents.suffix(16_384))
+        return text
+    }
     deinit { worker?.stop() }
 }
 #endif
@@ -670,6 +742,11 @@ struct MaxPS4PadState: Equatable {
 #if MAXPS4_FEX_APP
     func send(to engine: OpaquePointer) {
         _ = maxps4_fex_engine_pad_update(engine, buttons, lx, ly, rx, ry, l2, r2, 1)
+    }
+    // Player 1...3 (PS4 users 2...4); nil reports that player's controller gone.
+    static func send(_ state: MaxPS4PadState?, player: UInt32, to engine: OpaquePointer) {
+        let s = state ?? MaxPS4PadState()
+        _ = maxps4_fex_engine_pad_update_player(engine, player, s.buttons, s.lx, s.ly, s.rx, s.ry, s.l2, s.r2, state == nil ? 0 : 1)
     }
 #endif
 }

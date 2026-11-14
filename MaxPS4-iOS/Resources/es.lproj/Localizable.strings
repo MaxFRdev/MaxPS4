@@ -76,7 +76,8 @@
 "Résolution annoncée au jeu : 720p peut alléger le rendu si le jeu s’y adapte." = "Resolución indicada al juego: 720p puede aligerar el renderizado si el juego se adapta.";
 "Textures Metal natives (expérimental)" = "Texturas Metal nativas (experimental)";
 "Ordre mémoire x86 (TSO)" = "Orden de memoria x86 (TSO)";
-"Profileur processeur (diagnostic)" = "Perfilador de CPU (diagnóstico)";
+"Profileur processeur/GPU (diagnostic)" = "Perfilador de CPU/GPU (diagnóstico)";
+"Mesures de régularité Metal (diagnostic)" = "Métricas de cadencia Metal (diagnóstico)";
 "Tourne l’iPhone pour jouer en paysage." = "Gira el iPhone para jugar en horizontal.";
 "Metal indisponible sur cet appareil." = "Metal no está disponible en este dispositivo.";
 "Le runtime FEX n’est pas inclus dans cette compilation." = "El runtime de FEX no está incluido en esta compilación.";

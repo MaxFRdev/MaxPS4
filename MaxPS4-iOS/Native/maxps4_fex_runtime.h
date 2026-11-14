@@ -113,6 +113,23 @@ int32_t maxps4_fex_engine_gnm_software_status(maxps4_fex_engine* engine, uint32_
 void maxps4_fex_engine_pad_latency(maxps4_fex_engine* engine, uint64_t* reads, uint64_t* total_us, uint64_t* most_us);
 int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint32_t buttons,
     uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected);
+// Local multiplayer: the same for player 0..3 (PS4 user 1..4; player 0 is
+// pad_update). A player above 0 logs in on its first connected report and then
+// appears in sceUserServiceGetLoginUserIdList; it stays logged in when its
+// controller disconnects (connected 0), and keeps its pad handle.
+int32_t maxps4_fex_engine_pad_update_player(maxps4_fex_engine* engine, uint32_t player, uint32_t buttons,
+    uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected);
+// Session report: player 0..3's virtual pad (PS4 user player + 1): logged in,
+// controller connected, the scePad handle the game opened for that user (0:
+// none), the buttons it would read now, and how many reads the game made.
+typedef struct {
+    uint32_t logged_in, connected;
+    int32_t handle;
+    uint32_t buttons;
+    uint64_t reads;
+    uint32_t connections;
+} maxps4_pad_player_status;
+int32_t maxps4_fex_engine_pad_status(maxps4_fex_engine* engine, uint32_t player, maxps4_pad_player_status* status);
 // Concurrent host audio: mixes up to `frames` 48 kHz interleaved stereo float
 // frames of the game's AudioOut ports into `samples` (zeros where none).
 // Returns the frames that had data, or -EINVAL. Same ownership rule as
@@ -315,6 +332,12 @@ int32_t maxps4_fex_engine_prepare_orbis_general(maxps4_fex_engine *engine,
 // 2 keeps the stubs without that trace (thousands of lines per second).
 // It shows how far a game gets; it never makes it correct.
 int32_t maxps4_fex_engine_set_import_probe(maxps4_fex_engine *engine, uint32_t enabled);
+// Investigation only (#296): 1 routes ExitFunctionLink through a pass-through
+// wrapper that records every link (efl-* fields of contained fault lines);
+// 0, the default, leaves FEX's ExitFunctionLink untouched (no wrapper, no
+// probe syscall on the JIT link path). Process-wide, read when a FEX thread is
+// prepared: set it before the run.
+int32_t maxps4_fex_engine_set_exit_link_trace(maxps4_fex_engine *engine, uint32_t enabled);
 // The loaded game's imports that neither its modules nor the HLE provide
 // (stubbed, returning 0): one "<library> <NID> <calls>" line each, most
 // called first, as many whole lines as fit. Returns how many there are.
