@@ -4,6 +4,7 @@
 #include "maxps4_app_modules.h"
 #include "maxps4_orbis_v4_execution_gate.h"
 #include <algorithm>
+#include <set>
 #include <map>
 #include <iterator>
 #include <filesystem>
@@ -1381,6 +1382,9 @@ struct maxps4_fex_engine {
     maxps4::PS4Libkernel libkernel{system_memory, &dynamic_ps4};
     maxps4::PS4DynamicLinker linker;
     bool import_probe = false, import_trace = false;
+    // Modules whose exports serve sceKernelDlsym only (variants of one module,
+    // maxps4_app_modules.h): set by load_game around one preparation.
+    std::set<std::string> private_export_modules;
     std::vector<std::string> missing_imports;
     std::vector<std::atomic<uint32_t>> missing_reported;
     fextl::unique_ptr<FEXCore::Context::Context> context;
@@ -1859,7 +1863,7 @@ namespace {
 int orbisInputs(const maxps4_orbis_module* modules, size_t count, bool general,
     std::vector<std::vector<uint8_t>>& plain, std::string& why,
     std::vector<maxps4::OrbisLinker::Input>& inputs, std::vector<maxps4::OrbisLinker::HLE>& hle,
-    std::vector<std::string>* missing = nullptr) {
+    std::vector<std::string>* missing = nullptr, const std::set<std::string>* private_exports = nullptr) {
     for (size_t i=0;i<count;++i) {
         const auto& m = modules[i];
         if (!m.path || !m.bytes || m.dependency_count > 128 ||
@@ -1876,6 +1880,7 @@ int orbisInputs(const maxps4_orbis_module* modules, size_t count, bool general,
             size = plain.back().size();
         }
         maxps4::OrbisLinker::Input in{{{m.path,{}},bytes,size},m.load_bias};
+        in.privateExports = private_exports && private_exports->count(m.path);
         for (size_t j=0;j<m.dependency_count;++j) {
             if (!m.dependencies[j] || ::strnlen(m.dependencies[j],256)>255) return -EINVAL;
             in.file.request.dependencies.emplace_back(m.dependencies[j]);
@@ -1965,7 +1970,7 @@ extern "C" int32_t maxps4_fex_engine_prepare_orbis_general(maxps4_fex_engine* en
         std::string why;
         std::vector<std::string> missing;
         const int collected = orbisInputs(modules,count,true,plain,why,inputs,hle,
-            engine->import_probe ? &missing : nullptr);
+            engine->import_probe ? &missing : nullptr, &engine->private_export_modules);
         if (collected) { message(why); return collected; }
         engine->missing_imports = std::move(missing);
         engine->missing_reported = std::vector<std::atomic<uint32_t>>(engine->missing_imports.size());
@@ -2265,21 +2270,26 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
             if (m.optional && m.metadata.type != 0xfe18) { skipped += " " + m.name + " (not a PRX)"; continue; }
             modules.push_back(std::move(m));
         }
-        // One variant per module name (maxps4_app_modules.h): a root-level file
-        // providing the same module as one already kept is not prepared, and
-        // sceKernelLoadStartModule keeps failing for it, as before.
+        // Variants of one module (maxps4_app_modules.h): when nothing imports
+        // them, every variant is prepared with private exports and the game's
+        // sceKernelLoadStartModule path selects one; otherwise they are not
+        // prepared, and LoadStartModule keeps failing for them, as before.
+        std::set<std::string> private_exports;
         {
             std::vector<maxps4::ModuleIdentity> identities;
             for (const auto& m : modules) {
-                std::string provided;
-                for (const auto& identity : m.metadata.modules) if (identity.exported) { provided = identity.name; break; }
-                identities.push_back({m.name, provided, m.optional});
+                maxps4::ModuleIdentity identity{m.name, {}, m.optional, {}, {}};
+                for (const auto& provided : m.metadata.modules) if (provided.exported) { identity.provided = provided.name; break; }
+                for (const auto& library : m.metadata.libraries)
+                    (library.exported ? identity.exported_libraries : identity.imported_libraries).push_back(library.name);
+                identities.push_back(std::move(identity));
             }
-            const auto duplicates = maxps4::duplicate_providers(identities);
+            const auto decisions = maxps4::choose_modules(identities);
             std::vector<Module> kept;
             kept.reserve(modules.size());
             for (size_t i = 0; i < modules.size(); ++i) {
-                if (!duplicates[i].empty()) { skipped += " " + modules[i].name + " (same module as " + duplicates[i] + ")"; continue; }
+                if (decisions[i].choice == maxps4::ModuleChoice::skip) { skipped += " " + modules[i].name + " (" + decisions[i].reason + ")"; continue; }
+                if (decisions[i].choice == maxps4::ModuleChoice::private_exports) private_exports.insert(modules[i].name);
                 kept.push_back(std::move(modules[i]));
             }
             modules = std::move(kept);
@@ -2326,8 +2336,13 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
                     if (s.type == 1 || s.type == 0x61000010) end = std::max(end, s.address + s.memsz);
                 bias += ((end + 0xfffff) & ~uint64_t{0xfffff}) + 0x100000;
             }
-            return maxps4_fex_engine_prepare_orbis_general(engine, table.data(), table.size(),
-                                                           "eboot.bin", relocation, diagnostic, capacity);
+            // Read once by the next preparation, then cleared: other callers of
+            // prepare_orbis_general never mark a module.
+            engine->private_export_modules = with_optional ? private_exports : std::set<std::string>{};
+            const int32_t status = maxps4_fex_engine_prepare_orbis_general(engine, table.data(), table.size(),
+                                                                           "eboot.bin", relocation, diagnostic, capacity);
+            engine->private_export_modules.clear();
+            return status;
         };
         const bool any_optional = std::any_of(modules.begin(), modules.end(), [](const Module& m) { return m.optional; });
         int32_t prepared = prepare(true);
@@ -2565,6 +2580,11 @@ extern "C" int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint3
     uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected) {
     if (!engine || connected > 1) return -EINVAL;
     return engine->libkernel.pad().update(buttons, {{lx, ly, rx, ry}}, l2, r2, connected != 0);
+}
+extern "C" int32_t maxps4_fex_engine_pad_update_player(maxps4_fex_engine* engine, uint32_t player, uint32_t buttons,
+    uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected) {
+    if (!engine || connected > 1 || player >= maxps4::PS4Pad::players) return -EINVAL;
+    return engine->libkernel.pad().update_player(player, buttons, {{lx, ly, rx, ry}}, l2, r2, connected != 0);
 }
 extern "C" int32_t maxps4_fex_engine_audio_read(maxps4_fex_engine* engine, float* samples, uint32_t frames) {
     if (!engine || !samples || frames > 16384) return -EINVAL;

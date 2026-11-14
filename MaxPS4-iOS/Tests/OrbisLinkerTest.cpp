@@ -4,6 +4,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <fstream>
+#include <set>
 using Linker = maxps4::OrbisLinker;
 using namespace orbis_fixture;
 static size_t checks = 0;
@@ -43,6 +44,33 @@ int main(int argc, char** argv) {
     consumer[0x601+std::string("FixtureLibrary").size()+1+std::string("FixtureModule").size()+1] = 'B';
     reject(batch(),"unresolved NID"); consumer=original;
     auto duplicate = batch(); duplicate.push_back(input("duplicate.prx",provider,0x300000,{})); reject(duplicate,"duplicate or ambiguous export");
+    {
+        // Private exports (variants loaded by path, reached through Dlsym only):
+        // the copy links, the NID import still binds to the public provider,
+        // and each module publishes its own addresses for Dlsym.
+        auto variant = duplicate; variant[2].privateExports = true;
+        Linker::Image both; std::string why;
+        check(Linker::link(variant,{},both,why),why.c_str());
+        check(value(both,0x102000)==0x201000,"import binds the public provider, not the private variant");
+        size_t provider_index = SIZE_MAX, private_index = SIZE_MAX;
+        for (size_t m = 0; m < both.modules.size(); ++m) {
+            if (both.modules[m].path=="provider.prx") provider_index = m;
+            if (both.modules[m].path=="duplicate.prx") private_index = m;
+        }
+        std::set<uint64_t> public_addresses, private_addresses; std::set<std::string> public_nids, private_nids;
+        for (const auto& e : both.exported) {
+            if (e.module==provider_index) { public_addresses.insert(e.address); public_nids.insert(e.nid); }
+            if (e.module==private_index) { private_addresses.insert(e.address); private_nids.insert(e.nid); }
+        }
+        check(!private_nids.empty() && private_nids==public_nids,"private variant publishes the same NIDs for Dlsym");
+        bool distinct = true; for (auto a : private_addresses) distinct = distinct && !public_addresses.count(a) && a >= 0x300000;
+        check(distinct,"private variant addresses are its own");
+        // Private exports never satisfy a NID import: an import served only by
+        // private modules stays unresolved.
+        auto hidden = batch(); hidden[1].privateExports = true; reject(hidden,"unresolved NID");
+        // Without the flag, the same pair is still refused.
+        reject(duplicate,"duplicate or ambiguous export");
+    }
     auto cycle = batch(); cycle[1].file.request.dependencies={"app.elf"}; reject(cycle,"circulaire");
     auto missing = batch(); missing[0].file.request.dependencies={"absent.prx"}; reject(missing,"manquante");
     auto undeclared = batch(); undeclared[0].file.request.dependencies.clear(); reject(undeclared,"missing explicit dependency");

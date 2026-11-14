@@ -113,6 +113,12 @@ int32_t maxps4_fex_engine_gnm_software_status(maxps4_fex_engine* engine, uint32_
 void maxps4_fex_engine_pad_latency(maxps4_fex_engine* engine, uint64_t* reads, uint64_t* total_us, uint64_t* most_us);
 int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint32_t buttons,
     uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected);
+// Local multiplayer: the same for player 0..3 (PS4 user 1..4; player 0 is
+// pad_update). A player above 0 logs in on its first connected report and then
+// appears in sceUserServiceGetLoginUserIdList; it stays logged in when its
+// controller disconnects (connected 0), and keeps its pad handle.
+int32_t maxps4_fex_engine_pad_update_player(maxps4_fex_engine* engine, uint32_t player, uint32_t buttons,
+    uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected);
 // Concurrent host audio: mixes up to `frames` 48 kHz interleaved stereo float
 // frames of the game's AudioOut ports into `samples` (zeros where none).
 // Returns the frames that had data, or -EINVAL. Same ownership rule as
