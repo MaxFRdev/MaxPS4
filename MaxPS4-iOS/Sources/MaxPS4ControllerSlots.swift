@@ -58,6 +58,11 @@ struct MaxPS4InputRoute<Key: Hashable>: Equatable {
     // nil: no player 2 (its controller, if it had one, is reported disconnected).
     var player2: MaxPS4InputSources<Key>?
 
+    // The player the touch controls belong to (0 or 1), nil when nobody's.
+    // Every immediate touch update must go to this player only: in hybrid mode
+    // that is player 2, never player 1.
+    var touchPlayer: Int? { player1.touch ? 0 : player2?.touch == true ? 1 : nil }
+
     // `connected`: controllers present now, in iOS order; `slots` keeps their
     // players stable across calls (sized with mode.controllerPlayers).
     static func route(mode: MaxPS4PadMode, connected: [Key], slots: inout MaxPS4ControllerSlots<Key>) -> Self {
