@@ -55,6 +55,54 @@ struct ControllerSlotsTest {
         solo.update(connected: ["A", "B"])
         check(solo.player(of: "A") == 0 && solo.player(of: "B") == nil, "one player")
 
-        print("PASS controller slots: none, one, two, order, extra, disconnect, reconnect, solo")
+        // Routing per mode (MaxPS4InputRoute): which sources drive each player.
+        typealias Route = MaxPS4InputRoute<String>
+        var routing = MaxPS4ControllerSlots<String>(players: 1)
+
+        // Solo: touch and every controller on player 1, no player 2 (unchanged).
+        var r = Route.route(mode: .solo, connected: ["A", "B"], slots: &routing)
+        check(r.player1.touch && r.player1.controllers == ["A", "B"] && r.player2 == nil, "solo")
+        r = Route.route(mode: .solo, connected: [], slots: &routing)
+        check(r.player1.touch && r.player1.controllers.isEmpty && r.player2 == nil, "solo without controller")
+
+        // Hybrid: controller 1 only on player 1 (never touch), touch only on player 2.
+        r = Route.route(mode: .hybrid, connected: ["A"], slots: &routing)
+        check(!r.player1.touch && r.player1.controllers == ["A"], "hybrid player 1 is the controller")
+        check(r.player2 == MaxPS4InputSources(touch: true, controllers: []), "hybrid player 2 is touch only")
+        // A second controller in hybrid mode drives nobody (never merged).
+        r = Route.route(mode: .hybrid, connected: ["A", "B"], slots: &routing)
+        check(r.player1.controllers == ["A"] && r.player2?.controllers == [] && r.player2?.touch == true, "hybrid extra controller ignored")
+        // No controller: player 1 has no source (idle), player 2 still touch.
+        r = Route.route(mode: .hybrid, connected: [], slots: &routing)
+        check(r.player1.isEmpty && r.player2?.touch == true, "hybrid without controller")
+        // The controller reconnects (new object): player 1 again.
+        r = Route.route(mode: .hybrid, connected: ["A2"], slots: &routing)
+        check(r.player1.controllers == ["A2"] && !r.player1.touch, "hybrid reconnect")
+
+        // Two controllers: one per player, touch with player 1.
+        r = Route.route(mode: .twoControllers, connected: ["A2", "B"], slots: &routing)
+        check(r.player1.touch && r.player1.controllers == ["A2"] && r.player2 == MaxPS4InputSources(touch: false, controllers: ["B"]), "two controllers")
+        r = Route.route(mode: .twoControllers, connected: ["A2"], slots: &routing)
+        check(r.player2 == nil, "two controllers, player 2 gone")
+
+        // Mode changes in a session: two controllers -> hybrid -> solo.
+        r = Route.route(mode: .twoControllers, connected: ["A2", "B"], slots: &routing)
+        r = Route.route(mode: .hybrid, connected: ["A2", "B"], slots: &routing)
+        check(r.player1.controllers.count == 1 && !r.player1.touch && r.player2?.touch == true && r.player2?.controllers == [], "to hybrid")
+        r = Route.route(mode: .solo, connected: ["A2", "B"], slots: &routing)
+        check(r.player2 == nil && r.player1.touch && r.player1.controllers == ["A2", "B"], "back to solo")
+
+        // No source ever appears on both players, in any mode.
+        for mode in MaxPS4PadMode.allCases {
+            for connected in [[], ["A"], ["A", "B"], ["A", "B", "C"]] {
+                let route = Route.route(mode: mode, connected: connected, slots: &routing)
+                let p2 = route.player2 ?? MaxPS4InputSources()
+                check(!(route.player1.touch && p2.touch), "touch on one player only (\(mode))")
+                check(Set(route.player1.controllers).isDisjoint(with: p2.controllers), "controller on one player only (\(mode))")
+            }
+        }
+        check(MaxPS4PadMode(stored: "unknown") == .solo && MaxPS4PadMode(stored: "hybrid") == .hybrid, "stored mode")
+
+        print("PASS controller slots: none, one, two, order, extra, disconnect, reconnect, solo; routes: solo, hybrid, two controllers, mode changes, no mixing")
     }
 }
