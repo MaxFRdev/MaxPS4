@@ -119,6 +119,17 @@ int32_t maxps4_fex_engine_pad_update(maxps4_fex_engine* engine, uint32_t buttons
 // controller disconnects (connected 0), and keeps its pad handle.
 int32_t maxps4_fex_engine_pad_update_player(maxps4_fex_engine* engine, uint32_t player, uint32_t buttons,
     uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2, uint32_t connected);
+// Session report: player 0..3's virtual pad (PS4 user player + 1): logged in,
+// controller connected, the scePad handle the game opened for that user (0:
+// none), the buttons it would read now, and how many reads the game made.
+typedef struct {
+    uint32_t logged_in, connected;
+    int32_t handle;
+    uint32_t buttons;
+    uint64_t reads;
+    uint32_t connections;
+} maxps4_pad_player_status;
+int32_t maxps4_fex_engine_pad_status(maxps4_fex_engine* engine, uint32_t player, maxps4_pad_player_status* status);
 // Concurrent host audio: mixes up to `frames` 48 kHz interleaved stereo float
 // frames of the game's AudioOut ports into `samples` (zeros where none).
 // Returns the frames that had data, or -EINVAL. Same ownership rule as

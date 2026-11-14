@@ -83,6 +83,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var pad = MaxPS4PadState()
     // Local multiplayer: player 2's controller (nil: none). Under inputLock.
     private var pad2: MaxPS4PadState?, pad2Reported = false
+    // Input routing for the report (changes only): the mode and each player's
+    // sources, and immediate touch updates sent to player 1 / player 2.
+    private var routing = "", touchSends = [0, 0]
     private var lastBeat = "" // The last heartbeat() text, under lock.
     // Where the run or its stop is, for the next session's loading screen.
     private let stageLock = NSLock()
@@ -167,7 +170,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let missing = missingImports(engine)
         let compatibility = missing.called.isEmpty ? "" : "Fonctions PS4 manquantes appelées : \(missing.called.count) sur \(missing.total) absentes · "
             + missing.called.prefix(5).joined(separator: " · ") + "\n"
-        let text = compatibility + inputDelays(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
+        let text = compatibility + inputDelays(engine) + padPlayers(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
         if let liveReport {
             MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
@@ -341,6 +344,28 @@ final class MaxPS4GameSource: @unchecked Sendable {
     // How long presses took: iOS to the app, the app to the game's read.
     func touchArrived(_ seconds: TimeInterval) {
         inputLock.lock(); touchesArrived += 1; touchSeconds += seconds; inputLock.unlock()
+    }
+    // Called by the game view when the mode or a player's controller changes
+    // (not per poll), and for each immediate touch update with its player.
+    func setInputRouting(_ text: String) { inputLock.lock(); routing = text; inputLock.unlock() }
+    func noteTouch(player: Int) {
+        inputLock.lock(); if touchSends.indices.contains(player) { touchSends[player] += 1 }; inputLock.unlock()
+    }
+    // Each logged-in PS4 user's virtual pad: the handle the game opened for it
+    // and how often the game read it (does the game read player 2 at all?).
+    private func padPlayers(_ engine: OpaquePointer) -> String {
+        inputLock.lock(); let route = routing, sends = touchSends; inputLock.unlock()
+        var players: [String] = []
+        for player in 0..<4 {
+            var status = maxps4_pad_player_status()
+            guard maxps4_fex_engine_pad_status(engine, UInt32(player), &status) == 0, status.logged_in != 0 else { continue }
+            players.append("J\(player + 1) " + (status.connected != 0 ? "connecté" : "déconnecté")
+                + (status.handle > 0 ? " · handle \(status.handle) · \(status.reads) lectures" : " · non ouvert par le jeu")
+                + String(format: " · boutons 0x%x", status.buttons))
+        }
+        guard players.count > 1 || !route.isEmpty else { return "" }
+        return "Joueurs : " + (route.isEmpty ? "" : route + " · ") + "tactile vers J1 \(sends[0]), vers J2 \(sends[1])\n"
+            + "Manettes PS4 : " + players.joined(separator: " | ") + "\n"
     }
     private func inputDelays(_ engine: OpaquePointer) -> String {
         var count: UInt64 = 0, total: UInt64 = 0, most: UInt64 = 0
@@ -665,6 +690,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
     }
     func input(_ pad: MaxPS4PadState) { worker?.input(pad) }
     func inputPlayer2(_ state: MaxPS4PadState?) { worker?.inputPlayer2(state) }
+    func setInputRouting(_ text: String) { worker?.setInputRouting(text) }
+    func noteTouch(player: Int) { worker?.noteTouch(player: player) }
     func touchArrived(_ seconds: TimeInterval) { worker?.touchArrived(seconds) }
     func presented(_ text: String) { if running { hasPresented = true; report = text } }
     func failed(_ text: String) { stop(); stopping = nil; report = text }
