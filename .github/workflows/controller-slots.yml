@@ -1,0 +1,24 @@
+name: Local multiplayer controller slots
+on:
+  pull_request:
+    paths:
+      - 'MaxPS4-iOS/Sources/MaxPS4ControllerSlots.swift'
+      - 'MaxPS4-iOS/Tests/ControllerSlotsTest.swift'
+      - '.github/workflows/controller-slots.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  slots:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run controller slot tests
+        run: |
+          set -euo pipefail
+          swiftc -parse-as-library \
+            MaxPS4-iOS/Sources/MaxPS4ControllerSlots.swift \
+            MaxPS4-iOS/Tests/ControllerSlotsTest.swift \
+            -o "$RUNNER_TEMP/controller-slots-test"
+          "$RUNNER_TEMP/controller-slots-test"

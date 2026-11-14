@@ -86,5 +86,28 @@ int main() {
            (results[1] == 0 && results[0] == PS4UserService::error(7)));
     users.reset();
     assert(users.initialize(0) == 0 && users.event(output) == 0);
+    {
+        // Local multiplayer: users 2..4 come from the logged-in pad players.
+        PS4UserService local(memory);
+        assert(local.initialize(0) == 0);
+        assert(local.login_users(output, 0b11) == 0 && read(output, 4) == 1 && read(output + 4, 4) == 2 &&
+               read(output + 8, 4) == UINT32_MAX && read(output + 12, 4) == UINT32_MAX);
+        assert(local.login_users(output, 0b1010) == 0 && read(output, 4) == 1 && read(output + 4, 4) == 2 &&
+               read(output + 8, 4) == 4 && read(output + 12, 4) == UINT32_MAX);    // user 1 always listed
+        assert(local.login_users(output) == 0 && read(output, 4) == 1 && read(output + 4, 4) == UINT32_MAX);
+        // LOGIN events: user 1, then user 2 once its controller logged it in.
+        assert(local.event(output, 1) == 0 && read(output + 4, 4) == 1);
+        assert(local.event(output, 1) == PS4UserService::error(7));
+        assert(local.event(output, 0b11) == 0 && read(output, 4) == 0 && read(output + 4, 4) == 2);
+        assert(local.event(output, 0b11) == PS4UserService::error(7));                 // once per user
+        assert(memory.write(name, sentinel, sizeof(sentinel)));
+        assert(local.user_name(2, name, 16, 0b11) == 0);
+        char second_name[16]{}; assert(memory.read(name, second_name, 9) && std::strcmp(second_name, "MaxPS4 2") == 0);
+        assert(local.user_name(2, name, 8, 0b11) == PS4UserService::error(10));
+        assert(local.user_name(2, name, 16, 0b1) == PS4UserService::error(9));       // not logged in
+        assert(local.user_name(5, name, 16, 0b1111) == PS4UserService::error(9));
+        local.reset(); assert(local.initialize(0) == 0 && local.event(output, 0b11) == 0 && read(output + 4, 4) == 1);
+        assert(local.event(output, 0b11) == 0 && read(output + 4, 4) == 2);           // re-announced after reset
+    }
     std::puts("PASS local UserService: lifecycle, user/list/name/event ABI, invalid memory, per-engine isolation and concurrent consumers");
 }

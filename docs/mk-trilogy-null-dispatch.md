@@ -358,3 +358,40 @@ Limits:
 - eboot imports exported by root-level modules (Party, PlayFab) now resolve to
   those modules instead of import-probe stubs;
 - the guest image grows (CUSA53178: about 94 MB validated instead of 21 MB).
+
+## Step 6: every libmipsaot variant, selected by the game's path
+
+MK Legacy Kollection ships one `libmipsaot-*.prx` per PS1 title. Both provide
+module `libmipsaot` with the same exports. The eboot loads the one it needs
+with its full path (`/app0/libmipsaot-SLUS00330_TRILOGY.EXE_ps4.prx` or
+`/app0/libmipsaot-SLUS00824_ps4.prx`) and reaches it only through
+`sceKernelDlsym`. No module imports `libmipsaot` or `pancake_libretro_ps4` by
+NID.
+
+- `OrbisLinker::Input::privateExports`:
+  - the module's exports are published per module (`Image::exported`, used
+    by Dlsym) but are left out of the NID import table;
+  - the duplicate-export check still applies to every other module;
+  - an import served only by private modules stays unresolved.
+- `choose_modules` (`maxps4_app_modules.h`):
+  - optional modules that provide the same module are all prepared with
+    private exports when no other module imports one of their libraries;
+  - otherwise none of them is prepared;
+  - a root-level file never replaces a required module.
+- The HLE `sceKernelLoadStartModule` is unchanged. The file name in the
+  game's path selects the variant's handle, and Dlsym on that handle returns
+  that variant's addresses.
+
+Local static check of the 11 modules of CUSA53178 (analyzer with the flag set):
+
+- 96063/96063 relocations applied, 2295/2295 NID imports resolved;
+- each `libmipsaot` publishes its 9 exports at its own base (0x4600000 and
+  0x4c00000).
+
+Not verified yet:
+
+- that MK Trilogy still runs with both variants present (larger image, both
+  `module_start` run at boot);
+- that SLUS00824 runs at all.
+
+Both need an iPhone test.
