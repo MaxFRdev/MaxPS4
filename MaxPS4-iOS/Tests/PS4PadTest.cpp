@@ -113,5 +113,41 @@ int main() {
         multi.reset(); assert(multi.logged_in_users() == 1 && multi.initialize() == 0);
         assert(multi.read(p1,output,1,true) == PS4Pad::error(3) && multi.open(2,0,0,0) == ps4::signed32(0x809b0081U));
     }
+    {
+        // Hybrid mode (controller = player 1, touch = player 2) and mode
+        // changes, as the iOS side drives them: player 2 is reported connected
+        // with the touch state, and disconnected when the mode leaves hybrid.
+        PS4Pad hybrid(memory);
+        assert(hybrid.initialize() == 0);
+        const int32_t h1 = int32_t(hybrid.open(1,0,0,0));
+        // Entering hybrid: player 2 (touch) reported connected, idle.
+        assert(hybrid.update_player(1,0,{{128,128,128,128}},0,0,true) == 0 && hybrid.logged_in_users() == 3);
+        const int32_t h2 = int32_t(hybrid.open(2,0,0,0)); assert(h2 > 0 && h2 != h1);
+        // Controller presses cross, touch holds circle + left, both at once.
+        assert(hybrid.update(0x4000,{{128,128,128,128}},0,0,true) == 0);
+        assert(hybrid.update_player(1,0x2000 | 0x80,{{0,128,128,128}},0,0,true) == 0);
+        uint8_t a[120]{}, b[120]{};
+        assert(hybrid.read(h1,output,1,true) == 0 && memory.read(output,a,120));
+        assert(hybrid.read(h2,output+0x100,1,true) == 0 && memory.read(output+0x100,b,120));
+        assert(ps4::get_le(a,4) == 0x4000 && ps4::get_le(b,4) == (0x2000 | 0x80) && b[4] == 0 && a[4] == 128);
+        // Held touch buttons stay pressed across reads (no auto-release).
+        assert(hybrid.read(h2,output+0x100,1,true) == 0 && memory.read(output+0x100,b,120) && ps4::get_le(b,4) == (0x2000 | 0x80));
+        // A touch press released before the game read it is still reported once...
+        assert(hybrid.update_player(1,0x1000,{{128,128,128,128}},0,0,true) == 0);
+        assert(hybrid.update_player(1,0,{{128,128,128,128}},0,0,true) == 0);
+        assert(hybrid.read(h2,output+0x100,1,true) == 0 && memory.read(output+0x100,b,120) && (ps4::get_le(b,4) & 0x1000));
+        // ...but switching to Solo (player 2 disconnected) drops an unread
+        // press: nothing surfaces after the next return to hybrid.
+        assert(hybrid.update_player(1,0x8000,{{128,128,128,128}},0,0,true) == 0);
+        assert(hybrid.update_player(1,0,{{128,128,128,128}},0,0,false) == 0);   // mode -> Solo
+        assert(hybrid.read(h2,output+0x100,1,true) == 0 && memory.read(output+0x100,b,120) && ps4::get_le(b,4) == 0 && b[76] == 0);
+        assert(hybrid.update_player(1,0x8000,{{128,128,128,128}},0,0,true) == 0); // pressed again...
+        assert(hybrid.update_player(1,0,{{128,128,128,128}},0,0,false) == 0);     // ...then Solo before any read
+        assert(hybrid.update_player(1,0,{{128,128,128,128}},0,0,true) == 0);      // back to hybrid, idle
+        assert(hybrid.read(h2,output+0x100,1,true) == 0 && memory.read(output+0x100,b,120));
+        assert(ps4::get_le(b,4) == 0 && b[76] == 1 && hybrid.get_handle(2,0,0) == h2);
+        // Player 1 never saw any of player 2's buttons.
+        assert(hybrid.read(h1,output,1,true) == 0 && memory.read(output,a,120) && ps4::get_le(a,4) == 0x4000);
+    }
     std::puts("PASS PS4 Pad lifecycle, wire layout, host input, disconnect, concurrency, stale handles and local multiplayer");
 }

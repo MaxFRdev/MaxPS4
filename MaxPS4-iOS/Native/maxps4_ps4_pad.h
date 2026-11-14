@@ -103,6 +103,10 @@ public:
         if (buttons & ~s.buttons && !s.pressed_at) s.pressed_at = now_us();
         s.unread |= buttons & ~s.buttons;
         s.tapped |= s.buttons & ~buttons & s.unread; s.unread &= buttons;
+        // A disconnection (or a mode change that takes the player's input away)
+        // drops presses the game has not read yet: none may surface later, on
+        // a reconnection.
+        if (!connected) { s.unread = s.tapped = 0; s.pressed_at = 0; }
         s.connected = connected; s.buttons = buttons;
         s.axes = axes; s.l2 = l2; s.r2 = r2; return 0;
     }
