@@ -2,13 +2,9 @@ name: MaxPS4 FEXCore SideStore IPA
 on:
   workflow_dispatch:
   push:
-    branches: ['codex/ps4-memory-translation-contract', 'integration/ps4-fex-orbis-pkg-validation']
-    paths:
-      - 'MaxPS4-iOS/**'
-      - 'scripts/*fexcore*'
-      - 'scripts/run-bounded.py'
-      - 'cmake/FEXCoreIOSLinkage.cmake'
-      - '.github/workflows/fexcore-app.yml'
+    # Always publish a SideStore IPA for commits merged or pushed to main.
+    # Keep the existing path filter only for pull requests.
+    branches: ['main', 'codex/ps4-memory-translation-contract', 'integration/ps4-fex-orbis-pkg-validation']
   pull_request:
     paths:
       - 'MaxPS4-iOS/**'
