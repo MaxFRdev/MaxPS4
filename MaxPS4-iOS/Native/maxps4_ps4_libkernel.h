@@ -123,7 +123,9 @@ enum class PS4KernelService : uint32_t {
     gnm_dispatch_indirect_mec, thread_getname,
     trophy_game_info, trophy_group_info, trophy_unlock_state, rtc_time_t,
     attr_getschedparam, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_post, uuid_create,
-    net_pton, net_ntop
+    net_pton, net_ntop,
+    // Engine-internal startup observation; no guest NID is exported.
+    module_start_status
 };
 // Token bit of a trampoline whose function follows the POSIX convention: -1
 // with the error in the calling thread's errno (__Error) instead of an Orbis

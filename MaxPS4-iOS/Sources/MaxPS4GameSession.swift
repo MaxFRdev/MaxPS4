@@ -168,6 +168,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
         _ = maxps4_fex_engine_thread_activity(engine, &activity, activity.count)
         inputLock.lock(); let sent = vblanksSent; inputLock.unlock()
         let missing = missingImports(engine)
+        let moduleStarts = moduleStartResults(engine)
+        let loadDiagnostics = gameLoadDiagnostics(engine)
         let compatibility = missing.called.isEmpty ? "" : "Fonctions PS4 manquantes appelées : \(missing.called.count) sur \(missing.total) absentes · "
             + missing.called.prefix(5).joined(separator: " · ") + "\n"
         let text = compatibility + inputDelays(engine) + padPlayers(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
@@ -176,6 +178,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
             MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
                 + "\nFichiers ouverts par le jeu :\n" + openedFiles(engine)
                 + "\nDerniers appels PS4 :\n" + recentCalls(engine)
+                + "\nDerniers appels PS4 réussis :\n" + successfulCalls(engine)
+                + "\nRésultats module_start des PRX :\n" + moduleStarts
+                + "\nDiagnostics de chargement ELF/PRX :\n" + loadDiagnostics
                 + "\n" + memoryLayout(engine) + "\n\n" + (bridge?.report ?? "Metal : pas encore de rendu")
                 + "\n\n" + folderListing, to: liveReport)
         }
@@ -211,6 +216,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private func recentCalls(_ engine: OpaquePointer) -> String {
         var text = [CChar](repeating: 0, count: 32768)
         return maxps4_fex_engine_recent_calls(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
+    }
+    private func successfulCalls(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 16384)
+        return maxps4_fex_engine_successful_calls(engine, &text, text.count) > 0 ? String(cString: text) : "aucun"
     }
     // The last calls that returned an error: what MaxPS4 refused the game.
     private func failedCalls(_ engine: OpaquePointer) -> String {
@@ -264,6 +273,21 @@ final class MaxPS4GameSource: @unchecked Sendable {
             return "\(parts[0]) \(parts[1]) (\(calls) appels)"
         }
         return (called, max(0, Int(total)))
+    }
+    private func moduleStartResults(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 32768)
+        let count = maxps4_fex_engine_module_start_results(engine, &text, text.count)
+        return count > 0 ? String(cString: text) : "aucun PRX initialisé"
+    }
+    private func gameLoadDiagnostics(_ engine: OpaquePointer) -> String {
+        var text = [CChar](repeating: 0, count: 8192)
+        let count = maxps4_fex_engine_load_diagnostics(engine, &text, text.count)
+        return count > 0 ? String(cString: text) : "aucun module facultatif ignoré"
+    }
+    private func videoOutCounters(_ engine: OpaquePointer) -> String {
+        lock.lock(); let ticket = lastTicket, shown = displayed; lock.unlock()
+        inputLock.lock(); let sent = vblanksSent; inputLock.unlock()
+        return "VideoOut : demandées \(maxps4_fex_engine_videoout_requested(engine)) · dernier ticket \(ticket) · affichées \(shown) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank \(sent)"
     }
     // Since the previous heartbeat: images the game asked to flip, images the
     // host displayed, and the share of the time its thread spent in Metal
@@ -580,6 +604,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
             _ = maxps4_fex_engine_last_guest_fault(opened, &fault)
             let relativeRIP = fault.rip >= relocation ? fault.rip - relocation : fault.rip
             let missing = missingImports(opened)
+            let moduleStarts = moduleStartResults(opened)
             let crashed = !wasStopped && (ran != 0 || fault.signal != 0)
             // The last live report, not a new one: reading the engine now would
             // sample the main guest thread, which is this very thread.
@@ -587,11 +612,15 @@ final class MaxPS4GameSource: @unchecked Sendable {
             let metalReport = metal.report + (frameTiming ? "\n" + metal.frameTimingReport : "")
             defer {
                 let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP),
+                            videoOutCounters(opened),
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
                             missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
+                            "Résultats module_start des PRX :", moduleStarts, "",
+                            "Diagnostics de chargement ELF/PRX :", gameLoadDiagnostics(opened), "",
                             "Derniers appels PS4 en échec :", failedCalls(opened), "",
                             "Fichiers ouverts par le jeu :", openedFiles(opened), "",
                             "Derniers appels PS4 :", recentCalls(opened), "",
+                            "Derniers appels PS4 réussis :", successfulCalls(opened), "",
                             "Sortie du jeu :", console(opened), "", memoryLayout(opened), movedMappings(opened), "", live, "", folderListing].joined(separator: "\n")
                 outcome = Outcome(missing: missing.called, crashed: crashed, report: MaxPS4Reports.save(text, for: url))
                 // The run ended normally: its final report replaces the live one.
@@ -613,7 +642,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
             // 0x4d50 (maxps4_dispatch_fault.h): FEX could not compile the guest block at RIP.
             let uncompilable = fault.code == 0x4d50
                 ? "\nInstruction x86 non prise en charge par FEX à RIP 0x\(String(fault.rip, radix: 16)) : octets dans Documents/maxps4-fatal-fault.txt." : ""
-            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\(uncompilable)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16))."
+            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\(uncompilable)\nPremière faute invitée FEX : signal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16))."
     }
     private func failure(_ text: String, _ code: Int32) -> NSError {
         NSError(domain: "MaxPS4.Game", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "\(text) (\(code))"])

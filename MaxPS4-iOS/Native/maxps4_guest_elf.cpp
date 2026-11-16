@@ -87,6 +87,7 @@ void GuestELF::clear() {
     hle_data.clear();
     process_param_address = 0;
     records.clear();
+    module_start_names_.clear();
     tls_blocks.clear();
     blockers = 0;
     regions.clear();
@@ -330,6 +331,19 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
                 highest = std::max(highest, module.bias + segment.header.address + segment.header.memorySize);
         }
         if (!entry) return fail(-ENOEXEC, "root has no process entry");
+        module_start_names_.clear();
+        module_start_names_.reserve(copy.initializers.size());
+        for (const auto initializer : copy.initializers) {
+            const auto module = std::find_if(copy.modules.begin(), copy.modules.end(), [&](const auto& candidate) {
+                return std::any_of(candidate.image.segments.begin(), candidate.image.segments.end(), [&](const auto& segment) {
+                    if (!(segment.header.flags & 1U)) return false;
+                    const uint64_t begin = candidate.bias + segment.header.address;
+                    return initializer >= begin && initializer - begin < segment.header.fileSize;
+                });
+            });
+            if (module == copy.modules.end()) return fail(-ENOEXEC, "module_start address has no owning PRX");
+            module_start_names_.push_back(module->path);
+        }
         const long host_page = ::sysconf(_SC_PAGESIZE);
         if (host_page <= 0) return fail(-EIO, "host page size unavailable");
         const uint64_t page = static_cast<uint64_t>(host_page);
@@ -348,8 +362,8 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
         // a failing initializer exits the guest before the process entry. The
         // older bounded demonstration has no process-exit HLE and keeps its
         // original 11-byte call sequence.
-        const uint64_t call_block = mapped_identity ? 19 : 11;
-        constexpr uint64_t entry_block = 34, failure_block = 7, exit_block = 14, return_block = 14;
+        const uint64_t call_block = mapped_identity ? 33 : 11;
+        constexpr uint64_t entry_block = 34, failure_block = 7, exit_block = 14, return_block = 14, status_thunk_block = 11;
         uint64_t start = entry;
         size_t stub_module = SIZE_MAX, entry_at = 0;
         if (!copy.initializers.empty() || mapped_identity) {
@@ -357,7 +371,11 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
             entry_at = static_cast<size_t>(call_block * copy.initializers.size());
             const size_t failure_at = entry_at + entry_block;
             const size_t exit_at = failure_at + (mapped_identity ? failure_block : 0);
-            const uint64_t size = entry_at + (mapped_identity ? entry_block + failure_block + exit_block + return_block : 5);
+            const size_t return_at = exit_at + (mapped_identity ? exit_block : 0);
+            const size_t status_at = return_at + (mapped_identity ? return_block : 0);
+            const bool has_status_thunk = mapped_identity && !copy.initializers.empty();
+            const uint64_t size = entry_at + (mapped_identity ? entry_block + failure_block + exit_block + return_block +
+                (has_status_thunk ? status_thunk_block : 0) : 5);
             if (start > (uint64_t{1} << 47) - size) return fail(-E2BIG, "startup stub outside user range");
             std::vector<uint8_t> stub(static_cast<size_t>(size));
             auto branch = [&](size_t at, uint8_t opcode, uint64_t target) {
@@ -380,8 +398,13 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
                 std::copy(std::begin(zero), std::end(zero), stub.begin() + at);
                 if (!branch(at + 6, 0xe8, copy.initializers[k])) return fail(-EOVERFLOW, "module_start CALL displacement overflow");
                 if (mapped_identity) {
-                    stub[at + 11] = 0x85; stub[at + 12] = 0xc0; // TEST EAX,EAX
-                    if (!conditionalBranch(at + 13, start + failure_at))
+                    const uint8_t preserveAndArgs[] = {0x89,0xc2, 0x89,0xc6, 0xbf,
+                        uint8_t(k),uint8_t(k>>8),uint8_t(k>>16),uint8_t(k>>24)}; // EDX=status, RSI=status, EDI=index
+                    std::copy(std::begin(preserveAndArgs), std::end(preserveAndArgs), stub.begin() + at + 11);
+                    if (!branch(at + 20, 0xe8, start + status_at))
+                        return fail(-EOVERFLOW, "module_start result callback overflow");
+                    stub[at + 25] = 0x85; stub[at + 26] = 0xd2; // TEST EDX,EDX
+                    if (!conditionalBranch(at + 27, start + failure_at))
                         return fail(-EOVERFLOW, "module_start status branch overflow");
                 }
             }
@@ -395,7 +418,7 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
                 jump = entry_at + sizeof(enter);
                 // A negative module_start result is passed to process_exit and
                 // stops startup before the application's entrypoint.
-                const uint8_t failed[] = {0x89,0xc7}; // MOV EDI,EAX
+                const uint8_t failed[] = {0x89,0xd7}; // MOV EDI,EDX
                 std::copy(std::begin(failed), std::end(failed), stub.begin() + failure_at);
                 if (!branch(failure_at + sizeof(failed), 0xe9, start + exit_at))
                     return fail(-EOVERFLOW, "module_start failure exit branch overflow");
@@ -413,6 +436,14 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
                 const size_t back_at = exit_at + exit_block;
                 std::copy(std::begin(back), std::end(back), stub.begin() + back_at);
                 copy.thunks.push_back({start + back_at, ends});
+                if (has_status_thunk) {
+                    const uint32_t statusToken = static_cast<uint32_t>(PS4KernelService::module_start_status);
+                    const uint8_t statusThunk[] = {0x49,0x89,0xca, 0xb8,uint8_t(statusToken),uint8_t(statusToken>>8),
+                        uint8_t(statusToken>>16),uint8_t(statusToken>>24), 0x0f,0x05,0xc3};
+                    static_assert(sizeof(statusThunk) == status_thunk_block, "module_start status thunk layout");
+                    std::copy(std::begin(statusThunk), std::end(statusThunk), stub.begin() + status_at);
+                    copy.thunks.push_back({start + status_at, statusToken});
+                }
             }
             if (!branch(jump, 0xe9, entry))
                 return fail(-EOVERFLOW, "entry JMP displacement overflow");
