@@ -148,6 +148,49 @@ static int animatedGuestTest() {
     std::puts("PASS guest x86-64 autonomous sprite animation and collision across 20 real FEX frames");
     return 0;
 }
+static int gameLoadDiagnosticsTest() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("maxps4-load-diagnostics-" + std::to_string(::getpid()));
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    std::filesystem::create_directories(directory);
+    struct RemoveDirectory {
+        std::filesystem::path path;
+        ~RemoveDirectory() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } cleanup{directory};
+
+    maxps4_fex_engine* engine = nullptr;
+    CHECK(maxps4_fex_engine_open(&engine) == 0);
+    struct Close { maxps4_fex_engine* p; ~Close() { maxps4_fex_engine_close(p); } } close{engine};
+    uint64_t relocation = 0;
+    char diagnostic[1024]{};
+    const auto executable = directory / "eboot.bin";
+    const auto optionalModule = directory / "optional.prx";
+    {
+        std::ofstream malformed(optionalModule, std::ios::binary);
+        malformed.put('x');
+        CHECK(bool(malformed));
+    }
+    CHECK(maxps4_fex_engine_load_game(engine, directory.string().c_str(), &relocation,
+                                       diagnostic, sizeof(diagnostic)) == -ENOENT);
+    CHECK(std::strstr(diagnostic, executable.string().c_str()) && std::strstr(diagnostic, "open"));
+    char loadDiagnostics[1024]{};
+    CHECK(maxps4_fex_engine_load_diagnostics(engine, loadDiagnostics, sizeof(loadDiagnostics)) == 1 &&
+          std::strstr(loadDiagnostics, optionalModule.string().c_str()) && std::strstr(loadDiagnostics, "parse"));
+
+    std::filesystem::remove(optionalModule);
+    {
+        std::ofstream malformed(executable, std::ios::binary);
+        malformed.put('x');
+        CHECK(bool(malformed));
+    }
+    diagnostic[0] = 0;
+    CHECK(maxps4_fex_engine_load_game(engine, directory.string().c_str(), &relocation,
+                                       diagnostic, sizeof(diagnostic)) == -ENOEXEC);
+    CHECK(std::strstr(diagnostic, executable.string().c_str()) && std::strstr(diagnostic, "parse"));
+    std::puts("PASS game load diagnostics identify the missing or malformed eboot.bin path and stage");
+    return 0;
+}
 int main(int argc, char** argv) {
     using namespace ps4_linked_test;
     // CI logs go to a file: keep every line written before a crash or a kill.
@@ -210,6 +253,7 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
+    CHECK(gameLoadDiagnosticsTest() == 0);
     CHECK(playableTest()==0);
     CHECK(animatedGuestTest()==0);
     CHECK(maxps4_fex_test_ps4_libkernel(nullptr) == -EINVAL);
@@ -507,6 +551,9 @@ int main(int argc, char** argv) {
             std::printf("general PS4 entry: RAX=%llu exited=%u status=%d argc=%llu\n",(unsigned long long)observed,
                 report.exited,report.exit_status,(unsigned long long)report.argc);
             CHECK(observed==42 && report.exited==1 && report.exit_status==42 && report.argc==1);
+            char successfulCalls[1024]{};
+            CHECK(maxps4_fex_engine_successful_calls(process,successfulCalls,sizeof(successfulCalls)) > 0 &&
+                  std::strstr(successfulCalls,"=") != nullptr);
         }
         std::puts("PASS general FEX execution -> PS4 entry ABI (EntryParams in RDI, copy at RSP, RSP=8 mod 16) -> exit function(42)");
         maxps4_fex_engine_close(process);
@@ -559,7 +606,39 @@ int main(int argc, char** argv) {
         CHECK(maxps4_fex_engine_run_orbis(process,&observed,&cpu,&logical_entry)==0 && observed==42);
         maxps4_fex_cpu_report report{};
         CHECK(maxps4_fex_engine_last_cpu_report(process,&report)==0 && !report.exited);
+        char moduleStarts[256]{};
+        CHECK(maxps4_fex_engine_module_start_results(process,moduleStarts,sizeof(moduleStarts))==1 &&
+              std::strcmp(moduleStarts,"provider.prx returned 40\n")==0);
         std::puts("PASS general FEX execution -> provider.prx module_start -> PS4 entry stub -> entry (HLT)");
+        maxps4_fex_engine_close(process);
+    }
+    {
+        // A negative PRX module_start status must stop before the entrypoint.
+        // Without the status check, this fixture would continue and return 1
+        // from app.elf after consuming the provider's -1 marker.
+        auto app = orbis_execution::make_start_app();
+        auto provider = orbis_execution::make_start_provider(-1);
+        const char* dependency[] = {"provider.prx"};
+        const maxps4_orbis_module modules[] = {
+            {"app.elf",app.data(),app.size(),orbis_execution::app_bias,dependency,1},
+            {"provider.prx",provider.data(),provider.size(),orbis_execution::provider_bias,nullptr,0}};
+        maxps4_fex_engine* process = nullptr;
+        CHECK(maxps4_fex_engine_open(&process)==0);
+        char diagnostic[512]{};
+        uint64_t relocation=0;
+        const int prepared = maxps4_fex_engine_prepare_orbis_general(process,modules,2,"app.elf",&relocation,diagnostic,sizeof(diagnostic));
+        if (prepared) std::fprintf(stderr,"prepare failed-module-start: %s\n",diagnostic);
+        CHECK(prepared==0);
+        CHECK(maxps4_fex_engine_initialize(process)==0);
+        uint64_t observed=0, logical_entry=0; uint32_t cpu=0;
+        CHECK(maxps4_fex_engine_run_orbis(process,&observed,&cpu,&logical_entry)==0);
+        maxps4_fex_cpu_report report{};
+        CHECK(maxps4_fex_engine_last_cpu_report(process,&report)==0);
+        CHECK(observed==uint64_t(-1) && report.exited==1 && report.exit_status==-1);
+        char moduleStarts[256]{};
+        CHECK(maxps4_fex_engine_module_start_results(process,moduleStarts,sizeof(moduleStarts))==1 &&
+              std::strcmp(moduleStarts,"provider.prx returned -1\n")==0);
+        std::puts("PASS general FEX execution -> negative PRX module_start status exits before process entry");
         maxps4_fex_engine_close(process);
     }
     {

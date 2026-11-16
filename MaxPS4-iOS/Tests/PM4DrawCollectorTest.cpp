@@ -37,6 +37,17 @@ struct Fixture {
 }
 int main() {
     {
+        Fixture f;
+        f.run({0u});
+        assert(f.stats.failed == 1 && f.stats.error.find("PM4 unsupported packet type at word 0") != std::string::npos &&
+               f.stats.error.find("header 0x00000000") != std::string::npos);
+        Fixture truncated;
+        const std::uint32_t header = (3u << 30) | (2u << 16) | (0x2du << 8);
+        truncated.run({header, 7u});
+        assert(truncated.stats.failed == 1 && truncated.stats.error.find("PM4 truncated packet at word 0") != std::string::npos &&
+               truncated.stats.error.find("opcode 0x2d") != std::string::npos);
+    }
+    {
         // Depth state is only counted: Z enabled and written, back faces culled,
         // then the same with no colour target mask.
         Fixture f;

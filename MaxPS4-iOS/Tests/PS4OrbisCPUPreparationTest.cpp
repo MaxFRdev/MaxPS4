@@ -252,7 +252,7 @@ int main() {
             CHECK(stub && stub[0]==0x48 && stub[1]==0x83 && stub[4]==0x48 && stub[5]==0xbf && stub[29]==0xe9);
             uint64_t params=0, leave=0;
             std::memcpy(&params,stub+6,8); std::memcpy(&leave,stub+21,8);
-            CHECK(leave==image.start()+34 && stub[34+8]==0x0f && stub[34+9]==0x05 && stub[34+10]==0xf4);
+            CHECK(leave==image.start()+41 && stub[41+8]==0x0f && stub[41+9]==0x05 && stub[41+10]==0xf4);
             size_t stackBytes=0; auto* stackLow=image.stack_host(stackBytes);
             CHECK(params==reinterpret_cast<uintptr_t>(stackLow)+stackBytes-maxps4::GuestELF::entryParamsBytes);
             CHECK(image.write_entry_params()==params);
@@ -262,7 +262,7 @@ int main() {
             // Then the thread-return trampoline: MOV RDI,RAX; MOV EAX,thread_exit;
             // SYSCALL (an HLE gate site); HLT, where every child thread ends.
             const uint64_t back=image.thread_return();
-            CHECK(back==image.start()+48);
+            CHECK(back==image.start()+55);
             const auto* ret=image.translate(back,14,5);
             CHECK(ret && ret[0]==0x48 && ret[1]==0x89 && ret[2]==0xc7 && ret[3]==0xb8 &&
                   ret[8]==0x0f && ret[9]==0x05 && ret[10]==0xf4);

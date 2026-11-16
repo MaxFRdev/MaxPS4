@@ -16,6 +16,8 @@ struct PM4Packet {
 enum class PM4Error { none, null_input, unsupported_packet_type, truncated_packet, too_many_packets, too_many_words };
 struct PM4DecodeResult {
     PM4Error error = PM4Error::none;
+    std::size_t errorWord = 0;
+    std::uint32_t errorHeader = 0;
     std::vector<PM4Packet> packets;
     explicit operator bool() const { return error == PM4Error::none; }
 };
@@ -32,24 +34,31 @@ inline PM4DecodeResult decodePM4Type3(const std::uint32_t* words,
     }
     if (wordCount > 65536) {
         result.error = PM4Error::too_many_words;
+        result.errorWord = 65536;
         return result;
     }
     std::size_t offset = 0;
     while (offset < wordCount) {
         if (result.packets.size() >= maxPackets) {
             result.error = PM4Error::too_many_packets;
+            result.errorWord = offset;
+            result.errorHeader = words[offset];
             result.packets.clear();
             return result;
         }
         const std::uint32_t header = words[offset];
         if ((header >> 30) != 3) {
             result.error = PM4Error::unsupported_packet_type;
+            result.errorWord = offset;
+            result.errorHeader = header;
             result.packets.clear();
             return result;
         }
         const std::size_t count = static_cast<std::size_t>((header >> 16) & 0x3fff) + 1;
         if (count > wordCount - offset - 1) {
             result.error = PM4Error::truncated_packet;
+            result.errorWord = offset;
+            result.errorHeader = header;
             result.packets.clear();
             return result;
         }
