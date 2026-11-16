@@ -154,13 +154,15 @@ inline std::vector<uint8_t> make_init_app() {
 // store 99 there; app entry loads it and adds 2. Only the PRX DT_INIT may run
 // (module_start(0, NULL, NULL)), so the result must be exactly 42.
 constexpr uint64_t provider_value=provider_bias+0x8010;
-inline std::vector<uint8_t> make_start_provider() {
+inline std::vector<uint8_t> make_start_provider(int32_t moduleStartResult = 40) {
     auto b=make(true);
     using orbis_fixture::put;
     const uint8_t code[]={
         0xb8,40,0,0,0, 0x89,0x05,0,0,0,0, 0xc3,                          // DT_INIT 0x4006
         0x8b,0x05,0,0,0,0, 0x05,0xe8,0x03,0,0, 0x89,0x05,0,0,0,0, 0xc3}; // array  0x4012
     std::copy(std::begin(code),std::end(code),b.begin()+0x206);
+    const auto status = static_cast<uint32_t>(moduleStartResult);
+    for (size_t i = 0; i < 4; ++i) b[0x207 + i] = uint8_t(status >> (i * 8));
     put(b,0x20d,0x8010-0x4011,4);
     put(b,0x214,0x8010-0x4018,4);
     put(b,0x21f,0x8010-0x4023,4);
