@@ -157,6 +157,9 @@ public:
     // (MOV RDI,RAX; SYSCALL thread_exit; HLT), a child's first return address.
     // 0 for other images.
     uint64_t thread_return() const { return thread_return_address; }
+    // General-game PRX initializers in execution order. The runtime uses this
+    // immutable list to label the bounded module_start result observations.
+    const std::vector<std::string>& module_start_names() const { return module_start_names_; }
     // Linked HLE data objects (OrbisLinker::Image::data) and the root module's
     // PT_SCE_PROCPARAM address (0 if none), for the runtime to fill and report.
     const std::vector<OrbisLinker::DataObject>& data_objects() const { return hle_data; }
@@ -195,6 +198,7 @@ private:
     std::vector<OrbisLinker::DataObject> hle_data;
     uint64_t process_param_address = 0;
     std::vector<ModuleRecord> records;
+    std::vector<std::string> module_start_names_;
     std::vector<OrbisLinker::TLSBlock> tls_blocks;
     std::vector<uint8_t> tls_image; // Static TLS region as initialized (blocks + TCB).
 };

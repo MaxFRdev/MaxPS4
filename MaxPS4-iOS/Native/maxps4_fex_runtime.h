@@ -342,11 +342,18 @@ int32_t maxps4_fex_engine_set_exit_link_trace(maxps4_fex_engine *engine, uint32_
 // (stubbed, returning 0): one "<library> <NID> <calls>" line each, most
 // called first, as many whole lines as fit. Returns how many there are.
 int32_t maxps4_fex_engine_missing_imports(maxps4_fex_engine *engine, char *text, size_t capacity);
+// PRX DT_INIT/module_start results from the last general game execution, in
+// dependency order: "<module> returned <signed status>" or "did not return".
+// Bounded to the linker's 256 initializer limit; returns the number of PRXs.
+int32_t maxps4_fex_engine_module_start_results(maxps4_fex_engine *engine, char *text, size_t capacity);
+int32_t maxps4_fex_engine_load_diagnostics(maxps4_fex_engine *engine, char *text, size_t capacity);
 // The last PS4 calls of the run (at most 128, oldest first; lock set-up and use, time
 // and thread-data calls left out): "t<thread> <name>(rdi, rsi, rdx, rcx) =
 // <result>" with the path of an open or stat, as many whole lines as fit.
 // Returns how many calls there are.
 int32_t maxps4_fex_engine_recent_calls(maxps4_fex_engine *engine, char *text, size_t capacity);
+// Last successful non-frequent HLE calls (bounded ring), oldest first.
+int32_t maxps4_fex_engine_successful_calls(maxps4_fex_engine *engine, char *text, size_t capacity);
 // The run's last PS4 calls that returned an error, same format, oldest first.
 int32_t maxps4_fex_engine_failed_calls(maxps4_fex_engine *engine, char *text, size_t capacity);
 // The last 32 sceKernelOpen calls that succeeded, with their paths (same format).

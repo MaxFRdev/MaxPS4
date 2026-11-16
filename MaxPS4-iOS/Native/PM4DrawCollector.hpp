@@ -98,7 +98,23 @@ public:
     template <class Draw, class Dispatch>
     void execute(const std::uint32_t* words, std::size_t count, Draw&& draw, Dispatch&& dispatch) {
         const auto parsed = decodePM4Type3(words, count);
-        if (!parsed) { stats_.fail("unframed PM4 stream"); return; }
+        if (!parsed) {
+            const char* reason = "unknown decoder error";
+            switch (parsed.error) {
+            case PM4Error::null_input: reason = "null input"; break;
+            case PM4Error::unsupported_packet_type: reason = "unsupported packet type"; break;
+            case PM4Error::truncated_packet: reason = "truncated packet"; break;
+            case PM4Error::too_many_packets: reason = "packet limit"; break;
+            case PM4Error::too_many_words: reason = "word limit"; break;
+            case PM4Error::none: break;
+            }
+            char detail[128];
+            std::snprintf(detail, sizeof(detail), "PM4 %s at word %zu (header 0x%08x, opcode 0x%02x)",
+                          reason, parsed.errorWord, parsed.errorHeader,
+                          (parsed.errorHeader >> 8) & 0xff);
+            stats_.fail(detail);
+            return;
+        }
         for (const auto& packet : parsed.packets) {
             const std::uint32_t* data = words + packet.payloadWord;
             const std::size_t n = packet.payloadCount;

@@ -87,6 +87,7 @@ int64_t guest_thread_service(GuestThreads& threads, maxps4::PS4KernelService ser
                              const maxps4::PS4KernelCall& call);
 // First exported name of an HLE service, for the boot probe's trace.
 const char* service_name(maxps4::PS4KernelService service) {
+    if (service == maxps4::PS4KernelService::module_start_status) return "module_start status (interne)";
     size_t count = 0;
     const auto* exports = maxps4::libkernel_exports(count);
     for (size_t i = 0; i < count; ++i) if (exports[i].service == service) return exports[i].name;
@@ -96,6 +97,7 @@ const char* service_name(maxps4::PS4KernelService service) {
 // A syscall has no permitted host effect and returns the real ENOSYS error.
 class ProbeAddressSpace final : public FEXCore::HLE::SyscallHandler {
 public:
+    struct ModuleStartResult { std::string name; int32_t status = 0; bool returned = false; };
     ProbeAddressSpace() { OSABI = FEXCore::HLE::SyscallOSABI::OS_GENERIC; }
     maxps4::GuestELF* image = nullptr;
     maxps4::PS4DynamicLinker* linker = nullptr;
@@ -106,6 +108,8 @@ public:
     // how many times each was called (the first call is also reported).
     const std::vector<std::string>* missing_imports = nullptr;
     std::vector<std::atomic<uint32_t>>* missing_reported = nullptr;
+    std::vector<ModuleStartResult>* module_start_results = nullptr;
+    std::mutex* module_start_lock = nullptr;
     // One stderr line per HLE call (boot probe only): thousands per second,
     // which a game on the iPhone paid on its own thread, through the debugger.
     bool trace = false;
@@ -142,6 +146,9 @@ public:
     // recent calls are often all audio output by the time a game stops.
     std::array<RecentCall, 64> failed {};
     uint64_t failed_next = 0;
+    // Keep successful HLE progression separately so errors don't crowd it out.
+    std::array<RecentCall, 64> successful {};
+    uint64_t successful_next = 0;
     // The last files the game did open (same lock): where its data really is.
     std::array<RecentCall, 32> opened {};
     uint64_t opened_next = 0;
@@ -236,7 +243,8 @@ public:
                     }
                 }
             }
-            Activity* slot = activity_slot();
+            const bool internal_status = orbis == maxps4::PS4KernelService::module_start_status;
+            Activity* slot = internal_status ? nullptr : activity_slot();
             if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns(); slot->inside = true; }
             const uint64_t timed_from = timing && timing->enabled() ? now_ns() : 0;
             if (timed_from && (orbis == maxps4::PS4KernelService::video_submit ||
@@ -252,6 +260,19 @@ public:
                 } else {
                     callback_error = -EPERM;
                 }
+            } else if (internal_status) {
+                const uint32_t index = static_cast<uint32_t>(call.rdi);
+                if (!module_start_results || !module_start_lock) callback_error = -EPERM;
+                else {
+                    std::lock_guard guard(*module_start_lock);
+                    if (index >= module_start_results->size()) callback_error = -ERANGE;
+                    else {
+                        auto& observation = (*module_start_results)[index];
+                        observation.status = static_cast<int32_t>(static_cast<uint32_t>(call.rsi));
+                        observation.returned = true;
+                    }
+                }
+                result = 0;
             } else if (orbis == maxps4::PS4KernelService::tls_get_addr) {
                 // __tls_get_addr(&tls_index{module, offset}): the guest may have changed
                 // tls_index, so validate it now. The admitted next instruction reads
@@ -291,21 +312,24 @@ public:
             if (pthread) result = maxps4::pthread_result(result);
             if (slot) { slot->since = now_ns(); slot->inside = false; ++slot->returned; }
             if (timed_from) timing->record(static_cast<uint32_t>(orbis), now_ns() - timed_from);
-            if (!frequent(orbis)) {
+            if (!frequent(orbis) && !internal_status) {
                 RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}, posix};
                 if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)
                     (void)memory->read_cstring(call.rdi, entry.path, sizeof(entry.path));
                 std::lock_guard<std::mutex> guard(recent_lock);
                 recent[recent_next++ % recent.size()] = entry;
                 if (error_result(result)) failed[failed_next++ % failed.size()] = entry;
-                else if (orbis == maxps4::PS4KernelService::open) opened[opened_next++ % opened.size()] = entry;
+                else {
+                    successful[successful_next++ % successful.size()] = entry;
+                    if (orbis == maxps4::PS4KernelService::open) opened[opened_next++ % opened.size()] = entry;
+                }
             }
             ++calls;
             if (trace && (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)) {
                 char path[256] = {}; // Trace only: no longer zeroed on every HLE call.
                 if (memory->read_cstring(call.rdi, path, sizeof(path))) std::fprintf(stderr, "hle path \"%s\"\n", path);
             }
-            if (trace && static_cast<uint32_t>(orbis) < maxps4::missing_import_token)
+            if (trace && !internal_status && static_cast<uint32_t>(orbis) < maxps4::missing_import_token)
                 std::fprintf(stderr, "hle %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx rsp 0x%llx -> 0x%llx\n",
                     service_name(orbis), (unsigned long long)call.rdi, (unsigned long long)call.rsi,
                     (unsigned long long)call.rdx, (unsigned long long)call.rcx, (unsigned long long)result,
@@ -1393,6 +1417,9 @@ struct maxps4_fex_engine {
     std::set<std::string> private_export_modules;
     std::vector<std::string> missing_imports;
     std::vector<std::atomic<uint32_t>> missing_reported;
+    std::mutex module_start_lock;
+    std::vector<ProbeAddressSpace::ModuleStartResult> module_start_results;
+    std::string load_diagnostics;
     fextl::unique_ptr<FEXCore::Context::Context> context;
     int32_t stage = MAXPS4_FEX_CONTEXT_CREATED;
 };
@@ -1618,6 +1645,17 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     // Probe mode only: stubs report themselves; mode 1 also traces every HLE call.
     engine->probe.missing_imports = engine->import_probe ? &engine->missing_imports : nullptr;
     engine->probe.missing_reported = engine->import_probe ? &engine->missing_reported : nullptr;
+    {
+        std::lock_guard guard(engine->module_start_lock);
+        engine->module_start_results.clear();
+        if (image.general()) {
+            engine->module_start_results.reserve(image.module_start_names().size());
+            for (const auto& name : image.module_start_names())
+                engine->module_start_results.push_back({name, 0, false});
+        }
+    }
+    engine->probe.module_start_results = &engine->module_start_results;
+    engine->probe.module_start_lock = &engine->module_start_lock;
     engine->probe.trace = engine->import_trace;
     engine->probe.timing = &engine->hle_timing;
     engine->hle_timing.enable(false);
@@ -1628,13 +1666,15 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     engine->probe.calls = 0;
     engine->probe.callback_error = 0;
     for (auto& a : engine->probe.activity) { a.thread = 0; a.inside = false; a.returned = 0; }
-    { std::lock_guard<std::mutex> guard(engine->probe.recent_lock); engine->probe.recent_next = 0; }
+    { std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
+      engine->probe.recent_next = engine->probe.failed_next = engine->probe.successful_next = engine->probe.opened_next = 0; }
     struct ClearRange {
         ProbeAddressSpace& space;
         ~ClearRange() {
             space.image = nullptr; space.linker = nullptr; space.kernel = nullptr;
             space.memory = nullptr; space.private_stack = 0; space.private_stack_size = 0;
             space.threads = nullptr; space.missing_imports = nullptr; space.missing_reported = nullptr;
+            space.module_start_results = nullptr; space.module_start_lock = nullptr;
         }
     } clear_range {engine->probe};
     engine->cpu_report = {};
@@ -2240,6 +2280,11 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
     if (relocation) *relocation = 0;
     if (diagnostic && capacity) diagnostic[0] = 0;
     if (!engine || !directory) return -EINVAL;
+    engine->load_diagnostics.clear();
+    auto note_skipped = [&](const std::string& text) {
+        if (!engine->load_diagnostics.empty()) engine->load_diagnostics += "\n";
+        engine->load_diagnostics += text;
+    };
     auto report = [&](const std::string& text) {
         if (diagnostic && capacity) { const size_t n = std::min(capacity - 1, text.size()); std::memcpy(diagnostic, text.data(), n); diagnostic[n] = 0; }
     };
@@ -2269,16 +2314,20 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
             m.optional = file.optional;
             std::ifstream in(file.path, std::ios::binary);
             if (!in) {
-                if (m.optional) { skipped += " " + m.name + " (unreadable)"; continue; }
-                report(m.name + ": unreadable"); return -ENOENT;
+                if (m.optional) { skipped += " " + m.name + " (unreadable)"; note_skipped("open " + file.path.string() + ": optional PRX missing or unreadable"); continue; }
+                report("open \"" + file.path.string() + "\": file missing or unreadable"); return -ENOENT;
             }
             m.bytes.assign(std::istreambuf_iterator<char>(in), {});
+            if (in.bad()) {
+                if (m.optional) { skipped += " " + m.name + " (read error)"; note_skipped("read " + file.path.string() + ": optional PRX I/O error"); continue; }
+                report("read \"" + file.path.string() + "\": I/O error"); return -EIO;
+            }
             if (!m.metadata.parse(m.bytes.data(), m.bytes.size())) {
-                if (m.optional) { skipped += " " + m.name + " (" + m.metadata.error + ")"; continue; }
-                report(m.name + ": " + m.metadata.error);
+                if (m.optional) { skipped += " " + m.name + " (" + m.metadata.error + ")"; note_skipped("parse " + file.path.string() + ": optional PRX: " + m.metadata.error); continue; }
+                report("parse \"" + file.path.string() + "\": " + m.metadata.error);
                 return -ENOEXEC;
             }
-            if (m.optional && m.metadata.type != 0xfe18) { skipped += " " + m.name + " (not a PRX)"; continue; }
+            if (m.optional && m.metadata.type != 0xfe18) { skipped += " " + m.name + " (not a PRX)"; note_skipped("parse " + file.path.string() + ": optional module is not a PRX"); continue; }
             modules.push_back(std::move(m));
         }
         // Variants of one module (maxps4_app_modules.h): when nothing imports
@@ -2299,7 +2348,7 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
             std::vector<Module> kept;
             kept.reserve(modules.size());
             for (size_t i = 0; i < modules.size(); ++i) {
-                if (decisions[i].choice == maxps4::ModuleChoice::skip) { skipped += " " + modules[i].name + " (" + decisions[i].reason + ")"; continue; }
+                if (decisions[i].choice == maxps4::ModuleChoice::skip) { skipped += " " + modules[i].name + " (" + decisions[i].reason + ")"; note_skipped("select " + modules[i].name + ": " + decisions[i].reason); continue; }
                 if (decisions[i].choice == maxps4::ModuleChoice::private_exports) private_exports.insert(modules[i].name);
                 kept.push_back(std::move(modules[i]));
             }
@@ -2353,6 +2402,11 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
             const int32_t status = maxps4_fex_engine_prepare_orbis_general(engine, table.data(), table.size(),
                                                                            "eboot.bin", relocation, diagnostic, capacity);
             engine->private_export_modules.clear();
+            if (status && diagnostic && capacity && diagnostic[0]) {
+                const std::string context = "link/prepare eboot.bin and PRX modules: " + std::string(diagnostic);
+                const size_t n = std::min(capacity - 1, context.size());
+                std::memcpy(diagnostic, context.data(), n); diagnostic[n] = 0;
+            }
             return status;
         };
         const bool any_optional = std::any_of(modules.begin(), modules.end(), [](const Module& m) { return m.optional; });
@@ -2362,20 +2416,25 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
         // reason is kept on stderr. sceKernelLoadStartModule then fails for
         // them, as it always did.
         if (prepared && any_optional) {
+            note_skipped("link/prepare optional PRX set failed (" + std::to_string(prepared) + "): " +
+                         (diagnostic && capacity ? diagnostic : "no diagnostic") + "; retrying without optional modules");
             std::fprintf(stderr, "maxps4: /app0 root modules not prepared (%d: %s); retrying without them\n",
                          prepared, diagnostic && capacity ? diagnostic : "");
             prepared = prepare(false);
         }
         if (prepared) return prepared;
         const int64_t mounted = maxps4_fex_engine_mount_app0(engine, root.string().c_str());
-        if (mounted) return int32_t(mounted);
+        if (mounted) { report("mount /app0 from \"" + root.string() + "\" failed (" + std::to_string(mounted) + ")"); return int32_t(mounted); }
         if (!update.empty()) {
             const int64_t overlaid = engine->libkernel.mount_app0_update(update.string().c_str());
-            if (overlaid) { report("update: not readable"); return int32_t(overlaid); }
+            if (overlaid) { report("mount update \"" + update.string() + "\" failed (" + std::to_string(overlaid) + ")"); return int32_t(overlaid); }
         }
         return 0;
-    } catch (const std::bad_alloc&) { return -ENOMEM; }
-    catch (const std::filesystem::filesystem_error&) { report("directory not readable"); return -ENOENT; }
+    } catch (const std::bad_alloc&) { report("load game: memory allocation failed"); return -ENOMEM; }
+    catch (const std::filesystem::filesystem_error& error) {
+        report("filesystem error at \"" + error.path1().string() + "\": " + error.code().message());
+        return -ENOENT;
+    }
 }
 extern "C" int64_t maxps4_fex_engine_mount(maxps4_fex_engine* engine, const char* guest, const char* directory) {
     if (!engine) return maxps4::ps4::kernel_error(maxps4::ps4::inval);
@@ -2458,6 +2517,11 @@ extern "C" int32_t maxps4_fex_engine_failed_calls(maxps4_fex_engine* engine, cha
     std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
     return format_calls(engine, engine->probe.failed, engine->probe.failed_next, text, capacity);
 }
+extern "C" int32_t maxps4_fex_engine_successful_calls(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
+    return format_calls(engine, engine->probe.successful, engine->probe.successful_next, text, capacity);
+}
 extern "C" int32_t maxps4_fex_engine_opened_files(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     std::lock_guard<std::mutex> guard(engine->probe.recent_lock);
@@ -2478,6 +2542,28 @@ extern "C" int32_t maxps4_fex_engine_missing_imports(maxps4_fex_engine* engine, 
     }
     if (capacity) { std::memcpy(text, out.data(), out.size()); text[out.size()] = 0; }
     return int32_t(order.size());
+}
+extern "C" int32_t maxps4_fex_engine_module_start_results(maxps4_fex_engine* engine,
+    char* text, size_t capacity) {
+    if (!engine || (!text && capacity)) return -EINVAL;
+    std::lock_guard guard(engine->module_start_lock);
+    std::string out;
+    for (const auto& observation : engine->module_start_results) {
+        const std::string line = observation.name + (observation.returned
+            ? " returned " + std::to_string(observation.status) + "\n"
+            : " did not return\n");
+        if (out.size() + line.size() >= capacity) break;
+        out += line;
+    }
+    if (capacity) { std::memcpy(text, out.data(), out.size()); text[out.size()] = 0; }
+    return static_cast<int32_t>(engine->module_start_results.size());
+}
+extern "C" int32_t maxps4_fex_engine_load_diagnostics(maxps4_fex_engine* engine,
+    char* text, size_t capacity) {
+    if (!engine || (!text && capacity)) return -EINVAL;
+    const std::string& out = engine->load_diagnostics;
+    if (capacity) { const size_t n = std::min(capacity - 1, out.size()); std::memcpy(text, out.data(), n); text[n] = 0; }
+    return static_cast<int32_t>(out.empty() ? 0 : std::count(out.begin(), out.end(), '\n') + 1);
 }
 extern "C" int64_t maxps4_fex_engine_add_addcont(maxps4_fex_engine* engine, const char* label, const char* directory) {
     if (!engine) return maxps4::ps4::kernel_error(maxps4::ps4::inval);
