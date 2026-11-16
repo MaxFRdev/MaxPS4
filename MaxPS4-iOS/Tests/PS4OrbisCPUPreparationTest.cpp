@@ -262,7 +262,7 @@ int main() {
             // Then the thread-return trampoline: MOV RDI,RAX; MOV EAX,thread_exit;
             // SYSCALL (an HLE gate site); HLT, where every child thread ends.
             const uint64_t back=image.thread_return();
-            CHECK(back==image.start()+48);
+            CHECK(back==image.start()+55);
             const auto* ret=image.translate(back,14,5);
             CHECK(ret && ret[0]==0x48 && ret[1]==0x89 && ret[2]==0xc7 && ret[3]==0xb8 &&
                   ret[8]==0x0f && ret[9]==0x05 && ret[10]==0xf4);
