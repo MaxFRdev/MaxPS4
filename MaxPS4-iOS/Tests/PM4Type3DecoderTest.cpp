@@ -22,6 +22,20 @@ int main() {
     const auto unsupported = decodePM4Type3(invalid, 1);
     assert(unsupported.error == PM4Error::unsupported_packet_type && unsupported.errorWord == 0 &&
            unsupported.errorHeader == invalid[0]);
+    // A malformed second packet must identify its own header, not the first one.
+    const std::uint32_t secondTruncated[] = {
+        (3u << 30) | (0x10u << 8), 42u,
+        (3u << 30) | (2u << 16) | (0x2du << 8), 99u
+    };
+    const auto secondError = decodePM4Type3(secondTruncated, 4);
+    assert(secondError.error == PM4Error::truncated_packet && secondError.errorWord == 2 &&
+           secondError.errorHeader == secondTruncated[2] && secondError.packets.empty());
+    // The packet budget is enforced before the first header is consumed.
+    const auto zeroBudget = decodePM4Type3(commands, 5, 0);
+    assert(zeroBudget.error == PM4Error::too_many_packets && zeroBudget.errorWord == 0 &&
+           zeroBudget.errorHeader == commands[0] && zeroBudget.packets.empty());
+    // Empty streams remain valid even with a zero packet budget.
+    assert(decodePM4Type3(nullptr, 0, 0));
     assert(decodePM4Type3(nullptr, 0));
     assert(decodePM4Type3(commands, 65537).error == PM4Error::too_many_words);
 }
