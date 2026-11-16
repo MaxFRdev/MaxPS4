@@ -189,7 +189,12 @@ private:
     std::uint64_t indexBase_ = 0; // Persists across submissions, like INDEX_TYPE.
 
     static void setRegisters(std::array<std::uint32_t, 0x400>& bank, const std::uint32_t* data, std::size_t n) {
-        for (std::size_t k = 1; k < n; ++k) if (data[0] + k - 1 < bank.size()) bank[data[0] + k - 1] = data[k];
+        // Do not add to the guest-controlled register offset: wrapping could
+        // write an unrelated register at the start of the bank.
+        const std::size_t start = data[0];
+        if (!n || start >= bank.size()) return;
+        const std::size_t limit = std::min(n - 1, bank.size() - start);
+        for (std::size_t k = 0; k < limit; ++k) bank[start + k] = data[k + 1];
     }
     static float f(std::uint32_t x) { return gcn_detail::f32(x); }
     // DB_DEPTH_CONTROL, DB_Z_INFO, DB_Z_READ/WRITE_BASE, DB_DEPTH_SIZE (8-pixel
