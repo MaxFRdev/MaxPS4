@@ -370,7 +370,7 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
             auto conditionalBranch = [&](size_t at, uint64_t target) {
                 const int64_t relative = static_cast<int64_t>(target) - static_cast<int64_t>(start + at + 6);
                 if (relative < INT32_MIN || relative > INT32_MAX) return false;
-                stub[at] = 0x0f; stub[at + 1] = 0x85; // JNZ rel32
+                stub[at] = 0x0f; stub[at + 1] = 0x88; // JS rel32: negative module_start status
                 for (size_t b = 0; b < 4; ++b) stub[at + 2 + b] = uint8_t(uint64_t(relative) >> (8 * b));
                 return true;
             };
@@ -393,7 +393,7 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
                     0xff,0x77,0x08, 0xff,0x37, 0x48,0xbe,0,0,0,0,0,0,0,0};
                 std::copy(std::begin(enter), std::end(enter), stub.begin() + entry_at);
                 jump = entry_at + sizeof(enter);
-                // A nonzero module_start result is passed to process_exit and
+                // A negative module_start result is passed to process_exit and
                 // stops startup before the application's entrypoint.
                 const uint8_t failed[] = {0x89,0xc7}; // MOV EDI,EAX
                 std::copy(std::begin(failed), std::end(failed), stub.begin() + failure_at);

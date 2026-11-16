@@ -563,7 +563,7 @@ int main(int argc, char** argv) {
         maxps4_fex_engine_close(process);
     }
     {
-        // A failed PRX module_start must stop the process before its entrypoint.
+        // A negative PRX module_start status must stop before the entrypoint.
         // Without the status check, this fixture would continue and return 1
         // from app.elf after consuming the provider's -1 marker.
         auto app = orbis_execution::make_start_app();
@@ -585,7 +585,7 @@ int main(int argc, char** argv) {
         maxps4_fex_cpu_report report{};
         CHECK(maxps4_fex_engine_last_cpu_report(process,&report)==0);
         CHECK(observed==uint64_t(-1) && report.exited==1 && report.exit_status==-1);
-        std::puts("PASS general FEX execution -> nonzero PRX module_start status exits before process entry");
+        std::puts("PASS general FEX execution -> negative PRX module_start status exits before process entry");
         maxps4_fex_engine_close(process);
     }
     {

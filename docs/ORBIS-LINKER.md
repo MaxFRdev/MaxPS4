@@ -138,8 +138,8 @@ L'admission commence par ce stub, dans le même budget. FEX démarre au stub
 (`GuestELF::start()`) ; `entry()` reste le point d'entrée du module. Les
 `DT_FINI*` sont seulement validés : rien ne s'exécute à la sortie. Dans le
 chemin d'exécution général utilisé par les jeux, le stub vérifie maintenant le
-retour de chaque `module_start` : zéro continue l'initialisation, une valeur
-non nulle termine le processus avec ce statut avant son point d'entrée. Le
+retour de chaque `module_start` : les valeurs non négatives continuent
+l'initialisation, une valeur négative termine le processus avec ce statut avant son point d'entrée. Le
 chemin borné de démonstration n'a pas de service `process_exit` et conserve son
 ancienne séquence; il n'est pas celui utilisé par le lancement de jeu.
 
