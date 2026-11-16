@@ -252,7 +252,7 @@ int main() {
             CHECK(stub && stub[0]==0x48 && stub[1]==0x83 && stub[4]==0x48 && stub[5]==0xbf && stub[29]==0xe9);
             uint64_t params=0, leave=0;
             std::memcpy(&params,stub+6,8); std::memcpy(&leave,stub+21,8);
-            CHECK(leave==image.start()+34 && stub[34+8]==0x0f && stub[34+9]==0x05 && stub[34+10]==0xf4);
+            CHECK(leave==image.start()+41 && stub[41+8]==0x0f && stub[41+9]==0x05 && stub[41+10]==0xf4);
             size_t stackBytes=0; auto* stackLow=image.stack_host(stackBytes);
             CHECK(params==reinterpret_cast<uintptr_t>(stackLow)+stackBytes-maxps4::GuestELF::entryParamsBytes);
             CHECK(image.write_entry_params()==params);
