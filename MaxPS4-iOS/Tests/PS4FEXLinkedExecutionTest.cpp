@@ -563,6 +563,32 @@ int main(int argc, char** argv) {
         maxps4_fex_engine_close(process);
     }
     {
+        // A failed PRX module_start must stop the process before its entrypoint.
+        // Without the status check, this fixture would continue and return 1
+        // from app.elf after consuming the provider's -1 marker.
+        auto app = orbis_execution::make_start_app();
+        auto provider = orbis_execution::make_start_provider(-1);
+        const char* dependency[] = {"provider.prx"};
+        const maxps4_orbis_module modules[] = {
+            {"app.elf",app.data(),app.size(),orbis_execution::app_bias,dependency,1},
+            {"provider.prx",provider.data(),provider.size(),orbis_execution::provider_bias,nullptr,0}};
+        maxps4_fex_engine* process = nullptr;
+        CHECK(maxps4_fex_engine_open(&process)==0);
+        char diagnostic[512]{};
+        uint64_t relocation=0;
+        const int prepared = maxps4_fex_engine_prepare_orbis_general(process,modules,2,"app.elf",&relocation,diagnostic,sizeof(diagnostic));
+        if (prepared) std::fprintf(stderr,"prepare failed-module-start: %s\n",diagnostic);
+        CHECK(prepared==0);
+        CHECK(maxps4_fex_engine_initialize(process)==0);
+        uint64_t observed=0, logical_entry=0; uint32_t cpu=0;
+        CHECK(maxps4_fex_engine_run_orbis(process,&observed,&cpu,&logical_entry)==0);
+        maxps4_fex_cpu_report report{};
+        CHECK(maxps4_fex_engine_last_cpu_report(process,&report)==0);
+        CHECK(observed==uint64_t(-1) && report.exited==1 && report.exit_status==-1);
+        std::puts("PASS general FEX execution -> nonzero PRX module_start status exits before process entry");
+        maxps4_fex_engine_close(process);
+    }
+    {
         // Guest threads: scePthreadCreate x2, threads that wait for each other
         // (so they must run concurrently), RET into the thread-return trampoline
         // and scePthreadExit, then scePthreadJoin x2 and exit(42 + 58).
