@@ -52,6 +52,11 @@ int main(int argc, char** argv) {
     arena.code(coverageProgram,{0xc0880d00,0xbf840001,0xc0880d04,0xc20a1100,0xbf810000});
     const auto joined=translateGCN(arena.memory,coverageProgram,direct);
     assert(joined && joined.sites.size()==3 && joined.sites[1].from[0]==13 && joined.sites[2].from[0]==0);
+    // image_sample_d v[8:11], v[2:7]: derivatives in v2..v5, coordinates in v6..v7.
+    arena.code(coverageProgram,{0xf0880f00,0x00400802,0xf800180f,0x0b0a0908,0xbf810000});
+    const auto derivatives=translateGCN(arena.memory,coverageProgram,ps);
+    if (!derivatives) std::printf("%s\n", derivatives.error.c_str());
+    assert(derivatives && derivatives.source.find("gcn_sample(M, t, sm, false, gf(v6), gf(v7))")!=std::string::npos);
     GCNTranslateOptions fetch; fetch.stage = GCNStage::vertex; fetch.name = "vs_fetch";
     fetch.userCount = 4; fetch.userData[0] = std::uint32_t(fetchShader); fetch.userData[2] = std::uint32_t(vertexTable);
     const auto fetched = translateGCN(arena.memory, fetchVS, fetch);
