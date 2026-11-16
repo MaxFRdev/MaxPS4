@@ -48,6 +48,23 @@ int main() {
                truncated.stats.error.find("opcode 0x2d") != std::string::npos);
     }
     {
+        // A hostile register offset must never wrap around to bank register 0.
+        // Preserve existing target state and confirm the malformed write does
+        // not mutate context, shader or uconfig banks.
+        Fixture f;
+        f.run({0xc0016900, 0x00000000, 0x12345678});
+        assert(f.collector.context(0) == 0x12345678);
+        f.run({0xc0026900, 0xffffffffu, 0xaaaaaaaau, 0xbbbbbbbbu});
+        assert(f.collector.context(0) == 0x12345678);
+        f.run({0xc0027600, 0xffffffffu, 0xaaaaaaaau, 0xbbbbbbbbu});
+        f.run({0xc0027900, 0xffffffffu, 0xaaaaaaaau, 0xbbbbbbbbu});
+        assert(f.stats.failed == 0);
+        // Writes starting at the final register must stop at the bank edge.
+        f.run({0xc0026900, 0x3ff, 0xabcdef01, 0xabcdef02});
+        assert(f.collector.context(0x3ff) == 0xabcdef01);
+        assert(f.collector.context(0) == 0x12345678);
+    }
+    {
         // Depth state is only counted: Z enabled and written, back faces culled,
         // then the same with no colour target mask.
         Fixture f;
