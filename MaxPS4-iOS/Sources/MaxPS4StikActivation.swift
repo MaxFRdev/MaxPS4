@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import Darwin
+import MachO
 
 @MainActor
 enum MaxPS4StikActivation {
@@ -9,8 +10,13 @@ enum MaxPS4StikActivation {
     private static func processIdentity() -> (bundleID: String, pid: Int32)? {
         let pid = getpid()
         guard pid > 0 else { return nil }
-        var path = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
+        // _NSGetExecutablePath is available on iOS; proc_pidpath is not
+        // exposed by the iOS SDK used by the CI toolchain.
+        var capacity: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &capacity)
+        guard capacity > 0, capacity < 65536 else { return nil }
+        var path = [CChar](repeating: 0, count: Int(capacity))
+        guard _NSGetExecutablePath(&path, &capacity) == 0 else { return nil }
         let executable = URL(fileURLWithPath: String(cString: path)).resolvingSymlinksInPath()
         let appURL = executable.deletingLastPathComponent()
         guard appURL.pathExtension == "app",
