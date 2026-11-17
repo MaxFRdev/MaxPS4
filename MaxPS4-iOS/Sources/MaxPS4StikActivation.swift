@@ -1,15 +1,34 @@
 import Foundation
 import UIKit
+import Darwin
 
 @MainActor
 enum MaxPS4StikActivation {
+    // Target the actual host executable when LiveContainer virtualizes Bundle.main.
+    // This does not change the process permissions or grant JIT.
+    private static func processIdentity() -> (bundleID: String, pid: Int32)? {
+        let pid = getpid()
+        guard pid > 0 else { return nil }
+        var path = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
+        let executable = URL(fileURLWithPath: String(cString: path)).resolvingSymlinksInPath()
+        let appURL = executable.deletingLastPathComponent()
+        guard appURL.pathExtension == "app",
+              let host = Bundle(url: appURL),
+              let hostID = host.bundleIdentifier, !hostID.isEmpty,
+              let declaredExecutable = host.object(forInfoDictionaryKey: "CFBundleExecutable") as? String,
+              executable.lastPathComponent == declaredExecutable else { return nil }
+        return (hostID, pid)
+    }
     static func begin(completion: @escaping (String) -> Void) -> String {
 #if MAXPS4_FEX_APP
         guard let installedURL = URL(string: "stikdebug://"), UIApplication.shared.canOpenURL(installedURL) else {
             return String(localized: "StikDebug n’est pas disponible. Installer et configurer StikDebug, le pairing et le VPN selon ses instructions.", bundle: .maxps4)
         }
-        guard let bundle = Bundle.main.bundleIdentifier,
-              let sourceURL = Bundle.main.url(forResource: "maxps4-stik", withExtension: "js") ??
+        guard let identity = processIdentity() else {
+            return "Impossible d’identifier le processus hôte : activation JIT refusée."
+        }
+        guard let sourceURL = Bundle.main.url(forResource: "maxps4-stik", withExtension: "js") ??
                   Bundle.main.url(forResource: "maxps4-stik", withExtension: "js", subdirectory: "JIT"),
               let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
             return String(localized: "Script MaxPS4 manquant : activation refusée.", bundle: .maxps4)
@@ -19,7 +38,7 @@ enum MaxPS4StikActivation {
         guard status == 0 else {
             return String(localized: "Demande JIT refusée (\(status)). Vérifie l’activation ; si une ancienne session attend, termine StikDebug ou redémarre MaxPS4.", bundle: .maxps4)
         }
-        guard let url = MaxPS4StikRequest.url(bundleID: bundle, pid: getpid(),
+        guard let url = MaxPS4StikRequest.url(bundleID: identity.bundleID, pid: identity.pid,
             mailbox: mailbox, nonce: nonce, pageSize: page, script: source) else {
             _ = maxps4_jit_launch_failed(nonce)
             return String(localized: "URL StikDebug invalide : JIT indisponible.", bundle: .maxps4)
