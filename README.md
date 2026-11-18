@@ -23,17 +23,18 @@
 | --- | --- | --- |
 | LiveContainer : identification du processus hôte pour StikDebug | Correctif proposé, validation iPhone requise | [PR #319](https://github.com/MaxFRdev/MaxPS4/pull/319) |
 | LiveContainer : diagnostic de la détection du schéma `stikdebug://` | Diagnostic proposé, compilation et test iPhone requis | [PR #320](https://github.com/MaxFRdev/MaxPS4/pull/320) |
-| JIT FEXCore sur iOS | Erreur de préparation `-13` observée ; cause exacte non confirmée | [Investigation](docs/jit-error-13-investigation.md) |
+| JIT FEXCore sur iOS avec LiveContainer et StikDebug | **Activation confirmée sur iPhone lors d'un test utilisateur** ; le lancement de certains jeux reste bloqué | [PR #325](https://github.com/MaxFRdev/MaxPS4/pull/325) |
 | Compatibilité des jeux et modules PRX | Travaux expérimentaux en cours ; vérifier chaque jeu sur appareil | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
+| Mortal Kombat Trilogy (CUSA53178) | Le jeu commence à s'exécuter mais plante avant la première image ; diagnostic de mémoire directe en cours | [PR #326](https://github.com/MaxFRdev/MaxPS4/pull/326) |
 | GPU GNM/PM4 vers Metal | Corrections et tests de compatibilité en cours | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
 
 ### LiveContainer et SideStore
 
 - **SideStore** : méthode d'installation décrite ci-dessous ; l'activation du JIT nécessite toujours les autorisations et la configuration StikDebug appropriées.
-- **LiveContainer** : intégration en cours de diagnostic. StikDebug peut détecter le processus hôte sans que le JIT de MaxPS4 soit prêt. La compatibilité complète n'est **pas encore confirmée**.
-- **Sur iPhone 15 Pro Max (iOS 27.2)** : un essai avec LiveContainer a retourné `Préparation du JIT : -13`, avec état mémoire, erreur mémoire, étape et code Mach à zéro. Ce résultat ne démontre pas une activation JIT réussie.
+- **LiveContainer** : lors d'un test sur iPhone 15 Pro Max (iOS 27.2), StikDebug s'est ouvert et MaxPS4 a indiqué que le JIT était actif avec la version issue de la [PR #325](https://github.com/MaxFRdev/MaxPS4/pull/325). C'est une **validation ponctuelle**, pas une garantie de compatibilité sur tous les appareils.
+- **Limite actuelle** : malgré le JIT actif, Mortal Kombat Trilogy (CUSA53178) s'arrête avant le premier rendu Metal : signal 11, adresse `0x38`, RIP invité `0x7003f31320` ; un appel `sceKernelMapDirectMemory` échoue. La [PR #326](https://github.com/MaxFRdev/MaxPS4/pull/326) ajoute des traces pour diagnostiquer cet échec sans changer le comportement mémoire.
 
-Les PR #319 et #320 sont des **propositions non fusionnées**. Aucune correction définitive du JIT n'est annoncée à ce stade.
+Les PR #319, #320, #325 et #326 sont des travaux expérimentaux ; **#325 et #326 ne sont pas fusionnées dans `main`** au moment de cette mise à jour. L'activation du JIT ne signifie pas qu'un jeu est jouable.
 
 ## Ce qui marche aujourd'hui
 
@@ -84,7 +85,7 @@ Un jeu qui bloque laisse un rapport dans **MaxPS4 › Rapports** : partage-le su
 
 ## Installer et jouer
 
-1. Télécharger l'IPA produite par le workflow [MaxPS4 FEXCore SideStore IPA](https://github.com/MaxFRdev/MaxPS4/actions/workflows/fexcore-app.yml) (artefact **MaxPS4-FEXCore-SideStore.ipa**, téléchargé directement en .ipa, sans zip) et l'installer avec **SideStore**.
+1. Télécharger l'IPA produite par le workflow [MaxPS4 FEXCore SideStore IPA](https://github.com/MaxFRdev/MaxPS4/actions/workflows/fexcore-app.yml) (artefact **MaxPS4-FEXCore-SideStore.ipa** ; GitHub peut fournir une archive ZIP : l'extraire pour obtenir le fichier `.ipa` avant l'import dans LiveContainer ou SideStore) et l'installer avec **SideStore**.
 2. Dans StikDebug, importer le **même PairingFile** que celui utilisé par SideStore, puis configurer la connexion et le VPN selon le guide StikDebug. Le PairingFile autorise l’appairage; il n’active pas le JIT à lui seul.
 3. Revenir dans MaxPS4 et toucher **JIT** pour lancer l’activation StikDebug. Voir [le protocole SideStore + StikDebug](docs/fexcore-stikdebug-jit.md).
 4. Copier le dossier complet de ton jeu (`eboot.bin`, `sce_module`, `sce_sys` et ses données) dans **Sur mon iPhone › MaxPS4 › Jeux**, puis toucher **Jouer**.
