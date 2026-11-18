@@ -2865,7 +2865,25 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
             return kernel_error(inval);
         uint64_t mapped = 0;
         const Error e = dynamic_->place(hint, c.rsi, std::max<uint64_t>(c.r9, page), protection, (c.rcx & 0x10) != 0, mapped);
-        if (e) return kernel_error(e);
+        if (e) {
+            // Diagnostic only: preserve the guest-visible error and memory state.
+            // A failed 2 GiB mapping may be a host VA-space constraint rather
+            // than a missing PS4 direct-memory allocation.
+            std::fprintf(stderr,
+                "[MaxPS4 direct_map] place failed: error=%d hint=0x%llx length=0x%llx "
+                "physical=0x%llx owner=0x%llx owner_size=0x%llx offset=0x%llx "
+                "alignment=0x%llx protection=0x%x flags=0x%llx fixed=%d\\n",
+                int(e), static_cast<unsigned long long>(hint),
+                static_cast<unsigned long long>(c.rsi),
+                static_cast<unsigned long long>(c.r8),
+                static_cast<unsigned long long>(owner->first),
+                static_cast<unsigned long long>(owner->second),
+                static_cast<unsigned long long>(offset),
+                static_cast<unsigned long long>(std::max<uint64_t>(c.r9, page)),
+                protection, static_cast<unsigned long long>(c.rcx),
+                (c.rcx & 0x10) != 0);
+            return kernel_error(e);
+        }
         return write_pointer(c.rdi, mapped) ? 0 : (dynamic_->unmap(mapped, c.rsi), kernel_error(fault));
     }
     // sceKernelMapNamedFlexibleMemory(void** address, length, protection, flags, name).
