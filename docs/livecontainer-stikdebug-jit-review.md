@@ -1,6 +1,6 @@
 # LiveContainer / StikDebug JIT review
 
-Date: 2026-11-18  
+Date: 2026-11-18
 Branch: `fix/codex-livecontainer-jit` (based on `main` at `b096920`)
 
 ## PR dependency review
