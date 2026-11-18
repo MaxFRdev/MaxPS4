@@ -13,7 +13,27 @@
 
 <p align="center"><b>💬 Suis l'avancement, pose tes questions et partage tes tests sur le <a href="https://discord.gg/99KcfSVxT8">Discord MaxPS4</a>.</b></p>
 
-**MaxPS4** est un projet indépendant d'émulation PS4 sur iPhone. Le code x86-64 des jeux tourne sur l'iPhone grâce au JIT de **FEXCore** (activé avec StikDebug), les fonctions système de la PS4 sont réécrites dans MaxPS4, et le GPU de la PS4 est traduit vers **Metal**. Le projet s'appuie sur des travaux d'**AetherPS4**, de **FEXCore** et de **shadPS4**.
+**MaxPS4** est un projet indépendant d'émulation PS4 sur iPhone. L'exécution du code x86-64 des jeux est développée autour de **FEXCore** et de son JIT ARM64, dont l'activation sur iPhone via StikDebug reste expérimentale, les fonctions système de la PS4 sont réécrites dans MaxPS4, et le GPU de la PS4 est traduit vers **Metal**. Le projet s'appuie sur des travaux d'**AetherPS4**, de **FEXCore** et de **shadPS4**.
+
+## 🚧 Avancement du développement — novembre 2026
+
+> **Version expérimentale :** les résultats de compilation ou le démarrage d'un jeu ne prouvent pas que son gameplay est fonctionnel. Les fonctionnalités ci-dessous sont en cours de validation sur appareil réel.
+
+| Chantier | Avancement | Suivi |
+| --- | --- | --- |
+| LiveContainer : identification du processus hôte pour StikDebug | Correctif proposé, validation iPhone requise | [PR #319](https://github.com/MaxFRdev/MaxPS4/pull/319) |
+| LiveContainer : diagnostic de la détection du schéma `stikdebug://` | Diagnostic proposé, compilation et test iPhone requis | [PR #320](https://github.com/MaxFRdev/MaxPS4/pull/320) |
+| JIT FEXCore sur iOS | Erreur de préparation `-13` observée ; cause exacte non confirmée | [Investigation](docs/jit-error-13-investigation.md) |
+| Compatibilité des jeux et modules PRX | Travaux expérimentaux en cours ; vérifier chaque jeu sur appareil | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
+| GPU GNM/PM4 vers Metal | Corrections et tests de compatibilité en cours | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
+
+### LiveContainer et SideStore
+
+- **SideStore** : méthode d'installation décrite ci-dessous ; l'activation du JIT nécessite toujours les autorisations et la configuration StikDebug appropriées.
+- **LiveContainer** : intégration en cours de diagnostic. StikDebug peut détecter le processus hôte sans que le JIT de MaxPS4 soit prêt. La compatibilité complète n'est **pas encore confirmée**.
+- **Sur iPhone 15 Pro Max (iOS 27.2)** : un essai avec LiveContainer a retourné `Préparation du JIT : -13`, avec état mémoire, erreur mémoire, étape et code Mach à zéro. Ce résultat ne démontre pas une activation JIT réussie.
+
+Les PR #319 et #320 sont des **propositions non fusionnées**. Aucune correction définitive du JIT n'est annoncée à ce stade.
 
 ## Ce qui marche aujourd'hui
 
@@ -69,7 +89,7 @@ Un jeu qui bloque laisse un rapport dans **MaxPS4 › Rapports** : partage-le su
 3. Revenir dans MaxPS4 et toucher **JIT** pour lancer l’activation StikDebug. Voir [le protocole SideStore + StikDebug](docs/fexcore-stikdebug-jit.md).
 4. Copier le dossier complet de ton jeu (`eboot.bin`, `sce_module`, `sce_sys` et ses données) dans **Sur mon iPhone › MaxPS4 › Jeux**, puis toucher **Jouer**.
 
-MaxPS4 ne déchiffre rien : il faut un dossier de jeu déjà extrait, issu de tes propres jeux. Le développement actif se fait sur la branche `maxps4-metal-native-sampling`.
+MaxPS4 ne déchiffre rien : il faut un dossier de jeu déjà extrait, issu de tes propres jeux. Le développement se poursuit dans plusieurs branches et pull requests expérimentales ; consulte le tableau d'avancement ci-dessus pour les travaux récents.
 
 ## Conformité et responsabilité
 
@@ -99,4 +119,4 @@ Les contributions sont bienvenues via [Issues](https://github.com/MaxFRdev/MaxPS
 - [IPA FEXCore pour SideStore](docs/fexcore-app-sidestore.md)
 
 ---
-*Dernière mise à jour : 5 novembre 2026.*
+*Dernière mise à jour : 18 novembre 2026 (suivi des travaux expérimentaux).*
