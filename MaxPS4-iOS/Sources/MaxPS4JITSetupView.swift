@@ -13,7 +13,16 @@ private struct MaxPS4JITReadiness: Sendable {
         defer { maxps4_fex_engine_close(opened) }
         let initialized = maxps4_fex_engine_initialize(opened)
         guard initialized == 0 else {
-            return Self(ready: false, detail: "Préparation du JIT : \(initialized)\nÉtat mémoire : \(maxps4_jit_state())\nErreur mémoire : \(maxps4_jit_error())\nÉtape : \(maxps4_jit_failure_stage())\nCode Mach : \(maxps4_jit_failure_mach())")
+            let state = maxps4_jit_state()
+            let error = maxps4_jit_error()
+            let stage = maxps4_jit_failure_stage()
+            let mach = maxps4_jit_failure_mach()
+            let region = maxps4_jit_failure_region()
+            let mailbox = maxps4_jit_mailbox_diagnostic()
+            let liveContainer = MaxPS4StikEnvironment.isLiveContainer(environment: ProcessInfo.processInfo.environment)
+            let explanation = MaxPS4JITFailureDiagnostic.explanation(initializationStatus: initialized,
+                memoryState: state, isLiveContainer: liveContainer)
+            return Self(ready: false, detail: "Préparation du JIT : \(initialized)\nÉtat mémoire : \(state)\nErreur mémoire : \(error)\nÉtape : \(stage)\nCode Mach : \(mach)\nRégion : \(region)\nDiagnostic mailbox : \(mailbox)\n\(explanation)")
         }
         var value: UInt64 = 0
         var backend: UInt32 = 0

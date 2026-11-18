@@ -1,5 +1,43 @@
 import Foundation
 
+/// Process identity and preflight decisions for the StikDebug URL handoff.
+/// Kept independent of UIKit so LiveContainer behavior is regression tested.
+enum MaxPS4StikEnvironment {
+    struct Target: Equatable {
+        let bundleIdentifier: String
+        let processID: Int32
+    }
+
+    static func isLiveContainer(environment: [String: String]) -> Bool {
+        environment["LC_HOME_PATH"] != nil
+    }
+
+    static func target(bundleIdentifier: String?, processID: Int32) -> Target? {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty, processID > 0 else { return nil }
+        return Target(bundleIdentifier: bundleIdentifier, processID: processID)
+    }
+
+    /// LiveContainer's host Info.plist may not declare stikdebug even when the
+    /// guest does. Let iOS resolve the URL and inspect UIApplication.open's result.
+    static func shouldPreflightStikDebug(isLiveContainer: Bool) -> Bool {
+        !isLiveContainer
+    }
+}
+
+enum MaxPS4JITFailureDiagnostic {
+    static func explanation(initializationStatus: Int32, memoryState: Int32,
+                            isLiveContainer: Bool) -> String {
+        guard initializationStatus == -13 else { return "" }
+        if memoryState == 0 {
+            let host = isLiveContainer
+                ? " Dans LiveContainer, activer Use LiveContainer's Bundle ID et verifier que StikDebug est choisi comme JIT enabler."
+                : " Verifier que StikDebug a termine l'activation pour ce processus."
+            return "Acces JIT refuse (EACCES); aucune session memoire JIT active." + host + " Ce code ne confirme pas la cause exacte du refus."
+        }
+        return "Acces JIT refuse (EACCES). Consulter l'etat de session, la mailbox et l'etape ci-dessus; aucune autorisation iOS n'a ete contournee."
+    }
+}
+
 /// Pure URL construction: the only supported adapter is the bundled script.
 enum MaxPS4StikRequest {
     static func url(bundleID: String, pid: Int32, mailbox: UInt64, nonce: UInt64,

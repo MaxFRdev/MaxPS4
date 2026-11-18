@@ -5,11 +5,21 @@ import UIKit
 enum MaxPS4StikActivation {
     static func begin(completion: @escaping (String) -> Void) -> String {
 #if MAXPS4_FEX_APP
-        guard let installedURL = URL(string: "stikdebug://"), UIApplication.shared.canOpenURL(installedURL) else {
+        let isLiveContainer = MaxPS4StikEnvironment.isLiveContainer(environment: ProcessInfo.processInfo.environment)
+        guard let installedURL = URL(string: "stikdebug://") else {
+            return "URL StikDebug invalide : activation JIT refusee."
+        }
+        if MaxPS4StikEnvironment.shouldPreflightStikDebug(isLiveContainer: isLiveContainer),
+           !UIApplication.shared.canOpenURL(installedURL) {
             return String(localized: "StikDebug n’est pas disponible. Installer et configurer StikDebug, le pairing et le VPN selon ses instructions.", bundle: .maxps4)
         }
-        guard let bundle = Bundle.main.bundleIdentifier,
-              let sourceURL = Bundle.main.url(forResource: "maxps4-stik", withExtension: "js") ??
+        guard let target = MaxPS4StikEnvironment.target(bundleIdentifier: Bundle.main.bundleIdentifier,
+                                                        processID: getpid()) else {
+            return isLiveContainer
+                ? "Identifiant du processus absent. Dans LiveContainer, activer Use LiveContainer's Bundle ID. Activation refusee."
+                : "Impossible d'identifier le processus MaxPS4 ; activation JIT refusee."
+        }
+        guard let sourceURL = Bundle.main.url(forResource: "maxps4-stik", withExtension: "js") ??
                   Bundle.main.url(forResource: "maxps4-stik", withExtension: "js", subdirectory: "JIT"),
               let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
             return String(localized: "Script MaxPS4 manquant : activation refusée.", bundle: .maxps4)
@@ -19,15 +29,20 @@ enum MaxPS4StikActivation {
         guard status == 0 else {
             return String(localized: "Demande JIT refusée (\(status)). Vérifie l’activation ; si une ancienne session attend, termine StikDebug ou redémarre MaxPS4.", bundle: .maxps4)
         }
-        guard let url = MaxPS4StikRequest.url(bundleID: bundle, pid: getpid(),
+        guard let url = MaxPS4StikRequest.url(bundleID: target.bundleIdentifier, pid: target.processID,
             mailbox: mailbox, nonce: nonce, pageSize: page, script: source) else {
             _ = maxps4_jit_launch_failed(nonce)
             return String(localized: "URL StikDebug invalide : JIT indisponible.", bundle: .maxps4)
         }
         UIApplication.shared.open(url, options: [:]) { opened in
             if !opened { _ = maxps4_jit_launch_failed(nonce) }
-            completion(opened ? String(localized: "Termine l’activation dans StikDebug, puis reviens dans MaxPS4.", bundle: .maxps4) :
-                String(localized: "Ouverture de StikDebug refusée ; JIT indisponible. Réessayer l’activation.", bundle: .maxps4))
+            if opened {
+                completion(String(localized: "Termine l’activation dans StikDebug, puis reviens dans MaxPS4.", bundle: .maxps4))
+            } else if isLiveContainer {
+                completion("iOS n'a pas ouvert StikDebug. Verifier sa configuration dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID. JIT indisponible.")
+            } else {
+                completion(String(localized: "Ouverture de StikDebug refusée ; JIT indisponible. Réessayer l’activation.", bundle: .maxps4))
+            }
         }
         return String(localized: "Termine l’activation dans StikDebug, puis reviens dans MaxPS4.", bundle: .maxps4)
 #else
