@@ -62,6 +62,10 @@ struct MaxPS4JITSetupView: View {
                             requested = true
                             detail = MaxPS4StikActivation.begin { result in detail = result; message = result }
                             message = detail
+#if MAXPS4_FEX_APP
+                            // State 1: this process really sent a request (see MaxPS4JITRequestRecord).
+                            if maxps4_jit_state() == 1 { MaxPS4JITRequestRecord.remember(pid: getpid()) }
+#endif
                         } label: {
                             Label("Activer avec StikDebug", systemImage: "arrow.up.right.square")
                                 .frame(maxWidth: .infinity).padding(.vertical, 8)
@@ -111,6 +115,13 @@ struct MaxPS4JITSetupView: View {
                 MaxPS4FEXMetalExecution.queue.async { continuation.resume(returning: MaxPS4JITReadiness.check()) }
             }
             ready = result.ready; detail = result.detail; checking = false
+#if MAXPS4_FEX_APP
+            // Memory state 0 after a failed check: maxps4_jit_prepare found no request in this process (-13).
+            if !ready, let cause = MaxPS4JITRequestRecord.explain(state: maxps4_jit_state(),
+                requestPID: MaxPS4JITRequestRecord.requestPID(), currentPID: getpid()) {
+                detail += "\n" + cause
+            }
+#endif
             message = ready ? String(localized: "L’activation est vérifiée. Tu peux lancer ton jeu.", bundle: .maxps4) : String(localized: "Le JIT n’est pas encore prêt. Termine l’activation dans StikDebug, puis réessaie.", bundle: .maxps4)
         }
     }
