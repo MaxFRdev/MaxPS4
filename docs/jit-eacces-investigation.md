@@ -107,8 +107,11 @@ the iPhone.
 - Not changed: `maxps4_jit_memory.cpp`, the StikDebug script, the
   protections (W^X kept), SideStore. Nothing is bypassed and no permission is
   granted.
-- Test: `MaxPS4-iOS/Tests/JITRequestRecordTest.swift`, run by
-  `fexcore-app.yml` next to `StikRequestTest`.
+- Test: `MaxPS4-iOS/Tests/JITRequestRecordTest.swift`, to run with
+  `swiftc -parse-as-library MaxPS4-iOS/Sources/MaxPS4JITRequestRecord.swift
+  MaxPS4-iOS/Tests/JITRequestRecordTest.swift`. It is not in CI yet: adding it
+  to `fexcore-app.yml` needs a token with the `workflow` scope. The new file
+  is still type-checked by the jobs that compile `MaxPS4-iOS/Sources/*.swift`.
 
 ## 4. Fix plan
 
