@@ -28,12 +28,19 @@ enum MaxPS4StikActivation {
     }
     static func begin(completion: @escaping (String) -> Void) -> String {
 #if MAXPS4_FEX_APP
-        guard let installedURL = URL(string: "stikdebug://"), UIApplication.shared.canOpenURL(installedURL) else {
-            return String(localized: "StikDebug n’est pas disponible. Installer et configurer StikDebug, le pairing et le VPN selon ses instructions.", bundle: .maxps4)
-        }
+        // LiveContainer may use the host app URL-query allowlist.
+        // A failed canOpenURL query does not prove StikDebug is absent.
         guard let identity = processIdentity() else {
             return "Impossible d’identifier le processus hôte : activation JIT refusée."
         }
+        guard let installedURL = URL(string: "stikdebug://") else {
+            return "URL StikDebug invalide : activation JIT refusée."
+        }
+        guard UIApplication.shared.canOpenURL(installedURL) else {
+            let visibleBundle = Bundle.main.bundleIdentifier ?? "inconnu"
+            return "Schéma stikdebug:// inaccessible depuis ce processus. Hôte : \(identity.bundleID), PID : \(identity.pid), Bundle.main : \(visibleBundle). Vérifier LSApplicationQueriesSchemes dans l’application hôte LiveContainer et la présence de StikDebug. Aucune demande JIT envoyée."
+        }
+
         guard let sourceURL = Bundle.main.url(forResource: "maxps4-stik", withExtension: "js") ??
                   Bundle.main.url(forResource: "maxps4-stik", withExtension: "js", subdirectory: "JIT"),
               let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
