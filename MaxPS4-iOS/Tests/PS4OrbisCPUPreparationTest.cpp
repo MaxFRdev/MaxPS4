@@ -302,7 +302,13 @@ int main() {
             CHECK(vm.map(0,0x4000,3,0x1002,-1,0,first)==maxps4::ps4::ok && first==window);
             CHECK(!vm.translate(first,1,4)[0]); // Unmapped pages come back zeroed.
             uint64_t tooLarge=0;
-            CHECK(vm.map(0,windowBytes,3,0x1002,-1,0,tooLarge)==maxps4::ps4::nomem);
+            // The window, partly used, cannot hold it: the host may place it
+            // outside (macOS grants it; Linux CI refuses to commit that much).
+            {
+                const auto e=vm.map(0,windowBytes,3,0x1002,-1,0,tooLarge);
+                CHECK(e==maxps4::ps4::nomem || (e==maxps4::ps4::ok && (tooLarge+windowBytes<=window || tooLarge>=window+windowBytes)));
+                if (e==maxps4::ps4::ok) CHECK(vm.unmap(tooLarge,windowBytes)==maxps4::ps4::ok);
+            }
             // Host pages: a hint is a search start, MAP_FIXED replaces what the
             // span held, alignment holds, and a span unmapped inside a region
             // can be mapped again.
