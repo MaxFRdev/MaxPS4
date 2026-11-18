@@ -162,9 +162,53 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
     // Refusals are recorded too (result 0, the PS4 error): a game that runs
     // out of memory usually only says so in its own way (Mortal Kombat's
     // video decoder: VPX_CODEC_MEM_ERROR).
-    const Error e = place_unrecorded(hint, length, alignment, protection, fixed, result);
+    Error e = place_unrecorded(hint, length, alignment, protection, fixed, result);
+    if (e == nomem && !fixed) {
+        // The window has no free span large enough (Mortal Kombat Trilogy
+        // maps 2 GiB of direct memory at once into a 3 GiB window under
+        // LiveContainer): a span the host chooses outside it, as for a fixed
+        // address it grants. Recorded as a move (status -2) so the session
+        // report shows where it went.
+        uint64_t outside = 0;
+        if (place_outside(length, alignment, protection, outside) == ok) {
+            record_move(hint, length, outside, -2);
+            result = outside;
+            return ok;
+        }
+    }
     if (e) record_move(hint, length, 0, int(e));
     return e;
+}
+Error PS4VirtualMemory::place_outside(uint64_t length, uint64_t alignment, uint32_t protection, uint64_t& result) {
+    uint64_t window = 0, window_bytes = 0;
+    if (!image_.heap(window, window_bytes)) return nomem; // Bounded images: logical buffers only.
+    uint8_t permission;
+    if (permissions(protection, permission)) return nomem;
+    uint64_t size;
+    if (!rounded(length, size)) return nomem;
+    if (!alignment) alignment = page_size;
+    if (alignment < page_size || (alignment & (alignment - 1)) || alignment > (uint64_t{1} << 32)) return nomem;
+    if (size > host_budget - std::min<uint64_t>(used_, host_budget) || regions_.size() >= region_limit) return nomem;
+    // Over-reserve, then return the unaligned head and tail to the host.
+    const uint64_t extra = alignment > page_size ? alignment : 0;
+    if (size > UINT64_MAX - extra) return nomem;
+    void* got = ::mmap(nullptr, size_t(size + extra), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (got == MAP_FAILED) return nomem;
+    const uint64_t raw = reinterpret_cast<uintptr_t>(got);
+    const uint64_t at = (raw + alignment - 1) & ~(alignment - 1);
+    if (at > raw) ::munmap(got, size_t(at - raw));
+    if (raw + size + extra > at + size) ::munmap(reinterpret_cast<void*>(at + size), size_t(raw + size + extra - at - size));
+    // Guest code uses the address as is: it must be an x86-64 user address.
+    if (at + size > (uint64_t{1} << 47) || !host_protect(at, size, permission)) {
+        ::munmap(reinterpret_cast<void*>(at), size_t(size));
+        return nomem;
+    }
+    try {
+        insert({at, size, reinterpret_cast<uint8_t*>(at), {},
+                std::vector<uint8_t>(size_t(size / page_size), permission), true});
+    } catch (const std::bad_alloc&) { ::munmap(reinterpret_cast<void*>(at), size_t(size)); return nomem; }
+    used_ += size_t(size); result = at;
+    return ok;
 }
 Error PS4VirtualMemory::place_unrecorded(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
     bool fixed, uint64_t& result) {

@@ -2872,7 +2872,7 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
             std::fprintf(stderr,
                 "[MaxPS4 direct_map] place failed: error=%d hint=0x%llx length=0x%llx "
                 "physical=0x%llx owner=0x%llx owner_size=0x%llx offset=0x%llx "
-                "alignment=0x%llx protection=0x%x flags=0x%llx fixed=%d\\n",
+                "alignment=0x%llx protection=0x%x flags=0x%llx fixed=%d\n",
                 int(e), static_cast<unsigned long long>(hint),
                 static_cast<unsigned long long>(c.rsi),
                 static_cast<unsigned long long>(c.r8),

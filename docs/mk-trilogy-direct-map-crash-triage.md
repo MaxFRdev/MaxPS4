@@ -21,3 +21,8 @@ This branch adds a failure-only diagnostic on `dynamic_->place` in `S::direct_ma
 
 ## Validation
 No iPhone execution or local Xcode build was performed. CI status must be checked separately. Do not merge without validating that stderr diagnostics are captured and the game still behaves identically apart from logging.
+
+## Experimental fix (2026-11-18)
+Hypothesis: the 2 GiB `sceKernelMapDirectMemory` request does not fit in the 3 GiB mmap window left under LiveContainer, `place` returns ENOMEM (`0x8002000c`), the game ignores the failure and dereferences null (fault address `0x38`).
+
+`PS4VirtualMemory::place` now falls back, for non-fixed requests that the window cannot hold, to an aligned host span outside the window (`outside` region, released with `munmap`). The move is recorded with status `-2` in the session report's moved mappings. Risk: this consumes address space iOS would otherwise leave for FEX per-thread lookup caches; a later thread crash would point there. Needs on-device validation.
