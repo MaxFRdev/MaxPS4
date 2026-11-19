@@ -89,9 +89,13 @@ int main() {
         assert(call(S::close, other) == 0);
     }
     path("/app0/LINK"); assert(call(S::open, 0x10000) == kernel_error(loop));
-    for (const char* invalid : {"/app0/../data.bin", "/app0//data.bin", "/app0/./data.bin", "relative"}) {
+    for (const char* invalid : {"/app0/../data.bin", "/app0//data.bin", "/app0/./data.bin", "../data.bin"}) {
         path(invalid); assert(call(S::open, 0x10000) == kernel_error(inval));
     }
+    // Relative to the working directory, /app0.
+    path("SUB/Nested");
+    { const auto rel = call(S::open, 0x10000); assert(rel == 3 && call(S::close, rel) == 0); }
+    path("relative"); assert(call(S::open, 0x10000) == kernel_error(noent));
     for (const char* missing : {"/app0/missing", "/app01/data.bin", "/savedata0/file"}) {
         path(missing); assert(call(S::open, 0x10000) == kernel_error(noent));
     }
