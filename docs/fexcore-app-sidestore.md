@@ -1,186 +1,186 @@
-# MaxPS4 — FEXCore embarqué et IPA SideStore
+# MaxPS4 — embedded FEXCore and SideStore IPA
 
-Branche `codex/fexcore-app-integration`, base main
-`fecb7ef15b91ae051fe7a82058f412f6f06a4b9d` (PR #129 fusionnée).
-Runtime Darwin Aether épinglé `3347fc13f19860855ce91b66356940989ea6b6a6`.
+> **Historical report (PR #130, October 2026).** It describes the first FEXCore integration, before the JIT worked on iPhone. The JIT has since been enabled through StikDebug (see [docs/fexcore-stikdebug-jit.md](fexcore-stikdebug-jit.md) and the [README](../README.md#enabling-the-jit-with-livecontainer)).
 
-## Intégration
+Branch `codex/fexcore-app-integration`, main base
+`fecb7ef15b91ae051fe7a82058f412f6f06a4b9d` (PR #129 merged).
+Pinned Aether Darwin runtime `3347fc13f19860855ce91b66356940989ea6b6a6`.
 
-Le dépôt utilisait uniquement swiftc pour assembler une IPA. Le nouveau
-`MaxPS4-iOS/project.yml` génère un véritable projet Xcode via XcodeGen.
-La cible compile toutes les sources Swift existantes, conserve les ressources
-et embarque `MaxPS4FEXRuntime.framework`. Ce framework contient le runtime FEX
-cohérent, le pont natif et les adaptateurs CPU existants, sans objets génériques
-FEX ni deuxième bibliothèque FEX partagée. L'adaptateur ABI de l'allocateur
-Aether est ajouté pour préserver son diagnostic Swift existant ; il n'alloue rien.
-La frontière Swift/C utilise le header opaque de #128/#129.
+## Integration
 
-Onglet **Diagnostic → Tester FEXCore** : un écran lance le test sur une tâche
-hors du thread UI, interdit les lancements simultanés par ce bouton et affiche
-le système réellement détecté, le stade du contexte, CPUID invité et fournisseur,
-le debugger détecté (sans en déduire un droit JIT), erreurs, valeur et
-backend. Le handle est fermé par defer après chaque test.
-Sur iOS, InitCore retourne explicitement ENOTSUP comme dans #129 ; le véritable
-interpréteur natif MaxPS4 exécute mov eax,40/add eax,2/ret avec un budget de 32.
-Le résultat 42 n'est pas présenté comme une exécution JIT FEX. Les autres erreurs
-ne déclenchent pas un repli silencieux. Sur macOS, la même couche Swift appelle
-la sonde FEX JIT de #129, mov/add/hlt, sans interpréteur.
+The repository used only swiftc to assemble an IPA. The new
+`MaxPS4-iOS/project.yml` generates a real Xcode project through XcodeGen.
+The target builds all the existing Swift sources, keeps the resources and
+embeds `MaxPS4FEXRuntime.framework`. That framework contains the coherent FEX
+runtime, the native bridge and the existing CPU adapters, with no generic FEX
+objects and no second shared FEX library. The Aether allocator ABI adapter is
+added to keep its existing Swift diagnostic; it allocates nothing.
+The Swift/C boundary uses the opaque header from #128/#129.
 
-Le runtime livré définit MAXPS4_PLATFORM_JIT_ONLY : l'ancien allocateur BRK
-expérimental est refusé sur iOS, même si un debugger est attaché. Les interfaces
-et diagnostics restent disponibles mais ne tentent pas ce protocole externe.
-Aucun framework BreakpointJIT n'est livré ou chargé par le nouveau diagnostic.
-Les mécanismes de mémoire exécutable iOS conformes restent à intégrer avant
-activation FEX JIT. Ni SideStore, ni une signature de développement, ni un
-indicateur debugger ne suffisent à prouver les droits JIT.
+**Diagnostics → Test FEXCore** tab: a screen runs the test on a task off the UI
+thread, prevents simultaneous runs from this button and shows the system
+actually detected, the context stage, guest CPUID and vendor, the detected
+debugger (without inferring a JIT right from it), errors, value and backend.
+The handle is closed by defer after each test.
+On iOS, InitCore explicitly returns ENOTSUP as in #129; the real MaxPS4 native
+interpreter runs mov eax,40/add eax,2/ret with a budget of 32. The result 42 is
+not presented as a FEX JIT execution. Other errors do not trigger a silent
+fallback. On macOS, the same Swift layer calls the #129 FEX JIT probe,
+mov/add/hlt, without the interpreter.
 
-## Construction et vérification
+The shipped runtime defines MAXPS4_PLATFORM_JIT_ONLY: the old experimental BRK
+allocator is refused on iOS, even with a debugger attached. The interfaces and
+diagnostics remain available but do not attempt this external protocol.
+No BreakpointJIT framework is shipped or loaded by the new diagnostic.
+Compliant iOS executable-memory mechanisms remained to be integrated before
+enabling the FEX JIT. Neither SideStore, nor a development signature, nor a
+debugger flag is enough to prove JIT rights.
 
-Workflow **MaxPS4 FEXCore SideStore IPA** (`fexcore-app.yml`), automatiquement
-sur cette PR et disponible manuellement. Les anciens workflows/tests restent
-actifs ; l'ancien workflow IPA est nommé Legacy pour éviter de confondre les
-artefacts. Les anciennes configurations sans MAXPS4_FEX_APP affichent que FEX
-n'est pas embarqué plutôt que d'inventer un contexte.
+## Build and verification
 
-Le workflow exécute les tests natifs #129, huit diagnostics Swift réels sur
-macOS, puis compile le runtime iOS et l'application entière avec Xcode.
-`verify-fexcore-ipa.py` contrôle le ZIP, l'exécutable, le framework, ARM64,
-LC_BUILD_VERSION iOS, les chemins dyld, les imports/exports C utilisés par
-l'app, le véritable CreateNewContext FEX et l'absence de dépendances non SDK
-ou symboles FEX manquants. L'icône existante est conservée via un asset Xcode.
+**MaxPS4 FEXCore SideStore IPA** workflow (`fexcore-app.yml`), automatic on this
+PR and available manually. The old workflows/tests stay active; the old IPA
+workflow is named Legacy to avoid confusing the artifacts. Old configurations
+without MAXPS4_FEX_APP show that FEX is not embedded instead of inventing a
+context.
 
-Commandes macOS (SDK iPhoneOS, CMake, Ninja, XcodeGen requis) :
+The workflow runs the #129 native tests, eight real Swift diagnostics on macOS,
+then builds the iOS runtime and the whole application with Xcode.
+`verify-fexcore-ipa.py` checks the ZIP, the executable, the framework, ARM64,
+iOS LC_BUILD_VERSION, dyld paths, the C imports/exports used by the app, the
+real FEX CreateNewContext and the absence of non-SDK dependencies or missing
+FEX symbols. The existing icon is kept through an Xcode asset.
+
+macOS commands (iPhoneOS SDK, CMake, Ninja, XcodeGen required):
 
 ```sh
 bash scripts/build-fexcore-app.sh /path/to/pinned/AetherPS4
 python3 scripts/verify-fexcore-ipa.py build/MaxPS4-FEXCore-SideStore.ipa
 ```
 
-La compilation ne nécessite pas de certificat personnel. L'app n'est pas
-provisionnée et le framework est signé ad hoc après édition de son install name
-et après la suppression des headers par Xcode lors de son embarquement :
-**SideStore doit re-signer l'app et son framework**. Une signature ad hoc n'est
-pas une autorisation d'installation iPhone ni un entitlement JIT.
-Déploiement minimal iOS 18, architecture ARM64 ; compatible au niveau du format
-avec iOS 27.2, sous réserve de sa signature et des contrôles d'installation.
-Le runner utilise Xcode 26.6 et le SDK iOS 26.5. Cette compilation avec un SDK
-antérieur à 27.2 ne constitue pas un test sur ce système.
+The build needs no personal certificate. The app is not provisioned and the
+framework is ad hoc signed after its install name is edited and after Xcode
+strips its headers when embedding it: **SideStore must re-sign the app and its
+framework**. An ad hoc signature is neither an iPhone install authorization nor
+a JIT entitlement. Minimum deployment iOS 18, ARM64 architecture; format-wise
+compatible with iOS 27.2, subject to its signing and install checks.
+The runner uses Xcode 26.6 and the iOS 26.5 SDK. This build with an SDK older
+than 27.2 is not a test on that system.
 
-## Installation ou mise à jour SideStore
+## Installing or updating with SideStore
 
-1. Télécharger l'artefact **MaxPS4-FEXCore-SideStore** dans la page du workflow
-   réussi. Extraire le ZIP Actions pour obtenir `MaxPS4-FEXCore-SideStore.ipa`.
-2. Disposer d'une installation SideStore fonctionnelle, de ses prérequis de
-   pairing/réseau et d'un compte Apple utilisable pour la signature.
-3. Dans SideStore, importer l'IPA avec le bouton d'ajout d'application.
-   SideStore doit signer aussi le framework embarqué. Respecter les limites
-   d'applications/App IDs et la durée du profil indiquées par SideStore/Apple.
-4. Pour mettre à jour, réutiliser le même compte et la même identité bundle
-   finale. Sauvegarder les imports de jeux avant toute désinstallation :
-   supprimer l'app peut supprimer sa bibliothèque locale.
-5. Ouvrir MaxPS4 → Diagnostic → Tester FEXCore. Conserver le rapport affiché,
-   la version iOS et les éventuels messages d'installation/crash.
+1. Download the **MaxPS4-FEXCore-SideStore** artifact from the successful
+   workflow page. Extract the Actions ZIP to get `MaxPS4-FEXCore-SideStore.ipa`.
+2. Have a working SideStore install, with its pairing/network prerequisites and
+   an Apple account usable for signing.
+3. In SideStore, import the IPA with the add-app button. SideStore must also
+   sign the embedded framework. Respect the app/App ID limits and the profile
+   duration indicated by SideStore/Apple.
+4. To update, reuse the same account and the same final bundle identity. Back
+   up game imports before any uninstall: deleting the app can delete its local
+   library.
+5. Open MaxPS4 → Diagnostics → Test FEXCore. Keep the displayed report, the iOS
+   version and any install/crash messages.
 
-En cas d'échec de signature de framework, ne pas annoncer l'IPA installée :
-collecter l'erreur exacte de SideStore et le profil/identité sans publier de secret.
-Ne pas ajouter d'entitlements privés ou de contournement pour faire passer
-l'installation. Aucun jeu PS4 ni JIT sur iPhone n'est déclaré fonctionnel.
+If framework signing fails, do not announce the IPA as installed: collect the
+exact SideStore error and the profile/identity without publishing secrets.
+Do not add private entitlements or workarounds to get the install through.
+No PS4 game and no iPhone JIT was declared working at that stage.
 
-## Résultats vérifiés
+## Verified results
 
-Code final : `883781beace17cb1e0e3ce495a8a75dd9165eee4`.
+Final code: `883781beace17cb1e0e3ce495a8a75dd9165eee4`.
 
-| Validation | Résultat | Exécution |
+| Validation | Result | Run |
 | --- | --- | --- |
-| Application iOS entière via Xcode, framework embarqué, IPA | Réussi | [38133153640](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153640) |
-| ABI Swift/C, contexte réel, CPUID et RAX=42 par FEX JIT macOS | Huit cycles réussis | même run |
-| Nettoyage heap via leaks --atExit | Huit cycles supplémentaires ; 0 fuite / 0 octet perdu | même run |
-| Tests natifs #129, cycles, signaux, repli interprété | Réussis | même run et [38133153657](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153657) |
-| Liaison stricte FEX Darwin iOS et macOS | Réussie | 38133153657 |
-| Smoke existant, dont Swift frontend | Réussi | [38133153684](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153684) |
-| Heavy existant | Réussi | [38133153653](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153653) |
-| Installation/signature SideStore sur iOS 27.2 | Non exécutée | appareil nécessaire |
-| Interface tactile et diagnostic sur iPhone | Non exécutés ; compilation vérifiée | appareil nécessaire |
-| JIT FEX sur iPhone | Non exécuté et volontairement indisponible | fournisseur conforme manquant |
+| Whole iOS application through Xcode, embedded framework, IPA | Passed | [38133153640](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153640) |
+| Swift/C ABI, real context, CPUID and RAX=42 by FEX JIT on macOS | Eight cycles passed | same run |
+| Heap cleanup through leaks --atExit | Eight more cycles; 0 leaks / 0 bytes lost | same run |
+| #129 native tests, cycles, signals, interpreted fallback | Passed | same run and [38133153657](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153657) |
+| Strict FEX Darwin linking on iOS and macOS | Passed | 38133153657 |
+| Existing smoke, including the Swift frontend | Passed | [38133153684](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153684) |
+| Existing heavy | Passed | [38133153653](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153653) |
+| SideStore install/signing on iOS 27.2 | Not run | device needed |
+| Touch interface and diagnostic on iPhone | Not run; build verified | device needed |
+| FEX JIT on iPhone | Not run and deliberately unavailable | compliant provider missing |
 
-Le log du 11 octobre 2026 contient `Process 6817: 0 leaks for 0 total leaked bytes`
-à 10:50:02 UTC, `BUILD SUCCEEDED` à 10:53:49, puis le framework `valid on disk`
-et `satisfies its Designated Requirement`. Il s'agit d'une signature ad hoc,
-pas d'un profil iPhone. Le contrôle leaks porte sur le heap du programme hôte ;
-il ne mesure pas toutes les allocations VM, les tâches SwiftUI ni la mémoire
-sur un véritable iPhone.
+The log of October 11, 2026 contains `Process 6817: 0 leaks for 0 total leaked bytes`
+at 10:50:02 UTC, `BUILD SUCCEEDED` at 10:53:49, then the framework `valid on disk`
+and `satisfies its Designated Requirement`. This is an ad hoc signature, not
+an iPhone profile. The leaks check covers the host program's heap; it does not
+measure all VM allocations, SwiftUI tasks or memory on a real iPhone.
 
-Neuf tests Python de patch/diagnostics réussis localement, syntaxe shell et
-git diff --check réussis. Le test NativeJITPipelineTest.cpp a été recompilé
-avec g++ et les sept programmes ont réussi (ARM64 traité comme données,
-interpréteur réel). Cet hôte Linux ne possède ni swiftc ni Xcode ; les
-compilations et exécutions Apple ont été réalisées par les runners CI.
+Nine Python patch/diagnostic tests passed locally, shell syntax and
+git diff --check passed. The NativeJITPipelineTest.cpp test was rebuilt with
+g++ and the seven programs passed (ARM64 treated as data, real interpreter).
+This Linux host has neither swiftc nor Xcode; Apple builds and runs were done by
+the CI runners.
 
-## IPA livrée et inspection indépendante
+## Delivered IPA and independent inspection
 
-[Artefact IPA vérifié — MaxPS4-FEXCore-SideStore](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153640/artifacts/11699684286),
-identifiant `11699684286`, conservation jusqu'au 25 octobre 2026.
-L'artefact `11699414712` du même run contient les logs de compilation,
-tests, leaks et inspection. Les premières versions des commits cd812d2 et
-cdc49cc ont également produit une vraie IPA et passé leurs contrôles ;
-l'artefact ci-dessus ajoute la vérification du framework tel qu'il est livré.
+[Verified IPA artifact — MaxPS4-FEXCore-SideStore](https://github.com/MaxFRdev/MaxPS4/actions/runs/38133153640/artifacts/11699684286),
+ID `11699684286`, retained until October 25, 2026.
+Artifact `11699414712` from the same run contains the build, test, leaks and
+inspection logs. The first versions of commits cd812d2 and cdc49cc also
+produced a real IPA and passed their checks; the artifact above adds
+verification of the framework as shipped.
 
-L'archive a été téléchargée et contrôlée de nouveau avec verify-fexcore-ipa.py
-sur l'hôte Linux. Elle contient :
-- Payload/MaxPS4.app/MaxPS4 : véritable exécutable Mach-O ARM64 iOS.
-- Payload/MaxPS4.app/Frameworks/MaxPS4FEXRuntime.framework : véritable dylib
-  Darwin/FEX et Info.plist, signature ad hoc recalculée.
-- Info.plist, Assets.car et les ressources existantes de l'application.
+The archive was downloaded and checked again with verify-fexcore-ipa.py on the
+Linux host. It contains:
+- Payload/MaxPS4.app/MaxPS4: real iOS ARM64 Mach-O executable.
+- Payload/MaxPS4.app/Frameworks/MaxPS4FEXRuntime.framework: real Darwin/FEX
+  dylib and Info.plist, recomputed ad hoc signature.
+- Info.plist, Assets.car and the application's existing resources.
 
-Les deux binaires possèdent MH_NOUNDEFS, sont exécutables et ciblent iOS,
-pas le simulateur. L'app importe effectivement open/initialize/cpuid/run/close/stage
-depuis le framework. Celui-ci exporte ces fonctions et CreateNewContext réel.
-Ses seules dépendances dynamiques sont libSystem et libc++ ; ses 230 imports
-SDK ne sont pas des symboles FEX manquants. Aucun objet FEX générique, autre FEX
-partagé ou framework BreakpointJIT n'est embarqué. Identité com.enermaxfr.maxps4,
-version 0.2, build 3, déploiement iOS 18.0, SDK iphoneos26.5.
+Both binaries have MH_NOUNDEFS, are executable and target iOS, not the
+simulator. The app actually imports open/initialize/cpuid/run/close/stage from
+the framework, which exports these functions and the real CreateNewContext.
+Its only dynamic dependencies are libSystem and libc++; its 230 SDK imports are
+not missing FEX symbols. No generic FEX object, other shared FEX or
+BreakpointJIT framework is embedded. Identity com.enermaxfr.maxps4, version 0.2,
+build 3, iOS 18.0 deployment, iphoneos26.5 SDK.
 
-| Fichier vérifié | SHA-256 |
+| Verified file | SHA-256 |
 | --- | --- |
 | IPA | `ab8208861130b525e0f2ee9d138a0fb5f1225e8c7f028d6de062ac05ab1b86c9` |
-| Exécutable MaxPS4 | `669c280b22a236071ac90856757a9e22464d1c3897ebeb09471b2ab483223d7b` |
-| Framework natif | `75eda8a68853f9333249f5056c73de015427ce4f9a84b6cf637b474ffe1c6ed4` |
+| MaxPS4 executable | `669c280b22a236071ac90856757a9e22464d1c3897ebeb09471b2ab483223d7b` |
+| Native framework | `75eda8a68853f9333249f5056c73de015427ce4f9a84b6cf637b474ffe1c6ed4` |
 
-Une IPA de compilation vérifiée n'est pas une IPA dont l'installation SideStore
-a été exécutée. La signature personnelle de l'app et de son framework,
-l'acceptation du profil et le lancement sur iOS 27.2 restent à vérifier.
-En cas de refus, conserver l'erreur exacte ; aucun faux paquet ne remplace le build.
+A verified build IPA is not an IPA whose SideStore install has been run. The
+personal signing of the app and its framework, profile acceptance and launch on
+iOS 27.2 remained to be verified. If refused, keep the exact error; no fake
+package replaces the build.
 
-## Protocole iPhone et blocages restants
+## iPhone protocol and remaining blockers
 
-Après installation, vérifier successivement le lancement et les écrans existants,
-puis Diagnostic → Tester FEXCore. Résultat attendu d'après le code iOS :
-contexte créé/stade 1, CPUID invité GenuineIntel, InitCore ENOTSUP, résultat 42
-par l'interpréteur natif MaxPS4, sans JIT FEX. Il s'agit d'une attente, pas
-d'un résultat appareil observé.
+After install, check in turn the launch and existing screens, then
+Diagnostics → Test FEXCore. Expected result from the iOS code: context
+created/stage 1, guest CPUID GenuineIntel, InitCore ENOTSUP, result 42 by the
+MaxPS4 native interpreter, without the FEX JIT. This is an expectation, not an
+observed device result.
 
-Répéter vingt fois, fermer/réouvrir l'écran, suspendre et relancer l'app, relever
-latence, éventuel crash et évolution du heap/VM avec les outils autorisés
-(Instruments/Xcode si disponibles). Tester aussi sous pression mémoire.
-Les tâches du diagnostic sont bornées mais les erreurs OOM/assertions internes
-FEX ne sont pas garanties récupérables. Aucune absence de crash/blocage/fuite
-sur iPhone n'est revendiquée avant ces mesures.
+Repeat twenty times, close/reopen the screen, suspend and relaunch the app,
+record latency, any crash and heap/VM changes with the authorized tools
+(Instruments/Xcode if available). Also test under memory pressure.
+Diagnostic tasks are bounded but FEX internal OOM errors/assertions are not
+guaranteed to be recoverable. No absence of crash/hang/leak on iPhone is
+claimed before these measurements.
 
-Le JIT iOS nécessite encore un fournisseur de mémoire exécutable autorisé,
-des mappings RW/RX avec durée de vie contrôlée, la délégation Darwin complète
-des fautes/arrêts/suspensions, l'invalidation du cache et les safepoints.
-L'app ne tentera pas d'activer ces fonctions avec une simple présence debugger.
-Les syscall/HLE PS4, GPU et exécution de jeux restent hors de cette sonde.
+At the time, the iOS JIT still needed an authorized executable-memory
+provider, RW/RX mappings with controlled lifetime, complete Darwin delegation of
+faults/stops/suspensions, cache invalidation and safepoints. The app does not
+try to enable these functions from the mere presence of a debugger.
+PS4 syscalls/HLE, GPU and game execution are outside this probe.
 
-## Commits et état Git
+## Commits and Git state
 
-| Commit | Changement |
+| Commit | Change |
 | --- | --- |
-| `cd812d20ff442f90fd8bf9081c3bc686f2078ccd` | Application Xcode, framework réel, écran Swift et IPA vérifiée |
-| `cdc49ccd29b3ffa14ba94477dcabe8f2d689b48b` | CPUID/debugger détectés et test des fuites heap |
-| `883781beace17cb1e0e3ce495a8a75dd9165eee4` | Signature du framework après copie, modes exécutables et asset icon |
+| `cd812d20ff442f90fd8bf9081c3bc686f2078ccd` | Xcode application, real framework, Swift screen and verified IPA |
+| `cdc49ccd29b3ffa14ba94477dcabe8f2d689b48b` | Detected CPUID/debugger and heap leak test |
+| `883781beace17cb1e0e3ce495a8a75dd9165eee4` | Framework signing after copy, executable modes and icon asset |
 
-Le commit documentaire suivant complète ce rapport et le README. Ses résultats
-CI sont consignés dans la description de la [PR #130](https://github.com/MaxFRdev/MaxPS4/pull/130).
-Aucun test antérieur n'est retiré. Aucun commit de fusion ni modification
-directe de main ; la PR n'est pas fusionnée automatiquement.
+The following documentation commit completes this report and the README. Its CI
+results are recorded in the description of [PR #130](https://github.com/MaxFRdev/MaxPS4/pull/130).
+No earlier test is removed. No merge commit and no direct change to main; the
+PR is not merged automatically.

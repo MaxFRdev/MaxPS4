@@ -182,3 +182,7 @@
 "Mode développeur désactivé." = "Modo desenvolvedor desativado.";
 "Contenus additionnels" = "Conteúdo adicional";
 "Afficher les images par seconde" = "Mostrar quadros por segundo";
+"URL StikDebug invalide : activation JIT refusée." = "URL do StikDebug inválida: ativação do JIT recusada.";
+"Identifiant du processus absent. Dans LiveContainer, active Use LiveContainer's Bundle ID. Activation refusée." = "Identificador do processo ausente. No LiveContainer, ative Use LiveContainer's Bundle ID. Ativação recusada.";
+"Impossible d’identifier le processus MaxPS4 : activation JIT refusée." = "Não foi possível identificar o processo do MaxPS4: ativação do JIT recusada.";
+"iOS n’a pas ouvert StikDebug. Vérifie sa configuration dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID. JIT indisponible." = "O iOS não abriu o StikDebug. Verifique a configuração no LiveContainer, o JIT enabler e Use LiveContainer's Bundle ID. JIT indisponível.";

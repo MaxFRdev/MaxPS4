@@ -7,7 +7,7 @@ enum MaxPS4StikActivation {
 #if MAXPS4_FEX_APP
         let isLiveContainer = MaxPS4StikEnvironment.isLiveContainer(environment: ProcessInfo.processInfo.environment)
         guard let installedURL = URL(string: "stikdebug://") else {
-            return "URL StikDebug invalide : activation JIT refusee."
+            return String(localized: "URL StikDebug invalide : activation JIT refusée.", bundle: .maxps4)
         }
         if MaxPS4StikEnvironment.shouldPreflightStikDebug(isLiveContainer: isLiveContainer),
            !UIApplication.shared.canOpenURL(installedURL) {
@@ -16,8 +16,8 @@ enum MaxPS4StikActivation {
         guard let target = MaxPS4StikEnvironment.target(bundleIdentifier: Bundle.main.bundleIdentifier,
                                                         processID: getpid()) else {
             return isLiveContainer
-                ? "Identifiant du processus absent. Dans LiveContainer, activer Use LiveContainer's Bundle ID. Activation refusee."
-                : "Impossible d'identifier le processus MaxPS4 ; activation JIT refusee."
+                ? String(localized: "Identifiant du processus absent. Dans LiveContainer, active Use LiveContainer's Bundle ID. Activation refusée.", bundle: .maxps4)
+                : String(localized: "Impossible d’identifier le processus MaxPS4 : activation JIT refusée.", bundle: .maxps4)
         }
         guard let sourceURL = Bundle.main.url(forResource: "maxps4-stik", withExtension: "js") ??
                   Bundle.main.url(forResource: "maxps4-stik", withExtension: "js", subdirectory: "JIT"),
@@ -39,7 +39,7 @@ enum MaxPS4StikActivation {
             if opened {
                 completion(String(localized: "Termine l’activation dans StikDebug, puis reviens dans MaxPS4.", bundle: .maxps4))
             } else if isLiveContainer {
-                completion("iOS n'a pas ouvert StikDebug. Verifier sa configuration dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID. JIT indisponible.")
+                completion(String(localized: "iOS n’a pas ouvert StikDebug. Vérifie sa configuration dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID. JIT indisponible.", bundle: .maxps4))
             } else {
                 completion(String(localized: "Ouverture de StikDebug refusée ; JIT indisponible. Réessayer l’activation.", bundle: .maxps4))
             }

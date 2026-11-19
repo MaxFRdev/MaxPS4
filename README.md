@@ -109,9 +109,9 @@ MaxPS4 needs the JIT to run games. Under LiveContainer, MaxPS4 itself asks StikD
 5. StikDebug opens and runs MaxPS4's script. Wait for the script to finish, then go back to MaxPS4: the screen should show **JIT ready**.
 6. Launch a game. The JIT must be enabled again each time MaxPS4 is relaunched.
 
-**If it fails**, MaxPS4 shows the cause (these messages are currently in French only):
-- *Identifiant du processus absent… activer Use LiveContainer's Bundle ID* (process ID missing): redo step 2, then relaunch MaxPS4.
-- *iOS n'a pas ouvert StikDebug* (iOS did not open StikDebug): check that StikDebug is installed and, in LiveContainer, the JIT enabler and Use LiveContainer's Bundle ID.
+**If it fails**, MaxPS4 shows the cause:
+- *Process identifier missing… turn on Use LiveContainer's Bundle ID*: redo step 2, then relaunch MaxPS4.
+- *iOS did not open StikDebug*: check that StikDebug is installed and, in LiveContainer, the JIT enabler and Use LiveContainer's Bundle ID.
 - StikDebug opens but the JIT stays inactive: check StikDebug's PairingFile and VPN, then try again.
 
 The PairingFile is specific to your iPhone: keep it private and never attach it to MaxPS4 reports. This method was validated on iPhone 15 Pro Max (iOS 27.2); it is not a guarantee for every device.
@@ -126,7 +126,7 @@ MaxPS4 decrypts nothing: you need an already-extracted game folder from games yo
 - **Content**: no commercial game, PS4 firmware, key, protected encrypted content or PKG file is provided, and MaxPS4 circumvents no protection. Only use games you own.
 - **App Store**: publishing on the App Store is not a goal; experimental IPA distribution remains subject to the licenses and to iOS signing restrictions.
 
-See the detailed document [Compliance, attribution and legal limits](docs/LEGAL-COMPLIANCE.md) (in French).
+See the detailed document [Compliance, attribution and legal limits](docs/LEGAL-COMPLIANCE.md).
 
 ## Contributing and community
 
