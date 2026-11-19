@@ -85,8 +85,32 @@ Un jeu qui bloque laisse un rapport dans **MaxPS4 › Rapports** : partage-le su
 
 1. Télécharger l'IPA produite par le workflow [MaxPS4 FEXCore SideStore IPA](https://github.com/MaxFRdev/MaxPS4/actions/workflows/fexcore-app.yml) (artefact **MaxPS4-FEXCore-SideStore.ipa** ; GitHub peut fournir une archive ZIP : l'extraire pour obtenir le fichier `.ipa` avant l'import dans LiveContainer ou SideStore) et l'installer avec **SideStore**.
 2. Dans StikDebug, importer le **même PairingFile** que celui utilisé par SideStore, puis configurer la connexion et le VPN selon le guide StikDebug. Le PairingFile autorise l’appairage; il n’active pas le JIT à lui seul.
-3. Revenir dans MaxPS4 et toucher **JIT** pour lancer l’activation StikDebug. Voir [le protocole SideStore + StikDebug](docs/fexcore-stikdebug-jit.md).
+3. Revenir dans MaxPS4 et toucher **JIT** pour lancer l’activation StikDebug. Voir [le protocole SideStore + StikDebug](docs/fexcore-stikdebug-jit.md), ou [la marche à suivre avec LiveContainer](#activer-le-jit-avec-livecontainer).
 4. Copier le dossier complet de ton jeu (`eboot.bin`, `sce_module`, `sce_sys` et ses données) dans **Sur mon iPhone › MaxPS4 › Jeux**, puis toucher **Jouer**.
+
+### Activer le JIT avec LiveContainer
+
+MaxPS4 a besoin du JIT pour exécuter les jeux. Sous LiveContainer, c'est MaxPS4 lui-même qui demande à StikDebug de l'activer : il lui envoie son propre processus et un script d'activation intégré, rien à copier à la main.
+
+**Prérequis**
+- **SideStore** installé et fonctionnel, avec **LiveContainer** installé par SideStore.
+- **StikDebug** installé, avec le **même PairingFile** que SideStore, et sa connexion/VPN configurés selon le guide StikDebug.
+- L'IPA **MaxPS4-FEXCore-SideStore.ipa** (extraire le `.ipa` si GitHub fournit un ZIP).
+
+**Étapes**
+1. Dans LiveContainer, importer l'IPA de MaxPS4.
+2. Ouvrir les réglages de MaxPS4 dans LiveContainer (appui long sur l'app) et activer **Use LiveContainer's Bundle ID**. Sans ce réglage, MaxPS4 refuse l'activation : StikDebug ne trouverait pas le bon processus.
+3. Si LiveContainer propose un **JIT enabler**, choisir **StikDebug**.
+4. Lancer MaxPS4 depuis LiveContainer, toucher **JIT**, puis **Activer avec StikDebug**.
+5. StikDebug s'ouvre et exécute le script de MaxPS4. Attendre la fin du script, puis revenir dans MaxPS4 : l'écran doit afficher **JIT prêt**.
+6. Lancer un jeu. Le JIT est à réactiver à chaque nouveau lancement de MaxPS4.
+
+**En cas d'échec**, MaxPS4 affiche la cause :
+- *Identifiant du processus absent… activer Use LiveContainer's Bundle ID* : refaire l'étape 2, puis relancer MaxPS4.
+- *iOS n'a pas ouvert StikDebug* : vérifier que StikDebug est installé et, dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID.
+- StikDebug s'ouvre mais le JIT reste inactif : vérifier le PairingFile et le VPN de StikDebug, puis réessayer.
+
+Le PairingFile est propre à ton iPhone : garde-le privé et ne le joins jamais aux rapports MaxPS4. Cette méthode a été validée sur iPhone 15 Pro Max (iOS 27.2) ; ce n'est pas une garantie pour tous les appareils.
 
 MaxPS4 ne déchiffre rien : il faut un dossier de jeu déjà extrait, issu de tes propres jeux. Le développement se poursuit dans plusieurs branches et pull requests expérimentales ; consulte le tableau d'avancement ci-dessus pour les travaux récents.
 
