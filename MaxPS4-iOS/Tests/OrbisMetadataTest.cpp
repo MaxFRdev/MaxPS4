@@ -92,6 +92,10 @@ int main(int argc, char** argv) {
         uint64_t expected = kind==0 ? 0 : kind==1 ? 0x10fff : 0x11000;
         assert(maxps4::OrbisMetadata::read(p.modules[1].regions[1].bytes.data(),8)==expected);
     }
+    { // R_RELATIVE with a symbol index (CoD MWR's libc.prx): base + addend.
+        auto variant=inputs; put(variant[1].bytes,(1ULL<<32)|8,0xc08); put(variant[1].bytes,0x1000,0xc10);
+        assert(p.prepare(variant) && maxps4::OrbisMetadata::read(p.modules[1].regions[1].bytes.data(),8)==0x21000);
+    }
     auto initialized=inputs; appendTag(initialized[0].bytes,12,0x1000);
     assert(p.prepare(initialized) && p.modules[0].metadata.init==0x1000);
     p.unload(); assert(p.modules.empty() && p.initializationOrder.empty());
