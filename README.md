@@ -23,16 +23,16 @@
 | --- | --- | --- |
 | JIT FEXCore sur iOS avec LiveContainer et StikDebug | **Fusionné dans `main`** ; activation confirmée sur iPhone lors d'un test utilisateur ; le lancement de certains jeux reste bloqué | [PR #325](https://github.com/MaxFRdev/MaxPS4/pull/325) |
 | Compatibilité des jeux et modules PRX | Travaux expérimentaux en cours ; vérifier chaque jeu sur appareil | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
-| Mortal Kombat Trilogy (CUSA53178) | Le jeu commence à s'exécuter mais plante avant la première image ; diagnostic de mémoire directe en cours | [PR #326](https://github.com/MaxFRdev/MaxPS4/pull/326) |
+| Mortal Kombat Trilogy (CUSA53178) | **Intro et menu affichés avec le son (~56–60 FPS)** ; le lancement du jeu PS1 ne plante plus mais son image reste vide (`HW render: callback setup error`) | [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329) |
 | GPU GNM/PM4 vers Metal | Corrections et tests de compatibilité en cours | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
 
 ### LiveContainer et SideStore
 
 - **SideStore** : méthode d'installation décrite ci-dessous ; l'activation du JIT nécessite toujours les autorisations et la configuration StikDebug appropriées.
 - **LiveContainer** : lors d'un test sur iPhone 15 Pro Max (iOS 27.2), StikDebug s'est ouvert et MaxPS4 a indiqué que le JIT était actif avec la version issue de la [PR #325], désormais fusionnée dans `main`(https://github.com/MaxFRdev/MaxPS4/pull/325). C'est une **validation ponctuelle**, pas une garantie de compatibilité sur tous les appareils.
-- **Limite actuelle** : malgré le JIT actif, Mortal Kombat Trilogy (CUSA53178) s'arrête avant le premier rendu Metal : signal 11, adresse `0x38`, RIP invité `0x7003f31320` ; un appel `sceKernelMapDirectMemory` échoue. La [PR #326](https://github.com/MaxFRdev/MaxPS4/pull/326) ajoute des traces pour diagnostiquer cet échec sans changer le comportement mémoire.
+- **Limite actuelle** : dans Mortal Kombat Trilogy (CUSA53178), l'émulateur PS1 intégré au jeu démarre mais n'affiche pas d'image : il signale `HW render: callback setup error` sans qu'aucun appel PS4 n'échoue. Les plantages mémoire du démarrage sont corrigés par la [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329).
 
-La [PR #325](https://github.com/MaxFRdev/MaxPS4/pull/325) est fusionnée dans `main` et remplace les PR #319, #320, #322, #323 et #324 ; l'IPA SideStore produite depuis `main` l'inclut. La [PR #326](https://github.com/MaxFRdev/MaxPS4/pull/326) reste expérimentale et non fusionnée. L'activation du JIT ne signifie pas qu'un jeu est jouable.
+La [PR #325](https://github.com/MaxFRdev/MaxPS4/pull/325) est fusionnée dans `main` et remplace les PR #319, #320, #322, #323 et #324 ; l'IPA SideStore produite depuis `main` l'inclut. La [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329) est fusionnée et remplace la PR #326. L'activation du JIT ne signifie pas qu'un jeu est jouable.
 
 ## Ce qui marche aujourd'hui
 
