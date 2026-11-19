@@ -26,3 +26,8 @@ No iPhone execution or local Xcode build was performed. CI status must be checke
 Hypothesis: the 2 GiB `sceKernelMapDirectMemory` request does not fit in the 3 GiB mmap window left under LiveContainer, `place` returns ENOMEM (`0x8002000c`), the game ignores the failure and dereferences null (fault address `0x38`).
 
 `PS4VirtualMemory::place` now falls back, for non-fixed requests that the window cannot hold, to an aligned host span outside the window (`outside` region, released with `munmap`). The move is recorded with status `-2` in the session report's moved mappings. Risk: this consumes address space iOS would otherwise leave for FEX per-thread lookup caches; a later thread crash would point there. Needs on-device validation.
+
+## Device result and follow-up (2026-11-19)
+With the outside-window placement (`0x0 + 0x80000000 -> 0x70dd400000 (code -2)`), the game no longer crashes: it reaches the title flow at 60 FPS. After a button press it starts the intro videos; a `pthread_create` then returns EAGAIN (35), libvpx logs `vpx_codec_decode() returned [1]` (its tile-worker creation failure) and the game traps (SIGILL).
+
+Cause: the 2 GiB placed outside the window leaves ~1.3 GiB of the 3.3 GiB spare; each new thread first needs `fexLookupCacheBytes` (112 MiB) of address space, so only ~11 threads fit. The per-thread FEX lookup cache is reduced to 64 MiB (page table for 8 GiB, 32 MiB of block pointers), about 20 threads in the same space.
