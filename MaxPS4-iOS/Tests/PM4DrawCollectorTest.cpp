@@ -82,6 +82,47 @@ int main() {
         assert(f.full.size() == 3 && f.stats.skipped == 2);
     }
     {
+        // Stencil: DB_STENCIL_INFO 8-bit, STENCIL_ENABLE with EQUAL front and
+        // NOTEQUAL back (BACKFACE_ENABLE), ops and ref/mask per face.
+        Fixture f;
+        f.run({0xc0016900, 0x10, 3, 0xc0016900, 0x11, 1, 0xc0016900, 0x14, 0x1000, 0xc0016900, 0x15, 0x1000,
+               0xc0016900, 0x16, 1 | (2 << 11),
+               0xc0016900, 0x10b, 1 | (3 << 4) | (5 << 8) | (7 << 12) | (8 << 16) | (9 << 20),
+               0xc0016900, 0x10c, 0x01ff0f80, 0xc0016900, 0x10d, 0x02f0ff40,
+               0xc0016900, 0x200, 1 | 2 | (3 << 4) | 0x80 | (2 << 8) | (5u << 20), 0xc0012d00, 3, 2});
+        assert(f.stats.failed == 0 && f.full.size() == 1 && f.stats.stencilTested == 1);
+        const PM4Draw& d = f.full[0];
+        assert(d.stencilTest && !d.stencilClear && d.depthTest && !d.depthWrite && d.depthTarget == 0x100000);
+        assert(d.stencil[0].func == 2 && d.stencil[0].fail == 1 && d.stencil[0].zpass == 3 && d.stencil[0].zfail == 5);
+        assert(d.stencil[0].ref == 0x80 && d.stencil[0].mask == 0x0f && d.stencil[0].writeMask == 0xff && d.stencil[0].opValue == 1);
+        assert(d.stencil[1].func == 5 && d.stencil[1].fail == 7 && d.stencil[1].zpass == 8 && d.stencil[1].zfail == 9);
+        assert(d.stencil[1].ref == 0x40 && d.stencil[1].mask == 0xff && d.stencil[1].writeMask == 0xf0 && d.stencil[1].opValue == 2);
+        assert(f.stats.depthReport().find("1 avec stencil") != std::string::npos);
+        // Without BACKFACE_ENABLE the back face takes the front's state.
+        f.run({0xc0016900, 0x200, 1 | (2 << 8), 0xc0012d00, 3, 2});
+        assert(f.full.size() == 2 && f.full[1].stencilTest && !f.full[1].depthTest);
+        assert(f.full[1].stencil[1].func == 2 && f.full[1].stencil[1].zpass == 3 && f.full[1].stencil[1].ref == 0x80);
+        // Without a stencil format, stencil is off and the draw has no depth buffer.
+        f.run({0xc0016900, 0x11, 0, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 3 && !f.full[2].stencilTest && f.full[2].depthTarget == 0);
+    }
+    {
+        // A stencil-only buffer (DB_Z_INFO 0): a mask written without colour is
+        // reported with depthOnlyDraws, at the stencil address; a stencil clear too.
+        Fixture f;
+        f.collector.depthOnlyDraws = true;
+        f.run({0xc0016900, 0x11, 1, 0xc0016900, 0x13, 0x3000, 0xc0016900, 0x16, 3 | (1 << 11), 0xc0016900, 0x8e, 0,
+               0xc0016900, 0x10b, 3 << 4, 0xc0016900, 0x10c, 0x00ffff01,
+               0xc0016900, 0x200, 1 | (7 << 8), 0xc0012d00, 3, 2});
+        assert(f.stats.failed == 0 && f.full.size() == 1 && f.stats.skipped == 0);
+        assert(!f.full[0].colour && f.full[0].depthTarget == 0x300000 && f.full[0].stencilTest && !f.full[0].depthTest);
+        // KEEP everywhere writes nothing: skipped.
+        f.run({0xc0016900, 0x10b, 0, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 1 && f.stats.skipped == 1);
+        f.run({0xc0016900, 0x00, 2, 0xc0016900, 0x0a, 0x1a5, 0xc0016900, 0x200, 0, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 2 && f.full[1].stencilClear && f.full[1].stencilClearValue == 0xa5 && !f.full[1].depthClear);
+    }
+    {
         // 16_16_16_16 FLOAT fails unless otherTargetFormats, then carries its format.
         Fixture f;
         f.run({0xc0016900, 0x31c, (0xcu << 2) | (7u << 8), 0xc0012d00, 3, 2});
