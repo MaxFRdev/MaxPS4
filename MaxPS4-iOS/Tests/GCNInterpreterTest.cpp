@@ -118,14 +118,31 @@ int main() {
         assert(wave.exports[1].value[0][0] == 0x38003c00 && wave.exports[1].value[1][0] == 0x3c000000);
         assert(wave.exports[1].value[0][1] == 0x3c000000 && wave.exports[1].value[1][1] == 0x3c000000);
         assert(gcn_detail::f16(0x3800) == 0.5f && gcn_detail::f16Rtz(0.5f) == 0x3800 && gcn_detail::f16Rtz(1e6f) == 0x7bff);
-        // A tiled texture is refused, not read as linear.
+        // The same texels Thin_1dThin (tile mode 13) at 0x14000, in their 8x8
+        // tile's Morton order: the same exports.
+        for (unsigned row = 0; row < 2; ++row) for (unsigned x = 0; x < 4; ++x)
+            arena.put16(0x14000 + std::uint32_t(gcnElementOffset(13, x, row, 4, 2)), texels[x]);
+        GCNWave micro(arena.memory, 4);
+        GCNImageCache microImages;
+        micro.images = &microImages;
+        for (unsigned n = 0; n < 8; ++n) micro.s[n] = tsharp[n];
+        for (unsigned n = 0; n < 4; ++n) { micro.s[8 + n] = ssharp[n]; micro.s[12 + n] = vsharp[n]; }
+        micro.s[0] = 0x140; micro.s[3] = 0x90d0032e;
+        micro.setExec(0x7);
+        for (unsigned lane = 0; lane < 4; ++lane) { micro.v(0, lane) = u32(i[lane]); micro.v(1, lane) = 0; }
+        micro.attribute = wave.attribute;
+        if (!micro.run(0x10000)) { std::printf("%s\n", micro.error.c_str()); assert(false); }
+        assert(microImages.size() == 1 && microImages.begin()->second.size() == 64 * 2); // one padded tile
+        for (unsigned lane = 0; lane < 3; ++lane) for (unsigned c = 0; c < 2; ++c)
+            assert(micro.exports[1].value[c][lane] == wave.exports[1].value[c][lane]);
+        // A 2D (macro) tiled texture is refused, not read as linear.
         arena.put(0x12000 - 0x2000, 0); // unrelated write keeps the arena in use
         GCNWave tiled(arena.memory, 4);
         for (unsigned n = 0; n < 8; ++n) tiled.s[n] = tsharp[n];
         for (unsigned n = 0; n < 4; ++n) { tiled.s[8 + n] = ssharp[n]; tiled.s[12 + n] = vsharp[n]; }
-        tiled.s[3] = 0x90d0032e;
+        tiled.s[3] = 0x90e0032e;
         tiled.attribute = wave.attribute;
-        assert(!tiled.run(0x10000) && tiled.error.find("tiled image (tile mode 13)") == 0);
+        assert(!tiled.run(0x10000) && tiled.error.find("tiled image (tile mode 14)") == 0);
     }
     // 3. A VS calling a fetch shader (s_swappc/s_setpc), a scalar loop and VOP3.
     {

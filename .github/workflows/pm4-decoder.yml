@@ -40,6 +40,8 @@ jobs:
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic MaxPS4-iOS/Tools/gcn-shader-inventory.cpp -o /tmp/gcn-shader-inventory
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/GCNInterpreterTest.cpp -o /tmp/gcn-interpreter-test
           /tmp/gcn-interpreter-test
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/GCNTilingTest.cpp -o /tmp/gcn-tiling-test
+          /tmp/gcn-tiling-test
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/PM4SoftwareRendererTest.cpp -o /tmp/pm4-software-test
           /tmp/pm4-software-test
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer MaxPS4-iOS/Tests/PM4DrawCollectorTest.cpp -o /tmp/pm4-collector-test
