@@ -261,7 +261,7 @@ struct MaxPS4HomeView: View {
                 }
                 .padding(18).frame(maxWidth: .infinity, alignment: .leading)
                 .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
-                Text("MaxPS4 · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")")
+                Text("MaxPS4 · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")\((Bundle.main.object(forInfoDictionaryKey: "MaxPS4ReleaseChannel") as? String).map { " " + $0 } ?? "") · build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")")
                     .font(.footnote).foregroundStyle(.white.opacity(0.55))
                     // Hidden from players: five taps on the version line turn the
                     // test options and technical reports on or off (for support).
