@@ -186,3 +186,6 @@
 "Identifiant du processus absent. Dans LiveContainer, active Use LiveContainer's Bundle ID. Activation refusée." = "Prozesskennung fehlt. Aktiviere in LiveContainer Use LiveContainer's Bundle ID. Aktivierung abgelehnt.";
 "Impossible d’identifier le processus MaxPS4 : activation JIT refusée." = "Der MaxPS4-Prozess konnte nicht ermittelt werden: JIT-Aktivierung abgelehnt.";
 "iOS n’a pas ouvert StikDebug. Vérifie sa configuration dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID. JIT indisponible." = "iOS hat StikDebug nicht geöffnet. Prüfe die Einrichtung in LiveContainer, den JIT enabler und Use LiveContainer's Bundle ID. JIT nicht verfügbar.";
+
+"Select, pavé tactile" = "Select, Touchpad";
+"Start, Options" = "Start, Optionen";
