@@ -1126,6 +1126,21 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                               (t[2] & 0x3fff) + 1, ((t[2] >> 14) & 0x3fff) + 1, (t[3] >> 20) & 31, (unsigned long long)base,
                               targets_.count(base) ? " (rendue GPU)" : "");
                 batchDraws += text;
+                // A texture the CPU writes (Mortal Kombat Trilogy's PS1 frame):
+                // whether its memory holds anything but black, from 1024
+                // pixels spread over it (tiling only reorders them).
+                if (!targets_.count(base) && ((t[1] >> 20) & 63) == 10) {
+                    const std::uint64_t pixels = std::uint64_t((t[2] & 0x3fff) + 1) * (((t[2] >> 14) & 0x3fff) + 1);
+                    unsigned lit = 0, read = 0;
+                    for (unsigned k = 0; k < 1024; ++k) {
+                        std::uint8_t px[4];
+                        if (!code_.read(base + 4 * (pixels * k / 1024), px, 4)) continue;
+                        ++read;
+                        lit += (px[0] | px[1] | px[2]) != 0;
+                    }
+                    std::snprintf(text, sizeof text, " (memoire : %u/%u pixels non noirs)", lit, read);
+                    batchDraws += text;
+                }
             }
         }
     }

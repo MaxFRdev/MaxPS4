@@ -23,14 +23,14 @@
 | --- | --- | --- |
 | JIT FEXCore sur iOS avec LiveContainer et StikDebug | **Fusionné dans `main`** ; activation confirmée sur iPhone lors d'un test utilisateur ; le lancement de certains jeux reste bloqué | [PR #325](https://github.com/MaxFRdev/MaxPS4/pull/325) |
 | Compatibilité des jeux et modules PRX | Travaux expérimentaux en cours ; vérifier chaque jeu sur appareil | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
-| Mortal Kombat Trilogy (CUSA53178) | **Intro et menu affichés avec le son (~56–60 FPS)** ; le lancement du jeu PS1 ne plante plus mais son image reste vide (`HW render: callback setup error`) | [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329) |
+| Mortal Kombat Trilogy (CUSA53178) | **Jouable sur iPhone** : intro et menu (~56–60 FPS), jeu PS1 lancé depuis le menu, combats et son confirmés lors d'un test utilisateur ; cadence en combat non mesurée | [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329) |
 | GPU GNM/PM4 vers Metal | Corrections et tests de compatibilité en cours | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
 
 ### LiveContainer et SideStore
 
 - **SideStore** : méthode d'installation décrite ci-dessous ; l'activation du JIT nécessite toujours les autorisations et la configuration StikDebug appropriées.
 - **LiveContainer** : lors d'un test sur iPhone 15 Pro Max (iOS 27.2), StikDebug s'est ouvert et MaxPS4 a indiqué que le JIT était actif avec la version issue de la [PR #325], désormais fusionnée dans `main`(https://github.com/MaxFRdev/MaxPS4/pull/325). C'est une **validation ponctuelle**, pas une garantie de compatibilité sur tous les appareils.
-- **Limite actuelle** : dans Mortal Kombat Trilogy (CUSA53178), l'émulateur PS1 intégré au jeu démarre mais n'affiche pas d'image : il signale `HW render: callback setup error` sans qu'aucun appel PS4 n'échoue. Les plantages mémoire du démarrage sont corrigés par la [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329).
+- **Mortal Kombat Trilogy (CUSA53178)** : les plantages mémoire du démarrage sont corrigés par la [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329) ; l'émulateur PS1 intégré au jeu tourne avec combats et son. Le message `HW render: callback setup error` affiché par le jeu est normal : son lanceur refuse toujours le rendu matériel libretro, aussi sur PS4.
 
 La [PR #325](https://github.com/MaxFRdev/MaxPS4/pull/325) est fusionnée dans `main` et remplace les PR #319, #320, #322, #323 et #324 ; l'IPA SideStore produite depuis `main` l'inclut. La [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329) est fusionnée et remplace la PR #326. L'activation du JIT ne signifie pas qu'un jeu est jouable.
 
