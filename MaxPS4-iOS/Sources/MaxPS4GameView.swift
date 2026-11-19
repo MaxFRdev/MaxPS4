@@ -629,8 +629,13 @@ struct MaxPS4GameView: View {
         GeometryReader { geometry in
             let base: CGFloat = max(44, min(56, (geometry.size.width - 32) / 6))
             let size: CGFloat = max(36, min(80, base * CGFloat(touchScale)))
+            // Select and Start, as on retro pads: the PS4's touchpad click and
+            // Options (a PS4 game reads no Share button).
             VStack(spacing: 0) {
-                control("Options", label: "Options", bit: 0x8, size: 44)
+                HStack(spacing: 12) {
+                    control("Select", label: "Select, pavé tactile", bit: MaxPS4PadState.touchpad, size: 44)
+                    control("Start", label: "Start, Options", bit: MaxPS4PadState.options, size: 44)
+                }
                 Spacer(minLength: 0)
             }.frame(maxWidth: .infinity)
             // Shoulder buttons below the menu button's corner.
@@ -727,7 +732,7 @@ struct MaxPS4GameView: View {
     private func controlFace(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
         let pressed = touch & bit != 0
         return Text(name)
-            .font(.system(size: name == "Options" ? 10 : name.count == 2 ? 14 : 22, weight: .bold, design: .rounded))
+            .font(.system(size: name.count > 3 ? 10 : name.count == 2 ? 14 : 22, weight: .bold, design: .rounded))
             .foregroundStyle(.white.opacity(pressed ? 1 : 0.85))
             .frame(width: size, height: size)
             .background(pressed ? Color.cyan.opacity(0.50) : Color.black.opacity(0.25), in: Circle())
