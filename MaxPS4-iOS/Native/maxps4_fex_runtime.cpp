@@ -1074,10 +1074,11 @@ public:
         const auto slot = std::find_if(threads.begin(), threads.end(), [](const Thread& t) { return !t.used; });
         if (slot == threads.end()) return kernel_error(again);
         // FEX does not check the reservation of the new thread's lookup cache
-        // and crashes on it: refuse the thread while that space is missing.
-        if (void* spare = ::mmap(nullptr, size_t(maxps4::GuestELF::fexLookupCacheBytes), PROT_NONE,
-                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); spare != MAP_FAILED)
-            ::munmap(spare, size_t(maxps4::GuestELF::fexLookupCacheBytes));
+        // and crashes on it: refuse the thread while that space is missing,
+        // with room for a code buffer to grow (FEX allocates it unchecked too).
+        constexpr size_t needed = size_t(maxps4::GuestELF::fexLookupCacheBytes) + 32 * 1024 * 1024;
+        if (void* spare = ::mmap(nullptr, needed, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); spare != MAP_FAILED)
+            ::munmap(spare, needed);
         else
             return kernel_error(again);
         uint64_t top = 0, tp = 0;
