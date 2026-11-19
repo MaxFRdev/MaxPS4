@@ -123,6 +123,27 @@ int main() {
         assert(f.full.size() == 2 && f.full[1].stencilClear && f.full[1].stencilClearValue == 0xa5 && !f.full[1].depthClear);
     }
     {
+        // MRT: CB_TARGET_MASK enables slots 1 and 2 beside 0. Slot 1 matches
+        // target 0's size and is drawn with its blend; slot 2 (another size)
+        // is dropped; slot 3 has no mask.
+        Fixture f;
+        f.run({0xc0016900, 0x8e, 0x0f5f,
+               0xc0056900, 0x318 + 15, 0x200, 1, 1, 0, (0xau << 2) | (1u << 11),
+               0xc0056900, 0x318 + 30, 0x300, 3, 1, 0, 0xau << 2,
+               0xc0056900, 0x318 + 45, 0x400, 1, 1, 0, 0xau << 2,
+               0xc0016900, 0x1e1, 0x40000000 | 5, 0xc0012d00, 3, 2});
+        assert(f.stats.failed == 0 && f.full.size() == 1);
+        const PM4Draw& d = f.full[0];
+        assert(d.colour && d.target == 0x11000 && d.pitch == 16 && d.height == 8);
+        assert(d.more[0].base == 0x20000 && d.more[0].mask == 5 && d.more[0].swap == 1 && d.more[0].blend == (0x40000000u | 5));
+        assert(d.more[1].base == 0 && d.more[2].base == 0);
+        assert(f.stats.extraTargets == 1 && f.stats.extraTargetsDropped == 1);
+        assert(f.stats.depthReport().find("MRT : 1 cibles en plus, 1 écartées") != std::string::npos);
+        // A slot on target 0's own address is dropped too.
+        f.run({0xc0056900, 0x318 + 15, 0x110, 1, 1, 0, 0xau << 2, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 2 && f.full[1].more[0].base == 0 && f.stats.extraTargetsDropped == 3);
+    }
+    {
         // 16_16_16_16 FLOAT fails unless otherTargetFormats, then carries its format.
         Fixture f;
         f.run({0xc0016900, 0x31c, (0xcu << 2) | (7u << 8), 0xc0012d00, 3, 2});

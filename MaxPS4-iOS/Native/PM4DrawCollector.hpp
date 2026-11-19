@@ -1,7 +1,7 @@
 #pragma once
 // Graphics PM4 register state and the draws it describes. Each draw packet
 // becomes a self-contained PM4Draw: programs and user SGPRs, PS inputs,
-// primitive and resolved indices, viewport, scissor, colour target 0, the
+// primitive and resolved indices, viewport, scissor, colour targets 0-7 (MRT), the
 // depth buffer and face culling.
 // The software renderer (CPU) and the Metal renderer execute the same
 // PM4Draw, so both see one interpretation of the registers. Draws this
@@ -28,12 +28,20 @@ struct PM4DrawStats {
     // Diagnostics: draws with a depth test, those writing depth, those with
     // no colour, culled faces, the last depth state.
     unsigned depthTested = 0, depthWritten = 0, depthOnly = 0, cullFront = 0, cullBack = 0, stencilTested = 0;
+    // Colour targets 1-7 drawn with target 0, and those left out (another size or format).
+    unsigned extraTargets = 0, extraTargetsDropped = 0;
     std::string lastDepth;
     std::string depthReport() const {
         char text[200];
         std::snprintf(text, sizeof text, "\nProfondeur : %u dessins testés, %u écrivent, %u sans couleur, %u avec stencil · culling : %u avant, %u arrière",
                       depthTested, depthWritten, depthOnly, stencilTested, cullFront, cullBack);
-        return text + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
+        std::string more;
+        if (extraTargets || extraTargetsDropped) {
+            char line[96];
+            std::snprintf(line, sizeof line, " · MRT : %u cibles en plus, %u écartées", extraTargets, extraTargetsDropped);
+            more = line;
+        }
+        return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
     }
     void fail(const std::string& message) { ++failed; if (error.empty()) error = message; }
 };
@@ -56,6 +64,10 @@ struct PM4Draw {
     unsigned pitch = 0, height = 0;                   // pixels
     unsigned swap = 0, mask = 0;                      // CB COMP_SWAP, CB_TARGET_MASK RGBA
     std::uint32_t blend = 0;                          // CB_BLEND0_CONTROL
+    // Colour targets 1-7 (MRT), drawn with target 0 when CB_TARGET_MASK enables
+    // them and they share its size: more[k - 1] for slot k, base 0 when unused.
+    struct ColourTarget { std::uint64_t base = 0; unsigned format = 0xa, number = 0, swap = 0, mask = 0; std::uint32_t blend = 0; };
+    ColourTarget more[7];
     float blendConstant[4] = {};                     // CB_BLEND_RED/GREEN/BLUE/ALPHA
     // False: a depth-only draw (no colour target, or mask 0); target is then 0
     // and pitch/height are the depth buffer's.
@@ -340,6 +352,22 @@ private:
             d.swap = (info >> 11) & 3;
             d.mask = context_[0x8e] & 0xf;
             d.blend = context_[0x1e0];
+            for (unsigned k = 1; k < 8; ++k) {
+                const unsigned mask = (context_[0x8e] >> (4 * k)) & 0xf, at = 0x318 + 15 * k;
+                if (!mask || !context_[at]) continue;
+                const std::uint32_t moreInfo = context_[at + 4];
+                const unsigned pitch = ((context_[at + 1] & 0x7ff) + 1) * 8;
+                const unsigned height = unsigned((std::uint64_t((context_[at + 2] & 0x3fffff) + 1) * 64) / pitch);
+                PM4Draw::ColourTarget t;
+                t.base = std::uint64_t(context_[at]) << 8;
+                t.format = (moreInfo >> 2) & 0x1f; t.number = (moreInfo >> 8) & 7; t.swap = (moreInfo >> 11) & 3;
+                t.mask = mask; t.blend = context_[0x1e0 + k];
+                // Metal draws its attachments at one size.
+                if (pitch != d.pitch || height != d.height || t.base == d.target ||
+                    (!otherTargetFormats && (t.format != 0xa || t.number != 0))) { ++stats_.extraTargetsDropped; continue; }
+                d.more[k - 1] = t;
+                ++stats_.extraTargets;
+            }
         } else {
             d.pitch = d.depthWidth;
             d.height = d.depthHeight;
