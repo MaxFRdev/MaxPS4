@@ -78,7 +78,7 @@ Other games are not supported or not tested yet (see [Compatibility](#compatibil
 | Sonic Mania | ✅ Playable (tested by the author on iPhone) |
 | Mortal Kombat: Legacy Kollection | ✅ Playable (tested by the author on iPhone) |
 | Mortal Kombat Trilogy | ✅ Playable (tested by the author on iPhone, about 55 FPS in fights) |
-| Call of Duty: Modern Warfare Remastered | 🔧 In progress: loading fixes under test ([PR #333](https://github.com/MaxFRdev/MaxPS4/pull/333)) |
+| Call of Duty: Modern Warfare Remastered | 🔧 In progress: three `libc.prx` loading fixes merged ([PR #333](https://github.com/MaxFRdev/MaxPS4/pull/333)); not re-tested on iPhone since |
 | Crash Bandicoot 4 | ❌ Blocked: iOS refuses the fixed memory addresses Unreal Engine 4 games need |
 | Other light 2D games and homebrews | ❓ Not tested: worth trying, with the compatibility report |
 | Large 3D games (God of War, Assassin's Creed…) | ❌ Out of reach for now (CPU, GPU and memory) |
