@@ -102,7 +102,8 @@ int main() {
     assert(resolve_libkernel("4qGrR6eoP9Y", "libkernel", "libkernel", 1) == S::thread_detach);
     assert(resolve_libkernel("scePthreadMutexattrSettype", "libkernel", "libkernel", 1) == S::mutexattr_settype);
     assert(resolve_libkernel("UTXzJbWhhTE", "libkernel", "libkernel", 1) == S::attr_set_stack);
-    for (const char* unsupported : {"scePthreadCancel", "scePthreadRename", "scePthreadAttrSetstack"})
+    assert(resolve_libkernel("GBUY7ywdULE", "libkernel", "libkernel", 1) == S::succeed); // scePthreadRename
+    for (const char* unsupported : {"scePthreadCancel", "scePthreadAttrSetstack"})
         assert(resolve_libkernel(unsupported, "libkernel", "libkernel", 1) == S::unresolved);
     // POSIX convention: -1 and the error in the calling thread's errno cell.
     constexpr uint64_t errnos = 0x18000, progname = 0x11a00, guard = 0x11a40, request = 0x11a60;
