@@ -230,8 +230,12 @@ int GuestELF::prepare_orbis_general(const std::vector<OrbisLinker::Input>& input
         uint64_t window = 0, tail = 0;
         size_t size = 0;
         auto layout = [&](uint64_t heap) {
-            window = heap;
-            tail = 10 * page + OrbisLinker::tlsBudget + 2 * 4096 + generalStack + 2 * generalHeapPage + heap +
+            // Mortal Kombat Trilogy's PS1 core reserves 508 MiB with the
+            // largest window gap at 467 MiB: the space of the thread slots
+            // no longer reserved extends the window (same total size).
+            window = heap + (generalReclaimedThreads * (generalStack + OrbisLinker::tlsBudget + 2 * 4096 + 2 * page) &
+                             ~(generalHeapPage - 1));
+            tail = 10 * page + OrbisLinker::tlsBudget + 2 * 4096 + generalStack + 2 * generalHeapPage + window +
                 generalThreads * (generalStack + OrbisLinker::tlsBudget + 2 * 4096 + 2 * page);
             size = static_cast<size_t>(high - low + tail + generalAlignment);
         };

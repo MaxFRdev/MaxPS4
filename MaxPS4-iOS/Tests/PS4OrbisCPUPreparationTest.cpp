@@ -285,7 +285,9 @@ int main() {
         uint64_t window=0, windowBytes=0;
         CHECK(image.heap(window,windowBytes) && windowBytes>=maxps4::GuestELF::generalHeap);
         bool listed=false;
-        for (const auto size : maxps4::GuestELF::generalHeapSizes) listed=listed || windowBytes==size;
+        // A listed size plus the reclaimed thread slots' space (under 16 x 6 MiB).
+        for (const auto size : maxps4::GuestELF::generalHeapSizes)
+            listed=listed || (windowBytes>size && windowBytes-size<maxps4::GuestELF::generalReclaimedThreads*(uint64_t{6}<<20));
         CHECK(listed);
         CHECK(window>=low+bytes+4096 && window%0x4000==0 && !image.translate(window,1,4));
         {

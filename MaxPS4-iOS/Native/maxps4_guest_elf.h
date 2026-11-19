@@ -60,8 +60,10 @@ public:
     static constexpr uint64_t fexLookupCacheBytes = 36 * 1024 * 1024;
     // Child thread slots after the mmap window (scePthreadCreate): each a
     // guarded RW region holding a stack of generalStack bytes with a private
-    // copy of the static TLS (blocks, then the TCB) right above it.
-    static constexpr size_t generalThreads = 64;
+    // copy of the static TLS (blocks, then the TCB) right above it. 48
+    // slots (Mortal Kombat Trilogy peaks near 33 live threads); the 16 slots
+    // that used to follow go to the window instead, in the same reservation.
+    static constexpr size_t generalThreads = 48, generalReclaimedThreads = 16;
     int prepare_orbis_general(const std::vector<OrbisLinker::Input>& inputs,
                               const std::vector<OrbisLinker::HLE>& hle, const std::string& root,
                               std::string& diagnostic, uint64_t& relocation);
