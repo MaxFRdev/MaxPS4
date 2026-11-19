@@ -238,6 +238,8 @@ constexpr Binding bindings[] = {
     {"pthread_rwlock_unlock", "EgmLo6EWgso", PS4KernelService::rwlock_unlock},
     {"pthread_setname_np", "cB4rMoKU4UI", PS4KernelService::succeed},
     {"pthread_set_name_np", "oxMp8uPqa+U", PS4KernelService::succeed},
+    // Mortal Kombat Trilogy (CUSA53178) names its threads with it once at boot.
+    {"scePthreadRename", "GBUY7ywdULE", PS4KernelService::succeed},
     {"pthread_once", "Z4QosVuAsA0", PS4KernelService::once, "libkernel", false, false, 0, once_code, sizeof(once_code)},
     {"sched_yield", "6XG4B33N09g", PS4KernelService::yield, "libkernel", true},
     {"pthread_yield", "T72hz6ffq08", PS4KernelService::yield, "libkernel", true},
