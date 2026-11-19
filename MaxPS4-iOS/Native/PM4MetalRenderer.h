@@ -106,7 +106,7 @@ public:
     // Draws with a stencil test or clear; those whose GCN stencil operations
     // Metal has no exact equivalent for (logic ops, a step other than 1, an
     // operation value other than the reference).
-    unsigned stencilDraws = 0, stencilApproximated = 0;
+    unsigned stencilDraws = 0, stencilApproximated = 0, mrtDraws = 0;
     unsigned embeddedDepthDraws = 0; // Colourless draws with Gnm's embedded VS: not drawn.
     std::string depthReport() const;
     // The Metal format of a colour target (CB_COLOR0_INFO FORMAT, NUMBER_TYPE,
@@ -236,6 +236,8 @@ private:
     id<MTLRenderCommandEncoder> encoder_ = nil;
     id<MTLCommandBuffer> commands_ = nil;
     id<MTLTexture> attachment_ = nil;
+    id<MTLTexture> moreAttachments_[7] = {}; // colour targets 1-7 of the open encoder
+    id<MTLTexture> drawingMore_[7] = {};     // colour targets 1-7 of the draw being encoded
     struct Upload { id<MTLBuffer> buffer; id<MTLCommandBuffer> owner; };
     std::vector<Upload> uploads_;
     std::uint64_t pooledBytes_ = 0;

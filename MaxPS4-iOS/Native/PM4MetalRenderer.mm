@@ -53,7 +53,20 @@ bool blendChannel(PM4BlendChannel channel, MTLBlendOperation& operation,
 }
 std::string inputKey(const PM4Draw& d) {
     std::string key(reinterpret_cast<const char*>(d.inputCntl), sizeof d.inputCntl);
+    // Colour targets 1-7: their formats, masks and blends shape the pipeline.
+    for (const auto& t : d.more) {
+        if (!t.base) { key += '\0'; continue; }
+        const std::uint32_t words[5] = {t.format | t.number << 8 | t.swap << 16, t.mask, (t.blend >> 30) & 1 ? t.blend : 0u, 1, 0};
+        key.append(reinterpret_cast<const char*>(words), sizeof words);
+    }
     return key;
+}
+// The colour attachments a draw renders: bit k for slot k.
+unsigned colourSlots(const PM4Draw& d) {
+    if (!d.colour) return 0;
+    unsigned slots = 1;
+    for (unsigned k = 1; k < 8; ++k) if (d.more[k - 1].base) slots |= 1u << k;
+    return slots;
 }
 }
 
@@ -105,7 +118,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         std::sort(sites.list.begin(), sites.list.end(), [](const GCNScalarSite& a, const GCNScalarSite& b) { return a.pc < b.pc; });
     }
     std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
-                               gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_);
+                               gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_, colourSlots(d));
     // Tests: a sample Metal's sampler refuses reads as zero instead of filtering in
     // software, which shows whether a draw really takes the native path.
     if (native_ && nativeSamplesOnly) {
@@ -120,12 +133,16 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     descriptor.stencilAttachmentPixelFormat = depth == MTLPixelFormatDepth32Float_Stencil8 ? depth : MTLPixelFormatInvalid;
     // Without colour, the pixel program only matters when it may discard.
     const bool fragment = d.colour || ps.mayKill;
-    MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[0];
-    color.pixelFormat = format;
-    color.writeMask = ((d.mask & 1) ? MTLColorWriteMaskRed : 0) | ((d.mask & 2) ? MTLColorWriteMaskGreen : 0) |
-                      ((d.mask & 4) ? MTLColorWriteMaskBlue : 0) | ((d.mask & 8) ? MTLColorWriteMaskAlpha : 0);
-    if (d.colour && ((d.blend >> 30) & 1)) {
-        const auto blend = decodePM4Blend(d.blend);
+    // Slot 0 is CB_COLOR0; slots 1-7 are the draw's other targets.
+    auto attach = [&](unsigned slot, MTLPixelFormat pixelFormat, unsigned mask, std::uint32_t blendControl, bool exported) {
+        MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[slot];
+        color.pixelFormat = pixelFormat;
+        // A target the program does not export keeps its pixels.
+        if (!exported) mask = 0;
+        color.writeMask = ((mask & 1) ? MTLColorWriteMaskRed : 0) | ((mask & 2) ? MTLColorWriteMaskGreen : 0) |
+                          ((mask & 4) ? MTLColorWriteMaskBlue : 0) | ((mask & 8) ? MTLColorWriteMaskAlpha : 0);
+        if (!d.colour || !((blendControl >> 30) & 1)) return true;
+        const auto blend = decodePM4Blend(blendControl);
         auto alpha = blend.alpha;
         // Saturation has an alpha factor of one, independently of RGB.
         if (alpha.source == 10) alpha.source = 1;
@@ -135,12 +152,18 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         if (!blendChannel(blend.rgb, colorOperation, cs, cd) ||
             !blendChannel(alpha, alphaOperation, as, ad)) {
             fail("blend mode");
-            return nil;
+            return false;
         }
         color.blendingEnabled = YES;
         color.rgbBlendOperation = colorOperation; color.alphaBlendOperation = alphaOperation;
         color.sourceRGBBlendFactor = cs; color.destinationRGBBlendFactor = cd;
         color.sourceAlphaBlendFactor = as; color.destinationAlphaBlendFactor = ad;
+        return true;
+    };
+    if (!attach(0, format, d.mask, d.blend, true)) return nil;
+    for (unsigned k = 1; k < 8; ++k) {
+        const auto& t = d.more[k - 1];
+        if (t.base && !attach(k, targetFormat(t.format, t.number, t.swap), t.mask, t.blend, (ps.colors >> k) & 1)) return nil;
     }
     if (asyncPipelines) {
         // Metal compiles on its own threads: this submission and the next go
@@ -767,7 +790,9 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     // screen; a 3D game samples its 16-bit float scene to tone-map it).
     if (const auto rendered = targets_.find(base); rendered != targets_.end() && rendered->second.format == dfmt) {
         id<MTLTexture> texture = rendered->second.texture;
-        if (texture && texture != drawing && !rendered->second.fresh && texture.width >= width && texture.height >= height) {
+        bool attached = texture == drawing;
+        for (id<MTLTexture> other : drawingMore_) attached = attached || (other && texture == other);
+        if (texture && !attached && !rendered->second.fresh && texture.width >= width && texture.height >= height) {
             ++targetReads;
             return texture;
         }
@@ -860,6 +885,17 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     if (d.colour && ((d.blend >> 30) & 1) &&
         (format == MTLPixelFormatR32Float || format == MTLPixelFormatRG32Float || format == MTLPixelFormatRGBA32Float))
         return fail("blending into a 32-bit float colour target");
+    MTLPixelFormat moreFormats[7] = {};
+    for (unsigned k = 0; k < 7; ++k) {
+        const auto& t = d.more[k];
+        if (!t.base) continue;
+        moreFormats[k] = targetFormat(t.format, t.number, t.swap);
+        if (moreFormats[k] == MTLPixelFormatInvalid)
+            return fail("colour target " + std::to_string(k + 1) + " format " + std::to_string(t.format) + " number " + std::to_string(t.number));
+        if (((t.blend >> 30) & 1) && (moreFormats[k] == MTLPixelFormatR32Float || moreFormats[k] == MTLPixelFormatRG32Float ||
+                                      moreFormats[k] == MTLPixelFormatRGBA32Float))
+            return fail("blending into a 32-bit float colour target");
+    }
     const MTLPixelFormat depthFormat = d.depthTarget ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
     if (d.scissor[2] <= d.scissor[0] || d.scissor[3] <= d.scissor[1]) return true; // nothing visible
     // Front and back faces culled: no triangle is left (rectangles are never culled).
@@ -935,10 +971,30 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         target = {[device_ newTextureWithDescriptor:descriptor], true, d.format};
         if (!target.texture) return fail("colour target texture");
     }
+    // The other colour targets, at target 0's size (see PM4DrawCollector).
+    Target* more[7] = {};
+    for (unsigned k = 0; k < 7; ++k) {
+        if (!d.colour || !d.more[k].base) continue;
+        Target& extra = targets_[d.more[k].base];
+        if (!extra.texture || extra.texture.width != d.pitch || extra.texture.height != d.height || extra.texture.pixelFormat != moreFormats[k]) {
+            MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:moreFormats[k]
+                                                                                                  width:d.pitch height:d.height mipmapped:NO];
+            descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            descriptor.storageMode = MTLStorageModePrivate;
+            extra = {[device_ newTextureWithDescriptor:descriptor], true, d.more[k].format};
+            if (!extra.texture) return fail("colour target texture");
+        }
+        more[k] = &extra;
+    }
+    if (more[0] || more[1] || more[2] || more[3] || more[4] || more[5] || more[6]) ++mrtDraws;
+    // A draw never samples its own attachments (see nativeTexture).
+    for (unsigned k = 0; k < 7; ++k) drawingMore_[k] = more[k] ? more[k]->texture : nil;
+    bool sameMore = true;
+    for (unsigned k = 0; k < 7; ++k) sameMore = sameMore && moreAttachments_[k] == (more[k] ? more[k]->texture : nil);
     Target* depth = nullptr;
     if (d.depthTarget && !(depth = depthTexture(d, commands))) return false;
     id<MTLTexture> depthView = depth ? depth->texture : nil;
-    if (encoder_ && (commands_ != commands || attachment_ != target.texture || depthAttachment_ != depthView)) {
+    if (encoder_ && (commands_ != commands || attachment_ != target.texture || depthAttachment_ != depthView || !sameMore)) {
         [encoder_ endEncoding]; encoder_ = nil;
     }
     id<MTLRenderCommandEncoder> encoder = encoder_;
@@ -949,6 +1005,13 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         pass.colorAttachments[0].loadAction = target.fresh ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    }
+    for (unsigned k = 0; k < 7; ++k) {
+        if (!more[k]) continue;
+        pass.colorAttachments[k + 1].texture = more[k]->texture;
+        pass.colorAttachments[k + 1].loadAction = more[k]->fresh ? MTLLoadActionClear : MTLLoadActionLoad;
+        pass.colorAttachments[k + 1].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        pass.colorAttachments[k + 1].storeAction = MTLStoreActionStore;
     }
     if (depth) {
         // A new depth buffer starts at the clear value the game set.
@@ -969,9 +1032,13 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     encoder = [commands renderCommandEncoderWithDescriptor:pass];
     if (!encoder) return fail("render encoder");
     target.fresh = false;
+    for (auto* extra : more) if (extra) extra->fresh = false;
     if (depth) depth->fresh = false;
     ++renderPasses;
-    if (batching_) { encoder_ = encoder; commands_ = commands; attachment_ = target.texture; depthAttachment_ = depthView; }
+    if (batching_) {
+        encoder_ = encoder; commands_ = commands; attachment_ = target.texture; depthAttachment_ = depthView;
+        for (unsigned k = 0; k < 7; ++k) moreAttachments_[k] = more[k] ? more[k]->texture : nil;
+    }
     }
     [encoder setRenderPipelineState:state];
     [encoder setBlendColorRed:pm4BlendConstant(d.blendConstant[0]) green:pm4BlendConstant(d.blendConstant[1])
@@ -1210,8 +1277,8 @@ id<MTLTexture> PM4MetalRenderer::depthTarget(std::uint64_t address) const {
 
 std::string PM4MetalRenderer::depthReport() const {
     char text[320];
-    std::snprintf(text, sizeof text, "\nProfondeur Metal : %u effacements sans programme · %u dessins avec profondeur, dont %u sans couleur · %u dessins entièrement cullés · %zu tampons, %u redimensionnés · stencil : %u dessins, %u états approchés",
-                  embeddedDepthDraws, depthDraws, depthOnlyDraws, culledDraws, depthTargets_.size(), depthResized, stencilDraws, stencilApproximated);
+    std::snprintf(text, sizeof text, "\nProfondeur Metal : %u effacements sans programme · %u dessins avec profondeur, dont %u sans couleur · %u dessins entièrement cullés · %zu tampons, %u redimensionnés · stencil : %u dessins, %u états approchés · MRT : %u dessins",
+                  embeddedDepthDraws, depthDraws, depthOnlyDraws, culledDraws, depthTargets_.size(), depthResized, stencilDraws, stencilApproximated, mrtDraws);
     return text;
 }
 

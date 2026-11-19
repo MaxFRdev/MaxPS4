@@ -1113,7 +1113,12 @@ GCN_FN uint gcn_quad_shuffle(thread GCNQuad& Q, thread GCNLane& L, uint value, u
 // SPI_PS_INPUT_CNTL_0..31, read when the pipeline is built. The fragment
 // returns colour target 0.
 inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTranslation& ps, const std::string& vsName,
-                                       const std::string& psName, std::uint32_t psInputAddr, const std::uint32_t inputCntl[32], bool nativeTextures = false) {
+                                       const std::string& psName, std::uint32_t psInputAddr, const std::uint32_t inputCntl[32], bool nativeTextures = false,
+                                       unsigned colorTargets = 1) {
+    // `colorTargets`: bit k, colour attachment k receives MRT k (0 when the
+    // program does not export it). Target 0 alone keeps the float4 return.
+    colorTargets = (colorTargets | 1u) & 0xffu;
+    const bool mrt = colorTargets != 1u;
     std::uint32_t flatParams = 0;
     for (unsigned a = 0; a < 32; ++a)
         if (((ps.attributes >> a) & 1) && ((ps.flat >> a) & 1) && !(inputCntl[a] & 0x20)) flatParams |= 1u << (inputCntl[a] & 0x1f);
@@ -1159,7 +1164,13 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
          "    if ((D.flags & GCN_DRAW_FLIP_Y) != 0u) o.position.y = -o.position.y;\n"
          "    return o;\n}\n"
          "struct GCNFragment { float4 color [[color(0)]]; uint coverage [[sample_mask]]; };\n";
-    s += std::string("fragment ")+(ps.mayKill ? "GCNFragment" : "float4")+
+    if (mrt) {
+        s += "struct GCNFragmentMRT {";
+        for (unsigned c = 0; c < 8; ++c)
+            if ((colorTargets >> c) & 1) s += " float4 c" + std::to_string(c) + " [[color(" + std::to_string(c) + ")]];";
+        s += ps.mayKill ? " uint coverage [[sample_mask]]; };\n" : " };\n";
+    }
+    s += std::string("fragment ")+(mrt ? "GCNFragmentMRT" : ps.mayKill ? "GCNFragment" : "float4")+
          " gcn_fragment(GCNVaryings in [[stage_in]], uint sampleCoverage [[sample_mask]],\n"
          "    " + std::string(ps.sites.empty() ? "" : "constant uint* U [[buffer(4)]], ") +
          "device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]] GCN_SLOT_PARAMS) {\n"
@@ -1200,6 +1211,16 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     s += "    " + psName + "(L, M, Q);\n";
     // An ordinary shader's saved-EXEC/WQM/restore sequence cannot kill a
     // covered pixel. Do not ask Metal to suppress helpers again at export.
+    if (mrt) {
+        s += "    GCNFragmentMRT out;\n";
+        for (unsigned c = 0; c < 8; ++c) {
+            if (!((colorTargets >> c) & 1)) continue;
+            const bool exported = c == 0 || ((ps.colors >> c) & 1);
+            s += "    out.c" + std::to_string(c) + " = " + (exported ? "L.color[" + std::to_string(c) + "]" : std::string("float4(0.0f)")) + ";\n";
+        }
+        if (ps.mayKill) s += "    out.coverage = L.killed ? 0u : 0xffffffffu;\n";
+        s += "    return out;\n}\n";
+    } else
     s += ps.mayKill ? "    return { L.color[0], L.killed ? 0u : 0xffffffffu };\n}\n"
                     : "    return L.color[0];\n}\n";
     if (nativeTextures) {

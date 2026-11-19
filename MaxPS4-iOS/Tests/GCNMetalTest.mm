@@ -152,6 +152,34 @@ int main() {
         assert(worst <= 2);
         // Known values: red = texel x * 16, green = 8 * ddx(u) = 0.5, alpha 1.
         assert(pixels[4 * 5 + 2] == 80 && std::abs(int(pixels[1]) - 128) <= 1 && pixels[3] == 255);
+        {
+            // MRT: a program exporting mrt0 and mrt1, drawn into three targets
+            // (the third, not exported, gets zero and is masked by the renderer).
+            Arena mrtArena;
+            loadQuadPS(mrtArena);
+            GCNTranslateOptions mrtOptions; mrtOptions.name = "ps_program"; mrtOptions.userCount = 16;
+            for (unsigned n = 0; n < 16; ++n) mrtOptions.userData[n] = quadSgprs[n];
+            const auto mrtPS = translateGCN(mrtArena.memory, quadPS, mrtOptions);
+            if (!mrtPS) { std::printf("MRT translation: %s\n", mrtPS.error.c_str()); return 1; }
+            assert(mrtPS.colors == 3);
+            std::uint32_t mrtCntl[32] = {};
+            const std::string mrtSource = gcnMetalPrelude(false, 32, 32, gcnHighestUsed(mrtPS.colors)) + vs.source + mrtPS.source +
+                gcnMetalEntryPoints(vs, mrtPS, "vs_program", "ps_program", 0x302, mrtCntl, false, 7);
+            assert(mrtSource.find("[[color(1)]]") != std::string::npos && mrtSource.find("[[color(2)]]") != std::string::npos);
+            assert(gcnMetalEntryPoints(vs, mrtPS, "vs_program", "ps_program", 0x302, mrtCntl).find("GCNFragmentMRT") == std::string::npos);
+            id<MTLLibrary> mrtLibrary = [device newLibraryWithSource:[NSString stringWithUTF8String:mrtSource.c_str()] options:options error:&error];
+            if (!mrtLibrary) { std::printf("MRT MSL compile failed: %s\n", error.localizedDescription.UTF8String); return 1; }
+            MTLRenderPipelineDescriptor* mrtDescriptor = [MTLRenderPipelineDescriptor new];
+            mrtDescriptor.vertexFunction = [mrtLibrary newFunctionWithName:@"gcn_vertex"];
+            mrtDescriptor.fragmentFunction = [mrtLibrary newFunctionWithName:@"gcn_fragment"];
+            mrtDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            mrtDescriptor.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
+            mrtDescriptor.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            mrtDescriptor.colorAttachments[2].writeMask = MTLColorWriteMaskNone;
+            id<MTLRenderPipelineState> mrtPipeline = [device newRenderPipelineStateWithDescriptor:mrtDescriptor error:&error];
+            if (!mrtPipeline) { std::printf("MRT pipeline: %s\n", error.localizedDescription.UTF8String); return 1; }
+            std::puts("PASS GCN MRT exports compile to a three-target Metal pipeline");
+        }
         std::printf("PASS GCN programs translated to Metal match the software renderer (worst channel difference %d)\n", worst);
     }
 }
