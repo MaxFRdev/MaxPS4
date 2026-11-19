@@ -299,7 +299,7 @@ int main() {
                 if (renderer.depthDraws != depthDraws || renderer.depthOnlyDraws != depthOnly)
                     std::printf("%s: %u depth draws, %u without colour\n", name, renderer.depthDraws, renderer.depthOnlyDraws);
                 assert(renderer.depthDraws == depthDraws && renderer.depthOnlyDraws == depthOnly);
-                assert(!depthDraws || renderer.depthTarget(depthBuffer).pixelFormat == MTLPixelFormatDepth32Float);
+                assert(!depthDraws || renderer.depthTarget(depthBuffer).pixelFormat == MTLPixelFormatDepth32Float_Stencil8);
                 std::uint8_t pixels[width * height * 4] = {}, expected[sizeof pixels] = {};
                 for (unsigned n = 0; n < width * height; ++n) std::memcpy(expected + 4 * n, bgra, 4);
                 readPixels(device, queue, renderer.target(depthTarget), pixels);
