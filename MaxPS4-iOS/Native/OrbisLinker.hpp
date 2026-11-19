@@ -292,6 +292,13 @@ private:
             // defined, it binds nothing, like a local; a weak undefined one stays
             // 0, as an unresolved weak symbol does, and so do undefined section
             // bounds (__start_X/__stop_X both 0: an empty range).
+            // _GLOBAL_OFFSET_TABLE_ left undefined (Call of Duty: Modern Warfare
+            // Remastered's libc.prx) is the module's own GOT: its SCE PLTGOT.
+            if (!s.defined && name == "_GLOBAL_OFFSET_TABLE_") {
+                const auto got = tags.count(0x61000027) ? tags.find(0x61000027)->second : tags.count(3) ? tags.find(3)->second : 0;
+                require(got && m.image.translate(got, 8, 4), "_GLOBAL_OFFSET_TABLE_ without a readable PLTGOT");
+                s.defined = true; s.value = got;
+            }
             if (!s.local && name.find('#') == std::string::npos) {
                 const bool bound = name.rfind("__start_", 0) == 0 || name.rfind("__stop_", 0) == 0;
                 require(s.defined || bind == 2 || bound, "undefined non-NID symbol: " + name);
