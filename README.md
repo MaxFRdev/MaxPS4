@@ -23,7 +23,7 @@
 | --- | --- | --- |
 | JIT FEXCore sur iOS avec LiveContainer et StikDebug | **Fusionné dans `main`** ; activation confirmée sur iPhone lors d'un test utilisateur ; le lancement de certains jeux reste bloqué | [PR #325](https://github.com/MaxFRdev/MaxPS4/pull/325) |
 | Compatibilité des jeux et modules PRX | Travaux expérimentaux en cours ; vérifier chaque jeu sur appareil | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
-| Mortal Kombat Trilogy (CUSA53178) | **Jouable sur iPhone** : intro et menu (~56–60 FPS), jeu PS1 lancé depuis le menu, combats et son confirmés lors d'un test utilisateur ; cadence en combat non mesurée | [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329) |
+| Mortal Kombat Trilogy (CUSA53178) | **Jouable sur iPhone** : intro et menu (~56–60 FPS), jeu PS1 lancé depuis le menu, combats et son confirmés lors d'un test utilisateur, environ 55 FPS en combat | [PR #329](https://github.com/MaxFRdev/MaxPS4/pull/329) |
 | GPU GNM/PM4 vers Metal | Corrections et tests de compatibilité en cours | [Pull requests](https://github.com/MaxFRdev/MaxPS4/pulls) |
 
 ### LiveContainer et SideStore
