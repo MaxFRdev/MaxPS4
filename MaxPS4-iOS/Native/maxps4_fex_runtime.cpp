@@ -2409,11 +2409,15 @@ extern "C" int32_t maxps4_fex_engine_moved_mappings(maxps4_fex_engine* engine, c
     size_t count = 0;
     const size_t total = engine->dynamic_ps4.moved(moved, count);
     std::string out;
-    char line[128];
+    char line[192];
     for (size_t i = 0; i < count; ++i) {
-        std::snprintf(line, sizeof(line), "0x%llx + 0x%llx -> 0x%llx (code %d)\n",
+        int used = std::snprintf(line, sizeof(line), "0x%llx + 0x%llx -> 0x%llx (code %d)",
             (unsigned long long)moved[i].hint, (unsigned long long)moved[i].size,
             (unsigned long long)moved[i].result, moved[i].status);
+        if (moved[i].window_free || moved[i].host_free)
+            used += std::snprintf(line + used, sizeof(line) - size_t(used), " · plus grand trou fenetre %llu Mio, iOS %llu Mio",
+                (unsigned long long)(moved[i].window_free >> 20), (unsigned long long)(moved[i].host_free >> 20));
+        std::snprintf(line + used, sizeof(line) - size_t(used), "\n");
         if (out.size() + std::strlen(line) >= capacity) break;
         out += line;
     }

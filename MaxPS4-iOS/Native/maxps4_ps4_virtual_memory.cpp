@@ -176,8 +176,35 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
             return ok;
         }
     }
-    if (e) record_move(hint, length, 0, int(e));
+    if (e) {
+        record_move(hint, length, 0, int(e));
+        if (e == nomem) {
+            // Where the space went: the largest free span in the window, and
+            // the largest the host still grants (halving down to 16 MiB).
+            uint64_t host = 0;
+            for (uint64_t probe = std::min<uint64_t>(length, uint64_t{4} << 30) & ~(page_size - 1);
+                 probe >= (uint64_t{16} << 20) && !host; probe /= 2)
+                if (void* got = ::mmap(nullptr, size_t(probe), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); got != MAP_FAILED) {
+                    ::munmap(got, size_t(probe)); host = probe;
+                }
+            std::lock_guard guard(moved_lock_);
+            Moved& last = moved_[(moved_total_ - 1) % moved_limit];
+            last.window_free = largest_window_gap(); last.host_free = host;
+        }
+    }
     return e;
+}
+uint64_t PS4VirtualMemory::largest_window_gap() const {
+    uint64_t window = 0, window_bytes = 0;
+    if (!image_.heap(window, window_bytes)) return 0;
+    uint64_t largest = 0, cursor = window;
+    for (const Region& region : regions_) {
+        if (region.outside || region.address + region.size <= window || region.address >= window + window_bytes) continue;
+        if (region.address > cursor) largest = std::max(largest, region.address - cursor);
+        cursor = std::max(cursor, region.address + region.size);
+    }
+    if (window + window_bytes > cursor) largest = std::max(largest, window + window_bytes - cursor);
+    return largest;
 }
 Error PS4VirtualMemory::place_outside(uint64_t length, uint64_t alignment, uint32_t protection, uint64_t& result) {
     uint64_t window = 0, window_bytes = 0;
@@ -324,7 +351,7 @@ Error PS4VirtualMemory::place_unrecorded(uint64_t hint, uint64_t length, uint64_
 }
 void PS4VirtualMemory::record_move(uint64_t hint, uint64_t size, uint64_t result, int status) {
     std::lock_guard guard(moved_lock_);
-    moved_[moved_total_++ % moved_limit] = {hint, size, result, status};
+    moved_[moved_total_++ % moved_limit] = {hint, size, result, status, 0, 0};
 }
 size_t PS4VirtualMemory::moved(std::array<Moved, moved_limit>& out, size_t& count) const {
     std::lock_guard guard(moved_lock_);

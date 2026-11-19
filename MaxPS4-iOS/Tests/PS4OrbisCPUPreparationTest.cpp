@@ -367,7 +367,7 @@ int main() {
                 std::array<maxps4::PS4VirtualMemory::Moved,maxps4::PS4VirtualMemory::moved_limit> moved{};
                 size_t count=0;
                 vm.moved(moved,count);
-                CHECK(count && moved[count-1].result==large && moved[count-1].status==-2);
+                CHECK(count && moved[count-1].result==large && moved[count-1].status==-2 && !moved[count-1].host_free);
                 CHECK(vm.unmap(large,beyond)==ok && !vm.translate(large,1,4));
             }
             vm.reset();
