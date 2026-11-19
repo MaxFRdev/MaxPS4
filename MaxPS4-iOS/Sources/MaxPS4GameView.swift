@@ -632,9 +632,9 @@ struct MaxPS4GameView: View {
             // Select and Start, as on retro pads: the PS4's touchpad click and
             // Options (a PS4 game reads no Share button).
             VStack(spacing: 0) {
-                HStack(spacing: 12) {
-                    control("Select", label: "Select, pavé tactile", bit: MaxPS4PadState.touchpad, size: 44)
-                    control("Start", label: "Start, Options", bit: MaxPS4PadState.options, size: 44)
+                HStack(spacing: 10) {
+                    pill("Select", label: "Select, pavé tactile", bit: MaxPS4PadState.touchpad)
+                    pill("Start", label: "Start, Options", bit: MaxPS4PadState.options)
                 }
                 Spacer(minLength: 0)
             }.frame(maxWidth: .infinity)
@@ -724,6 +724,26 @@ struct MaxPS4GameView: View {
 
     private func control(_ name: String, label: LocalizedStringKey, bit: UInt32, size: CGFloat) -> some View {
         controlFace(name, label: label, bit: bit, size: size)
+            .overlay(ControlTouchLayer(reading: { _, _ in bit },
+                                       changed: { bits in touch = touch & ~bit | bits; touchChanged() },
+                                       arrived: { session.touchArrived($0) }).accessibilityHidden(true))
+    }
+
+    // A small pill-shaped button (Select, Start); its touch area stays 44 pt
+    // tall around the 22 pt pill.
+    private func pill(_ name: String, label: LocalizedStringKey, bit: UInt32) -> some View {
+        let pressed = touch & bit != 0
+        return Text(verbatim: name)
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundStyle(.white.opacity(pressed ? 1 : 0.85))
+            .frame(width: 46, height: 22)
+            .background(pressed ? Color.cyan.opacity(0.50) : Color.black.opacity(0.25), in: Capsule())
+            .overlay(Capsule().stroke(pressed ? Color.cyan : Color.white.opacity(0.35), lineWidth: 1))
+            .shadow(color: .purple.opacity(pressed ? 0.45 : 0.15), radius: 4)
+            .frame(width: 46, height: 44)
+            .contentShape(Rectangle())
+            .accessibilityLabel(label).accessibilityAddTraits(.isButton)
+            .accessibilityAction { touch |= bit; touchChanged(); touch &= ~bit }
             .overlay(ControlTouchLayer(reading: { _, _ in bit },
                                        changed: { bits in touch = touch & ~bit | bits; touchChanged() },
                                        arrived: { session.touchArrived($0) }).accessibilityHidden(true))
