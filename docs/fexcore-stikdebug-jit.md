@@ -12,16 +12,20 @@ The user reports a physical iPhone running iOS 27.2 (24B5099f): real FEX context
 and GenuineIntel CPUID, debugger absent, InitCore ENOTSUP, native interpreter 42.
 That is the user's observed #130 result, not a successful device JIT test.
 
-> **État de la version intégrée (PR #159, iPhone) : chemin expérimental désactivé.**
-> Le code iOS livré garde `maxps4_fex_engine_initialize()` et l'exécution FEX JIT
-> derrière un refus explicite `-ENOTSUP` (sur Darwin : -45). La préparation
-> mémoire StikDebug décrite ci-dessous est un **protocole de conception non activé**,
-> et l'interface actuelle ne déclenche pas `maxps4_jit_prepare()`. Ni la signature
-> SideStore, ni le résultat 42 de l'interpréteur, ni le succès d'un script StikDebug
-> ne démontrent que le JIT FEX fonctionne sur iPhone. Les critères de réussite JIT
-> cités dans ce document ne sont **pas atteignables avec cette version** ; ne pas
-> les utiliser comme procédure d'acceptation sur appareil tant que le garde-fou
-> n'a pas été réévalué et validé de manière reproductible.
+> **State of the integrated version (PR #159, iPhone): experimental path disabled.**
+> The shipped iOS code kept `maxps4_fex_engine_initialize()` and FEX JIT execution
+> behind an explicit `-ENOTSUP` refusal (on Darwin: -45). The StikDebug memory
+> preparation described below was an **inactive design protocol**, and the
+> interface did not trigger `maxps4_jit_prepare()`. Neither the SideStore
+> signature, nor the interpreter's result 42, nor a successful StikDebug script
+> demonstrated that the FEX JIT works on iPhone. The JIT success criteria cited
+> in this document were **not reachable with that version**; do not use them as
+> a device acceptance procedure until the guard has been reassessed and
+> reproducibly validated.
+>
+> **Update (November 2026):** the JIT has since been enabled on iPhone through
+> StikDebug, under SideStore and LiveContainer (PR #325); see the
+> [README](../README.md#enabling-the-jit-with-livecontainer).
 
 ## Exact reason for ENOTSUP and the proposed experimental path
 
@@ -89,8 +93,7 @@ uses the HOST page size (normally 16 KiB), not FEX's 4 KiB guest page size.
 Prepared buffers are leased to FEX, returned by real context destruction, and
 retained to permit repeated tests after StikDebug detaches. They are a bounded
 reservation, not unbounded leaked allocations. The diagnostic reports outstanding
-leases AFTER closing its context; expected count is zero. “Libérer la mémoire
-JIT” deallocates both mappings when no lease remains; activation is required again.
+leases AFTER closing its context; expected count is zero. “Release JIT memory” deallocates both mappings when no lease remains; activation is required again.
 
 The native canary temporarily preserves/restores SIGBUS/SIGSEGV/SIGILL handlers
 and the signal mask. It recovers only a fault at the canary's exact PC on that
@@ -154,8 +157,8 @@ on the actual device. Do not work around a permission denial.
    to meet the JIT criterion, regardless of debugger indicators.
 7. Repeat 20 times. Check UI responsiveness, app logs, crash reports and memory
    with authorized device tooling. Background/resume and memory pressure also
-   need testing. The reserved 16 MiB code cache should remain bounded; “Libérer
-   la mémoire JIT” must release it and return subsequent tests to interpreter.
+   need testing. The reserved 16 MiB code cache should remain bounded; “Release JIT
+   memory” must release it and return subsequent tests to interpreter.
 8. Test absent signing entitlement, rejected attach, disconnected VPN, denied
    allocation/preparation/remap, stopped script and restart. Capture actual
    statuses/StikDebug log. Do not interpret EAGAIN/EACCES/EFAULT as JIT success.

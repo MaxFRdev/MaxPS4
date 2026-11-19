@@ -1,96 +1,99 @@
 # Orbis Runtime Foundation
 
-Cette évolution prépare des **images de données invitées**, sans exécution de
-jeu. Elle réutilise le linker existant et les chargeurs natifs ; aucun PFS, DRM,
-SELF chiffré, fichier de jeu ou NID Sony ajouté n'intervient dans les fixtures.
+This change prepares **guest data images**, without running a game. It reuses
+the existing linker and native loaders; no PFS, DRM, encrypted SELF, game file
+or added Sony NID is involved in the fixtures.
 
-## Audit de main (08db54e)
+## Audit of main (08db54e)
 
-| Composant existant | Fonction déjà implémentée | Blocage observé et décision |
+| Existing component | Function already implemented | Blocker observed and decision |
 | --- | --- | --- |
-| `PS4ExecutableImage` | ELF64 x86-64 Orbis et SELF plaintext, PT_LOAD/SCE_RELRO, BSS, permissions logiques, bornes, 32 Mio/module | Les champs ELF réservés, les déclarations de sections et les plages de métadonnées non mappées nécessitaient des vérifications supplémentaires. Renforcement dans ce chargeur. Le linker refuse toujours tout SELF. |
-| `PS4PKGRuntimePlan` | Inventaire PKG, staging autonome, graphe explicite fermé, cycles/ambiguïtés de chemins, 128 modules/64 Mio | L'inventaire ne fournit pas des exécutables depuis un PFS opaque. Réutilisation du graphe existant ; aucun changement du parseur PKG. |
-| `OrbisMetadata` / `OrbisPRXPreparation` | Inventaire SCE, reconnaissance HLE, staging PRX expérimental, RELA et diagnostic | Chemin d'analyse distinct, pas un binding de runtime. Conservé pour compatibilité ; le nouveau rapport utilise le linker transactionnel existant, sans nouveau chargeur. |
-| `OrbisLinker` | Identités NID typées, exports exacts, RELA 1/6/7/8, graphe déterministe, transaction forte, W^X et RELRO | Obligeait un ELF statique à posséder des tables SCE ; les dépendances inutilisées n'étaient pas vérifiées ; DT_NEEDED refusé ; addresses rebased vérifiées pour overflow mais pas canonicalité. Corrigé ici. |
-| `OrbisLinkerBridge` | Handle propriétaire, mapping invité, entrée et copie de données, sans pointeur hôte dans l'ABI | Diagnostic limité à la première erreur. Ajout d'une API de rapport de préparation, compatible avec les appels existants. |
-| `PS4VirtualMemory`, libkernel et threads | Mappings anonymes privés 16 Kio, protections, unmapping, horloges, fichiers/mutex bornés | Attachés au chemin GuestELF existant ; aucune connexion automatique avec les images multimodules SCE. Leurs régressions restent exécutées. |
-| `PS4DynamicLinker` / `maxps4_fex_runtime` | Chemin synthétique borné à tables DT standard, trampolines libkernel, admission d'instructions et FEX | Ne prend pas en charge les tables SCE/graphes PRX généraux. FEX reçoit des adresses hôte rebased pour le sous-ensemble admis, pas un backend d'espace d'adresses Orbis arbitraire. Pas de transfert d'un pointeur de vecteur au RIP FEX. |
-| Vue diagnostic iOS / `OrbisAnalysisBridge` | Sélection d'un fichier et partage du rapport via Swift/C | Le rapport d'inventaire ne prouvait pas une préparation runtime. Il inclut désormais une tentative native réelle, temporaire, sans fournisseur externe ni registre HLE fictif. |
+| `PS4ExecutableImage` | Orbis x86-64 ELF64 and plaintext SELF, PT_LOAD/SCE_RELRO, BSS, logical permissions, bounds, 32 MiB/module | Reserved ELF fields, section declarations and unmapped metadata ranges needed extra checks. Hardened in this loader. The linker still refuses any SELF. |
+| `PS4PKGRuntimePlan` | PKG inventory, standalone staging, explicit closed graph, path cycles/ambiguities, 128 modules/64 MiB | The inventory does not provide executables from an opaque PFS. The existing graph is reused; no change to the PKG parser. |
+| `OrbisMetadata` / `OrbisPRXPreparation` | SCE inventory, HLE recognition, experimental PRX staging, RELA and diagnostics | A separate analysis path, not a runtime binding. Kept for compatibility; the new report uses the existing transactional linker, without a new loader. |
+| `OrbisLinker` | Typed NID identities, exact exports, RELA 1/6/7/8, deterministic graph, strong transaction, W^X and RELRO | Required a static ELF to have SCE tables; unused dependencies were not checked; DT_NEEDED refused; rebased addresses checked for overflow but not canonicality. Fixed here. |
+| `OrbisLinkerBridge` | Owning handle, guest mapping, entry and data copy, no host pointer in the ABI | Diagnostics limited to the first error. A preparation report API is added, compatible with the existing calls. |
+| `PS4VirtualMemory`, libkernel and threads | Private 16 KiB anonymous mappings, protections, unmapping, clocks, bounded files/mutexes | Attached to the existing GuestELF path; no automatic connection to multi-module SCE images. Their regressions still run. |
+| `PS4DynamicLinker` / `maxps4_fex_runtime` | Bounded synthetic path with standard DT tables, libkernel trampolines, instruction admission and FEX | Does not support SCE tables/general PRX graphs. FEX receives rebased host addresses for the admitted subset, not an arbitrary Orbis address-space backend. No handoff of a vector pointer to the FEX RIP. |
+| iOS diagnostics view / `OrbisAnalysisBridge` | Picking a file and sharing the report through Swift/C | The inventory report did not prove a runtime preparation. It now includes a real, temporary native attempt, with no external provider and no fake HLE registry. |
 
-## Comportement ajouté
+## Added behavior
 
-Un `ET_SCE_EXEC` sans PT_DYNAMIC ni DYNLIBDATA peut être préparé seul, avec
-plusieurs segments et BSS. Un exécutable dynamique ou PRX exige toujours les
-tables SCE STRTAB/SYMTAB et les formats explicitement implémentés. Aucun nom de
-fichier n'accorde l'admission ELF. Les headers runtime inconnus (notamment
-PT_INTERP et les paramètres SCE non interprétés) sont refusés ; les headers
-acceptés sont NULL, LOAD, DYNAMIC, NOTE, PHDR, TLS (refusé ensuite), DYNLIBDATA,
-SCE_RELRO. Aucun support implicite des ELF Linux ou SELF protégés.
+An `ET_SCE_EXEC` with neither PT_DYNAMIC nor DYNLIBDATA can be prepared alone,
+with several segments and BSS. A dynamic executable or PRX still requires the
+SCE STRTAB/SYMTAB tables and the explicitly implemented formats. No file name
+grants ELF admission. Unknown runtime headers (notably PT_INTERP and
+uninterpreted SCE parameters) are refused; the accepted headers are NULL, LOAD,
+DYNAMIC, NOTE, PHDR, TLS (refused later), DYNLIBDATA, SCE_RELRO. No implicit
+support for Linux ELFs or protected SELFs.
 
-Le chargeur vérifie les octets e_ident réservés, e_flags et la cohérence de la
-table de sections. Sans sections, e_shentsize 0 ou 64 est accepté ; la numérotation
-étendue n'est pas implémentée. Les données de chaque header ELF file-backed
-restent dans le fichier, même pour les métadonnées non mappées.
+The loader checks the reserved e_ident bytes, e_flags and section-table
+consistency. Without sections, e_shentsize 0 or 64 is accepted; extended
+numbering is not implemented. The data of each file-backed ELF header stays in
+the file, even for unmapped metadata.
 
-Le linker valide les limites de requêtes **avant** leur copie/tri et les tailles
-de fichiers avant lecture des headers. Il refuse tout segment rebased dont la
-fin dépasse `2^47`, en plus des vérifications d'overflow et d'alignement déjà présents.
-Les régions invitées ne se chevauchent pas. Les permissions ELF R=4/W=2/X=1
-restent distinctes des protections PS4 PROT_READ=1/WRITE=2/EXEC=4.
+The linker validates request limits **before** copying/sorting them, and file
+sizes before reading headers. It refuses any rebased segment whose end exceeds
+`2^47`, on top of the existing overflow and alignment checks. Guest regions do
+not overlap. ELF permissions R=4/W=2/X=1 stay distinct from PS4 protections
+PROT_READ=1/WRITE=2/EXEC=4.
 
-Chaque descripteur `DT_SCE_NEEDED_MODULE` et `DT_SCE_IMPORT_LIB` doit trouver un
-fournisseur exact dans les dépendances explicitement fournies : nom et version,
-même sans symbole utilisant ce descripteur. Le diagnostic distingue fournisseur
-absent, version incompatible, dépendance non déclarée et ambiguïté. `DT_NEEDED`
-est un offset borné dans la table SCE de chaînes ; sa valeur doit nommer un
-chemin exact déclaré dans le graphe. Les valeurs vides/dupliquées/invalides sont
-refusées. Il n'y a aucune recherche implicite sur disque ni résolution par suffixe.
+Each `DT_SCE_NEEDED_MODULE` and `DT_SCE_IMPORT_LIB` descriptor must find an exact
+provider among the explicitly provided dependencies: name and version, even
+with no symbol using that descriptor. The diagnostic distinguishes a missing
+provider, an incompatible version, an undeclared dependency and an ambiguity.
+`DT_NEEDED` is a bounded offset in the SCE string table; its value must name an
+exact path declared in the graph. Empty/duplicate/invalid values are refused.
+There is no implicit disk search or suffix resolution.
 
-Les imports référencés ou inutilisés doivent toujours trouver un export complet
-compatible (NID/bibliothèque/module/versions/type). Les imports faibles absents
-restent refusés. Les quatre formules RELA existantes et leurs contrôles sont
-conservés. Aucune relocation inconnue n'est différée silencieusement. Les exports FUNC
-doivent entièrement appartenir à du code RX file-backed : une fonction située
-dans le BSS ne suffit pas à résoudre un import.
+Referenced or unused imports must still find a complete compatible export
+(NID/library/module/versions/type). Missing weak imports remain refused. The four
+existing RELA formulas and their checks are kept. No unknown relocation is
+silently deferred. FUNC exports must belong entirely to file-backed RX code: a
+function located in BSS is not enough to resolve an import.
 
-## Diagnostic et transaction
+Since then, two loader cases found in real games were added: an undefined
+`_GLOBAL_OFFSET_TABLE_` resolves to the module's own SCE PLTGOT, and the symbol
+index of an R_X86_64_RELATIVE relocation is ignored (Call of Duty: Modern
+Warfare Remastered's `libc.prx`).
 
-`OrbisLinker::Report`, argument optionnel de `link`, décrit l'étape atteinte,
-les ELF/segments validés, les dépendances vérifiées, les imports examinés/résolus,
-les relocations examinées/validées/appliquées/différées/refusées et la mémoire.
-Sur erreur, les compteurs sont **partiels** et ne prétendent pas décrire les
-étapes suivantes ; zéro relocation est annoncée appliquée et aucune nouvelle
-image n'est engagée. Les écritures validées mais annulées avec la transaction
-sont comptées comme différées, sans possibilité de reprendre l'image rejetée.
-La première cause explicite est conservée. Les limites du sous-ensemble constituent
-un refus de préparation, pas une réussite d'exécution.
+## Diagnostics and transaction
 
-`maxps4_orbis_link_with_report` expose cette préparation au pont C/Swift,
-avec les mêmes inputs et le même handle que `maxps4_orbis_link`. Prévoir un
-buffer de 4096 octets. Si le rapport de succès ne tient pas, `-ENOSPC` est retourné
-et le handle reste nul. Les rapports de refus peuvent être tronqués selon la
-capacité et restent terminés. Les callers sérialisent les appels et conservent
-les buffers d'entrée immuables pendant l'appel.
+`OrbisLinker::Report`, an optional argument of `link`, describes the stage
+reached, the validated ELFs/segments, the checked dependencies, the
+examined/resolved imports, the examined/validated/applied/deferred/refused
+relocations and the memory. On error, the counters are **partial** and do not
+claim to describe the following stages; zero relocations are reported as
+applied and no new image is committed. Validated writes cancelled with the
+transaction are counted as deferred, with no way to resume the rejected image.
+The first explicit cause is kept. Subset limits are a preparation refusal, not
+an execution success.
 
-La vue « analyse Orbis » existante exécute une préparation du fichier sélectionné
-avec zéro dépendance fournie : un PRX externe manquant reste manquant. La
-reconnaissance HLE de l'inventaire est explicitement distinguée des bindings
-runtime. L'image temporaire est détruite après le diagnostic ; elle n'est pas
-conservée pour exécution. Le rapport affiche toujours que le backend général
-FEX Orbis, la pile/TLS et l'ABI manquent. Le pont multimodule existe pour un futur
-sélecteur de modules ; la sélection iOS actuelle porte sur un seul fichier.
+`maxps4_orbis_link_with_report` exposes this preparation to the C/Swift bridge,
+with the same inputs and the same handle as `maxps4_orbis_link`. Provide a
+4096-byte buffer. If the success report does not fit, `-ENOSPC` is returned and
+the handle stays null. Refusal reports may be truncated to the capacity and stay
+terminated. Callers serialize calls and keep the input buffers immutable during
+the call.
 
-`Image::mappings()` emprunte les bytes propriétaires de l'image : ils restent
-valides lors d'un déplacement de cette image et deviennent invalides à son
-remplacement/destruction. Le backend doit copier les bytes ou conserver leur
-propriétaire. Le pont C n'expose pas ces pointeurs. Les segments restent des
-vecteurs de données hôte, sans PROT_EXEC. RELRO passe de RW à R après les
-relocations. Les protections sont logiques ; les régions ne constituent pas
-encore des mappings de pages FEX. Des segments logiques peuvent partager une
-page hôte future : un backend devra décider/refuser leurs contraintes de pages,
-sans élargir silencieusement les droits.
+The existing "Orbis analysis" view runs a preparation of the selected file with
+zero dependencies provided: a missing external PRX stays missing. The
+inventory's HLE recognition is explicitly distinguished from runtime bindings.
+The temporary image is destroyed after the diagnostic; it is not kept for
+execution. The report still shows that the general FEX Orbis backend, the
+stack/TLS and the ABI are missing. The multi-module bridge exists for a future
+module picker; the current iOS selection covers a single file.
 
-## Tests reproductibles
+`Image::mappings()` borrows the image's owned bytes: they stay valid when that
+image is moved and become invalid when it is replaced/destroyed. The backend
+must copy the bytes or keep their owner. The C bridge does not expose these
+pointers. Segments remain host data vectors, without PROT_EXEC. RELRO goes from
+RW to R after relocations. Protections are logical; the regions are not yet FEX
+page mappings. Logical segments may share a future host page: a backend will
+have to decide on/refuse their page constraints, without silently widening
+rights.
+
+## Reproducible tests
 
 ```sh
 bash scripts/test-orbis-runtime.sh
@@ -98,38 +101,39 @@ bash scripts/test-orbis-analysis.sh
 bash scripts/test-ps4-system-services.sh
 ```
 
-Le nouveau script compile en C++17 avec warnings fatals, ASan/UBSan et lance
-les tests sous délai borné. Les fixtures restent synthétiques. Le workflow PKG
-exécute le même script sur Linux et macOS, puis les tests Swift/C et la compilation
-iOS ARM64 existants. Le workflow IPA SideStore garde son test linker, les deux
-ponts natifs et son packaging ; aucune modification du chemin d'inventaire PKG.
+The new script builds as C++17 with fatal warnings, ASan/UBSan and runs the
+tests under a bounded timeout. The fixtures stay synthetic. The PKG workflow
+runs the same script on Linux and macOS, then the existing Swift/C tests and
+iOS ARM64 build. The SideStore IPA workflow keeps its linker test, the two
+native bridges and its packaging; no change to the PKG inventory path.
 
-Les régressions incluent ELF statique multisegment, BSS/permissions et limites
-exactes, troncature à chacune des 3072 longueurs du fichier, headers réservés et
-sections incohérentes, plage metadata invalide, adresses rebased non canoniques,
-limites de requêtes, dépendance inutilisée, trois modules/deux dépendances,
-DT_NEEDED valide/dupliqué/hors limites, module/version/bibliothèque incompatible,
-identité ambiguë, refus de headers runtime inconnus et rapport d'échec tardif.
-Les checks existants de NID absent, exports ambigus, quatre relocations, cycles,
-RELRO, dépassements, transaction précédente intacte, registre HLE et ABI restent
-actifs. Les rapports Swift sont vérifiés dans les workflows macOS/iOS.
+The regressions include a multi-segment static ELF, BSS/permissions and exact
+limits, truncation at each of the file's 3072 lengths, reserved headers and
+inconsistent sections, an invalid metadata range, non-canonical rebased
+addresses, request limits, an unused dependency, three modules/two
+dependencies, valid/duplicate/out-of-bounds DT_NEEDED, incompatible
+module/version/library, ambiguous identity, refusal of unknown runtime headers
+and a late failure report. The existing checks for a missing NID, ambiguous
+exports, four relocations, cycles, RELRO, overflows, an intact previous
+transaction, the HLE registry and the ABI stay active. The Swift reports are
+checked in the macOS/iOS workflows.
 
-Les observations locales et vérifications impossibles sont séparées dans
+Local observations and checks that could not be run are kept separately in
 [orbis-runtime-validation.md](orbis-runtime-validation.md).
 
-## Fonctionnalités encore nécessaires avant un jeu
+## Functions still needed before a game (at the time of this PR)
 
-| Fonction | État après cette PR | Travail nécessaire |
+| Function | State after this PR | Work needed |
 | --- | --- | --- |
-| ELF/PRX plaintext SCE | Préparation bornée, déterministe, transactionnelle | Étendre seulement avec formats et fixtures documentés |
-| Dépendances/NID | Vérification exacte du graphe fourni et exports compatibles | Fournisseurs légaux réels ; catalogue HLE vérifié, aucun symbole inventé |
-| Relocations | RELA x86-64 64/GLOB_DAT/JUMP_SLOT/RELATIVE | TLS, PC-relative, autres tags/types selon besoins ; inconnus refusés |
-| Mémoire/FEX | Contrat de mappings logiques et copie C ; W^X/RELRO | Backend FEX multimodule, politique de pages, durée de vie, faute mémoire/signal |
-| Processus/threads | Services synthétiques bornés existants | Pile de processus, arguments, TLS par thread, schedulers/ABI Orbis |
-| Cycle de vie PRX | Ordre de dépendances préparé, cycles refusés | Paramètres SCE, init/fini, unload coordonné ; aucune fonction appelée |
-| x86-64 vers ARM64 | Test synthétique borné existant, distinct des images SCE générales | Relier les mappings généraux au véritable FEX puis tester sur ARM64/iPhone |
-| Diagnostic iPhone | Analyse + préparation temporaire native d'un fichier ; pont multimodule | Sélecteur de modules multiples et gestion durable de l'image |
-| GPU/audio/entrée | Prototypes bornés existants | ABI, synchronisation et pipeline complet pour un jeu |
-| Données protégées | PFS/DRM opaque, inchangé | Aucune décryption ni contournement dans cette mission |
+| Plaintext SCE ELF/PRX | Bounded, deterministic, transactional preparation | Extend only with documented formats and fixtures |
+| Dependencies/NIDs | Exact check of the provided graph and compatible exports | Real legal providers; verified HLE catalog, no invented symbols |
+| Relocations | x86-64 RELA 64/GLOB_DAT/JUMP_SLOT/RELATIVE | TLS, PC-relative, other tags/types as needed; unknown ones refused |
+| Memory/FEX | Logical mapping contract and C copy; W^X/RELRO | Multi-module FEX backend, page policy, lifetime, memory fault/signal |
+| Process/threads | Existing bounded synthetic services | Process stack, arguments, per-thread TLS, Orbis schedulers/ABI |
+| PRX life cycle | Dependency order prepared, cycles refused | SCE parameters, init/fini, coordinated unload; no function called |
+| x86-64 to ARM64 | Existing bounded synthetic test, separate from general SCE images | Connect the general mappings to the real FEX, then test on ARM64/iPhone |
+| iPhone diagnostics | Analysis + temporary native preparation of one file; multi-module bridge | Multi-module picker and durable image management |
+| GPU/audio/input | Existing bounded prototypes | ABI, synchronization and full pipeline for a game |
+| Protected data | Opaque PFS/DRM, unchanged | No decryption or circumvention in this mission |
 
-La préparation réussie des fixtures ne constitue pas une exécution PS4 réelle.
+A successful preparation of the fixtures is not real PS4 execution.

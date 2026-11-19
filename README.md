@@ -126,7 +126,7 @@ MaxPS4 decrypts nothing: you need an already-extracted game folder from games yo
 - **Content**: no commercial game, PS4 firmware, key, protected encrypted content or PKG file is provided, and MaxPS4 circumvents no protection. Only use games you own.
 - **App Store**: publishing on the App Store is not a goal; experimental IPA distribution remains subject to the licenses and to iOS signing restrictions.
 
-See the detailed document [Compliance, attribution and legal limits](docs/LEGAL-COMPLIANCE.md) (in French).
+See the detailed document [Compliance, attribution and legal limits](docs/LEGAL-COMPLIANCE.md).
 
 ## Contributing and community
 
