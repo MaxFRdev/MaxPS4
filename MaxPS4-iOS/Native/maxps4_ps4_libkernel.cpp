@@ -1596,9 +1596,18 @@ int64_t PS4Libkernel::rtc(PS4KernelService service, const PS4KernelCall& c) {
 Error PS4Libkernel::resolve(uint64_t address, size_t& mount, char* relative) const {
     char path[PS4KernelPath::max_path];
     if (!memory_.read_cstring(address, path, sizeof(path))) return fault;
-    // Absolute virtual paths only; no "." or ".." components, no "//", no
-    // control characters or backslashes, no trailing "/" (except a mount root).
-    if (path[0] != '/') return inval;
+    // A relative path is relative to the process's working directory, /app0
+    // (Mortal Kombat Trilogy stats "pancake/SLUS_003.30.hle"). Then absolute
+    // virtual paths only; no "." or ".." components, no "//", no control
+    // characters or backslashes, no trailing "/" (except a mount root).
+    if (!path[0]) return noent;
+    if (path[0] != '/') {
+        constexpr char cwd[] = "/app0/";
+        const size_t given = std::strlen(path);
+        if (given + sizeof(cwd) > sizeof(path)) return nametoolong;
+        std::memmove(path + sizeof(cwd) - 1, path, given + 1);
+        std::memcpy(path, cwd, sizeof(cwd) - 1);
+    }
     size_t length = std::strlen(path);
     for (size_t i = 1; i < length; ++i) {
         const unsigned char byte = static_cast<unsigned char>(path[i]);
