@@ -756,6 +756,8 @@ private:
         unsigned first = 0;
         if (op == 37 || op == 38 || op == 53 || op == 54) first = 1;
         if (op >= 48 && op < 64) first += 1;
+        // _d variants: the 2D derivatives (ds/dx, dt/dx, ds/dy, dt/dy) come before the coordinates.
+        if (op == 34 || op == 35 || op == 50 || op == 51) first += 4;
         if ((op >= 40 && op < 48) || (op >= 56 && op < 64)) return fail("depth-compare sampling");
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
