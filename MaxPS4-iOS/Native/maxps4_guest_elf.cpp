@@ -766,7 +766,7 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
         }
         if (stack_low) {
             stack_address = stack_low; stack_bytes = generalStack;
-            entry_params_address = stack_low + generalStack - entryParamsBytes;
+            entry_params_address = stack_low + generalStack - entryAreaBytes;
             // sceKernelMmap window: after a guard page, PROT_NONE until mapped.
             heap_address = heap_low;
             heap_bytes = heap_window;
@@ -787,11 +787,11 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
 uint64_t GuestELF::write_entry_params() {
     // EntryParams {int argc; u32 pad; const char* argv[3]} then argv[0].
     if (!entry_params_address) return 0;
-    auto* params = const_cast<uint8_t*>(translate(entry_params_address, entryParamsBytes, 6));
+    auto* params = const_cast<uint8_t*>(translate(entry_params_address, entryAreaBytes, 6));
     if (!params) return 0;
     static constexpr char program[] = "eboot.bin";
     const uint64_t words[4] = {1, entry_params_address + 32, 0, 0};
-    std::memset(params, 0, entryParamsBytes);
+    std::memset(params, 0, entryAreaBytes);
     std::memcpy(params, words, sizeof(words));
     std::memcpy(params + 32, program, sizeof(program));
     return entry_params_address;

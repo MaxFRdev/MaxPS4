@@ -143,6 +143,10 @@ public:
     // ends the run (service process_exit). Rewrites them and returns their
     // address, which is also the initial RSP; 0 for other images.
     static constexpr uint64_t entryParamsBytes = 64;
+    // The params sit this far below the stack top, the rest zero: startup code
+    // reads past them (CoD: Modern Warfare Remastered's libc faulted at the
+    // stack top, just above 64 bytes of params).
+    static constexpr uint64_t entryAreaBytes = 4096;
     uint64_t write_entry_params();
     // General images: the sceKernelMmap window (guest = host addresses);
     // false otherwise. Not part of segments(): translate() ignores it.
