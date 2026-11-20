@@ -613,7 +613,17 @@ final class MaxPS4GameSource: @unchecked Sendable {
             // 0x4d50 (maxps4_dispatch_fault.h): FEX could not compile the guest block at RIP.
             let uncompilable = fault.code == 0x4d50
                 ? "\nInstruction x86 non prise en charge par FEX à RIP 0x\(String(fault.rip, radix: 16)) : octets dans Documents/maxps4-fatal-fault.txt." : ""
-            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\(uncompilable)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16))."
+            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\(uncompilable)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16)).\(registers(fault))"
+    }
+    // Where the guest was: its registers and the first words at RSP (a
+    // return address there shows a call that went astray).
+    private func registers(_ fault: maxps4_fex_guest_fault) -> String {
+        func hex(_ value: UInt64) -> String { "0x" + String(value, radix: 16) }
+        let words = withUnsafeBytes(of: fault.stack) { raw in
+            Array(raw.bindMemory(to: UInt64.self).prefix(Int(min(fault.stack_words, 4))))
+        }
+        let stack = words.isEmpty ? "illisible" : words.map(hex).joined(separator: " ")
+        return "\nRegistres : RSP \(hex(fault.rsp)) · RBP \(hex(fault.rbp)) · RAX \(hex(fault.rax)) · RDI \(hex(fault.rdi)) · RSI \(hex(fault.rsi))\nPile à RSP : \(stack)"
     }
     private func failure(_ text: String, _ code: Int32) -> NSError {
         NSError(domain: "MaxPS4.Game", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "\(text) (\(code))"])

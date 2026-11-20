@@ -992,6 +992,22 @@ private:
     std::condition_variable watch;
     bool finished = false;
 };
+// A guest fault with the registers FEX last stored and the words at RSP.
+// `read(address, destination, length)` reads guest memory.
+template <class State, class Read>
+static maxps4_fex_guest_fault guest_fault(int signal, int code, uint64_t address, const State& state, const Read& read) {
+    namespace x86 = FEXCore::X86State;
+    maxps4_fex_guest_fault fault {};
+    fault.signal = signal; fault.code = code; fault.address = address; fault.rip = state.rip;
+    fault.rsp = state.gregs[x86::REG_RSP]; fault.rbp = state.gregs[x86::REG_RBP];
+    fault.rax = state.gregs[x86::REG_RAX]; fault.rdi = state.gregs[x86::REG_RDI]; fault.rsi = state.gregs[x86::REG_RSI];
+    for (uint32_t i = 0; i < 4; ++i) {
+        uint64_t word = 0;
+        if (!read(fault.rsp + 8 * i, &word, sizeof(word))) break;
+        fault.stack[i] = word; fault.stack_words = i + 1;
+    }
+    return fault;
+}
 // Initial FEX state of one guest thread (main or child): zero integer
 // registers, RIP/RSP, FS base, a guarded CALL/RET stack and a GDT holding one
 // 64-bit user code segment. Owns that host memory until the thread is gone.
@@ -1054,6 +1070,13 @@ public:
     // Locks and waits of a stopping run return EINTR (PS4Threads::interrupt);
     // later runs block normally again.
     ~GuestThreads() { finish(); identities.resume(); }
+    // Guest memory for a fault report: mapped memory, else the image (stacks).
+    bool guest_read(uint64_t address, void* destination, size_t length) const {
+        if (memory.read(address, destination, length)) return true;
+        const auto* host = image.translate(address, length, 4);
+        if (host) std::memcpy(destination, host, length);
+        return host != nullptr;
+    }
     GuestThreads(const GuestThreads&) = delete;
     GuestThreads& operator=(const GuestThreads&) = delete;
     // scePthreadCreate(PthreadT* out, attr, entry, arg, name): *out = the new
@@ -1261,7 +1284,8 @@ private:
                     const int signal = guard.signal.load();
                     // SIGURG only comes from finish(): a stop, not a fault.
                     if (signal && signal != SIGURG)
-                        fault = {signal, guard.code, guard.address, fex->CurrentFrame->State.rip};
+                        fault = guest_fault(signal, guard.code, guard.address, fex->CurrentFrame->State,
+                            [this](uint64_t a, void* d, size_t n) { return guest_read(a, d, n); });
                 }
                 context->DestroyThread(fex);
             }
@@ -1748,7 +1772,13 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
         if (signal == SIGURG && engine->probe.exited) signal = 0;
         // RIP is the guest position FEX last stored (block granularity).
         if (threads && threads->faulted(child)) { engine->last_fault = child; signal = child.signal; }
-        else if (signal) engine->last_fault = {signal, guard.code, guard.address, state.rip};
+        else if (signal) engine->last_fault = guest_fault(signal, guard.code, guard.address, state,
+            [&](uint64_t a, void* d, size_t n) {
+                if (engine->system_memory.read(a, d, n)) return true;
+                const auto* host = image.translate(a, n, 4); // The image, its stack included.
+                if (host) std::memcpy(d, host, n);
+                return host != nullptr;
+            });
         if (signal) {
             engine->frame_code_cached = false;
             return signal == SIGURG ? (engine->stop_requested.load() ? -ECANCELED : -ETIMEDOUT) :

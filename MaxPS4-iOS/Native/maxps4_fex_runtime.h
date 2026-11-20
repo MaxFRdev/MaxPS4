@@ -231,6 +231,11 @@ typedef struct maxps4_fex_guest_fault {
     int32_t signal;
     int32_t code; // host si_code (previously a reserved 32-bit slot)
     uint64_t address, rip;
+    // Guest registers FEX last stored (block granularity, like rip), and the
+    // first stack words at RSP (stack_words of them were readable).
+    uint64_t rsp, rbp, rax, rdi, rsi;
+    uint64_t stack[4];
+    uint32_t stack_words;
 } maxps4_fex_guest_fault;
 int32_t maxps4_fex_engine_last_guest_fault(const maxps4_fex_engine *engine,
                                            maxps4_fex_guest_fault *fault);
