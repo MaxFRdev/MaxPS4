@@ -2436,6 +2436,17 @@ extern "C" int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine* engine, ui
     if (!engine->staged_ps4.heap(*window, *window_size)) *window = *window_size = 0;
     return 0;
 }
+extern "C" int32_t maxps4_fex_engine_host_map(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    uint64_t window = 0, window_size = 0;
+    if (!engine->staged_ps4.heap(window, window_size)) window = 0;
+    // From the PS4 application area to the window: where fixed PS4 mappings go.
+    const std::string out = maxps4::PS4VirtualMemory::host_map(maxps4::PS4VirtualMemory::app_area_base,
+                                                               window ? window : maxps4::PS4VirtualMemory::app_area_base << 3);
+    const size_t n = std::min(out.size(), capacity - 1);
+    std::memcpy(text, out.data(), n); text[n] = 0;
+    return int32_t(n);
+}
 extern "C" uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine* engine) {
     return engine ? engine->staged_ps4.spare_address_space() : 0;
 }

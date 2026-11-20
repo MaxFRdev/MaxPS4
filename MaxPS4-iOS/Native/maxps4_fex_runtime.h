@@ -367,6 +367,9 @@ int32_t maxps4_fex_engine_console(maxps4_fex_engine *engine, char *text, size_t 
 // the loaded game's mmap window (0 if none).
 // Address space iOS still granted right after the game's reservation, in
 // 256 MiB steps (16 GiB at most).
+// The host's address-space bounds and its first mappings from the PS4
+// application area (0x1000000000) up to the mmap window, for a report.
+int32_t maxps4_fex_engine_host_map(maxps4_fex_engine *engine, char *text, size_t capacity);
 uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine *engine);
 int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine *engine, uint64_t *app_area,
     uint64_t *app_area_size, uint64_t *window, uint64_t *window_size, int32_t *app_area_status);

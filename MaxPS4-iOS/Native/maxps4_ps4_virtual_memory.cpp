@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <new>
 #include <sys/mman.h>
+#include <cstdio>
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
@@ -54,6 +55,47 @@ bool in_app_area(uint64_t address, uint64_t size) {
 }
 void PS4VirtualMemory::app_area(uint64_t& base, uint64_t& size, int& status) {
     base = app_area_reservation.base; size = app_area_reservation.size; status = app_area_reservation.status;
+}
+std::string PS4VirtualMemory::host_map(uint64_t from, uint64_t to) {
+#if defined(__APPLE__)
+    std::string out;
+    char line[160];
+    task_vm_info_data_t info {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (::task_info(::mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS &&
+        count >= TASK_VM_INFO_REV2_COUNT) {
+        std::snprintf(line, sizeof line, "espace d'adresses iOS 0x%llx - 0x%llx",
+                      (unsigned long long)info.min_address, (unsigned long long)info.max_address);
+        out += line;
+    }
+    vm_address_t address = vm_address_t(from);
+    unsigned shown = 0;
+    while (address < to && shown < 8) {
+        vm_size_t size = 0;
+        natural_t depth = 0;
+        vm_region_submap_info_data_64_t region {};
+        mach_msg_type_number_t region_count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (::vm_region_recurse_64(::mach_task_self(), &address, &size, &depth,
+                                   reinterpret_cast<vm_region_recurse_info_t>(&region), &region_count) != KERN_SUCCESS)
+            break;
+        if (address >= to) break;
+        std::snprintf(line, sizeof line, "%s0x%llx +0x%llx prot %d/%d tag %u", out.empty() ? "" : " · ",
+                      (unsigned long long)address, (unsigned long long)size, region.protection, region.max_protection,
+                      region.user_tag);
+        out += line;
+        ++shown;
+        address += size;
+    }
+    if (!shown) {
+        std::snprintf(line, sizeof line, "%saucune mapping entre 0x%llx et 0x%llx", out.empty() ? "" : " · ",
+                      (unsigned long long)from, (unsigned long long)to);
+        out += line;
+    }
+    return out;
+#else
+    (void)from; (void)to;
+    return {};
+#endif
 }
 Error PS4VirtualMemory::permissions(uint32_t protection, uint8_t& out) {
     // PS4 PROT_READ=1, WRITE=2, EXEC=4, unlike ELF p_flags.
