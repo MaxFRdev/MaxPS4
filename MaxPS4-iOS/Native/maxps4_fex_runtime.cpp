@@ -1381,6 +1381,7 @@ struct maxps4_fex_engine {
     std::atomic<bool> profiling{false};
     uint64_t relocation = 0; // Of the loaded game, for relative profile RIPs.
     std::string update_directory; // For load_game (set_update); empty: none.
+    std::string launcher_target;  // The /app0 game a launcher eboot.bin LoadExecs, booted instead (empty: none).
     maxps4::GuestFrame frame;
     uint64_t frame_sequence = 0;
     bool frame_code_cached = false;
@@ -2248,16 +2249,26 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
                     std::vector<std::string> dependencies; std::vector<const char*> pointers;
                     bool optional = false; };
     try {
+        engine->launcher_target.clear();
         const std::filesystem::path root(directory), update(engine->update_directory);
         std::error_code error;
         // PRX files of /app0/sce_module and of the root of /app0 (loaded by the
         // game through sceKernelLoadStartModule, e.g. MK Legacy Kollection's
         // /app0/pancake_libretro_ps4.prx); the update's replace the game's of
         // the same name and add its own (maxps4_app_modules.h).
-        struct File { std::filesystem::path path; bool optional; };
+        struct File { std::filesystem::path path; bool optional; std::string as; };
         std::vector<File> files;
-        for (const auto& found : maxps4::discover_app_modules(root, update)) files.push_back({found.path, found.root_level});
-        files.push_back({!update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin", false});
+        for (const auto& found : maxps4::discover_app_modules(root, update)) files.push_back({found.path, found.root_level, {}});
+        std::filesystem::path eboot = !update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin";
+        // A launcher eboot that only LoadExecs the real game: boot that game
+        // (maxps4_app_modules.h). It keeps the eboot.bin module name.
+        if (const auto target = maxps4::launcher_target(eboot, root, update); !target.empty()) {
+            std::fprintf(stderr, "maxps4: eboot.bin is a launcher (sceSystemServiceLoadExec); booting /app0/%s\n",
+                         target.filename().string().c_str());
+            engine->launcher_target = target.filename().string();
+            eboot = target;
+        }
+        files.push_back({eboot, false, "eboot.bin"});
         // A root-level file is optional: one that is unreadable, not an ELF/SELF
         // the metadata parser accepts, or not a PRX (0xfe18) is skipped, and the
         // game boots as before. sce_module modules and the eboot stay required.
@@ -2266,7 +2277,7 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
         std::string skipped;
         for (const auto& file : files) {
             Module m;
-            m.name = file.path.filename().string();
+            m.name = file.as.empty() ? file.path.filename().string() : file.as;
             m.optional = file.optional;
             std::ifstream in(file.path, std::ios::binary);
             if (!in) {
@@ -2399,6 +2410,9 @@ extern "C" uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine* eng
 extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     std::string out = engine->libkernel.console();
+    // A launcher eboot.bin booted its game instead (load_game): said first.
+    if (!engine->launcher_target.empty())
+        out = "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n" + out;
     if (out.size() >= capacity) out.erase(0, out.size() - (capacity - 1));
     std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
     return int32_t(out.size());
