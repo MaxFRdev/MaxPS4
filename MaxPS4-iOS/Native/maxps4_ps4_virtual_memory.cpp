@@ -16,10 +16,44 @@ namespace {
 // a mapping: Darwin's mmap may ignore an address hint even for a free span,
 // so iOS asks vm_allocate for that fixed span (it fails if anything is
 // there). `status` is the host's answer (0: granted).
+#if defined(__APPLE__)
+// With extended virtual addressing, iOS covers [0x1000000000, 0x7000000000)
+// with one empty guard reservation (user tag VM_MEMORY_GUARD, no access,
+// no maximum access), where PS4 games place fixed mappings (Call of Duty:
+// Modern Warfare Remastered at 0x2001000000). Whether [address, address +
+// size) lies inside such a guard, which is then given back for that span.
+// `status` gets the host's answer to the release (0: released).
+bool release_guard(uint64_t address, uint64_t size, int& status) {
+    vm_address_t region = vm_address_t(address);
+    vm_size_t region_size = 0;
+    natural_t depth = 0;
+    vm_region_submap_info_data_64_t info {};
+    mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+    if (::vm_region_recurse_64(::mach_task_self(), &region, &region_size, &depth,
+                               reinterpret_cast<vm_region_recurse_info_t>(&info), &count) != KERN_SUCCESS)
+        return false;
+    if (region > address || region + region_size < address + size || info.user_tag != VM_MEMORY_GUARD ||
+        info.protection != VM_PROT_NONE || info.max_protection != VM_PROT_NONE || info.is_submap)
+        return false;
+    const kern_return_t kr = ::vm_deallocate(::mach_task_self(), vm_address_t(address), vm_size_t(size));
+    status = int(kr);
+    return kr == KERN_SUCCESS;
+}
+#endif
 bool reserve_exact(uint64_t address, uint64_t size, int& status) {
 #if defined(__APPLE__)
     vm_address_t at = vm_address_t(address);
-    const kern_return_t kr = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size), VM_FLAGS_FIXED);
+    kern_return_t kr = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size), VM_FLAGS_FIXED);
+    if (kr == KERN_NO_SPACE) {
+        // Inside iOS's empty guard: take that span back from it, then retry.
+        int released = 0;
+        if (release_guard(address, size, released)) {
+            at = vm_address_t(address);
+            kr = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size), VM_FLAGS_FIXED);
+        } else if (released) {
+            kr = kern_return_t(1000 + released); // The guard refused: 1000 + its answer.
+        }
+    }
     status = int(kr);
     if (kr != KERN_SUCCESS) return false;
     if (at != vm_address_t(address) || ::mprotect(reinterpret_cast<void*>(address), size_t(size), PROT_NONE) != 0) {
