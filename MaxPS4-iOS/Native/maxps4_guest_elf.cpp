@@ -789,11 +789,10 @@ uint64_t GuestELF::write_entry_params() {
     if (!entry_params_address) return 0;
     auto* params = const_cast<uint8_t*>(translate(entry_params_address, entryAreaBytes, 6));
     if (!params) return 0;
-    static constexpr char program[] = "eboot.bin";
     const uint64_t words[4] = {1, entry_params_address + 32, 0, 0};
     std::memset(params, 0, entryAreaBytes);
     std::memcpy(params, words, sizeof(words));
-    std::memcpy(params + 32, program, sizeof(program));
+    std::memcpy(params + 32, entry_program.data(), std::min<size_t>(entry_program.size(), entryParamsBytes - 33));
     return entry_params_address;
 }
 bool GuestELF::prepare_thread(size_t slot, uint64_t& stack_top, uint64_t& tp) {

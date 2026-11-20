@@ -1672,6 +1672,8 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     // the stack top, as shadPS4 does; the bounded paths keep the SysV auxv.
     const bool ps4_entry = image.general();
     if (ps4_entry) {
+        // A game booted in place of its launcher (load_game): an empty argv[0].
+        image.entry_program = engine->launcher_target.empty() ? "eboot.bin" : "";
         initial_rsp = image.write_entry_params();
         if (!initial_rsp) return -EFAULT;
     } else {
