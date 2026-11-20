@@ -435,7 +435,7 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
             slot_stride = (generalStack + tls_bytes.size() + page - 1) / page * page + page;
             // EntryParams sit at the top of the stack; the stub points RDI at
             // them and RSI at its exit function.
-            const uint64_t params = stack_low + generalStack - entryParamsBytes;
+            const uint64_t params = stack_low + generalStack - entryAreaBytes;
             const uint64_t exit_function = start + entry_at + entry_block;
             auto& bytes = copy.modules[stub_module].image.segments[0].bytes;
             for (size_t b = 0; b < 8; ++b) {
