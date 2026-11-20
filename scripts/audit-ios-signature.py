@@ -9,7 +9,9 @@ import sys
 KEYS = ('get-task-allow', 'com.apple.security.cs.allow-jit',
         'com.apple.security.cs.allow-unsigned-executable-memory',
         'dynamic-codesigning', 'application-identifier',
-        'com.apple.developer.team-identifier')
+        'com.apple.developer.team-identifier',
+        'com.apple.developer.kernel.extended-virtual-addressing',
+        'com.apple.developer.kernel.increased-memory-limit')
 
 
 def inspect(app):
