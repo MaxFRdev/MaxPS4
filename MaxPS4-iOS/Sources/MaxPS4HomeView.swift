@@ -247,6 +247,7 @@ struct MaxPS4HomeView: View {
                 secondaryAction(icon: "bolt.fill", title: "JIT et StikDebug", subtitle: "Activation et état de préparation") {
                     showingJIT = true
                 }
+                entitlementStatus
                 VStack(alignment: .leading, spacing: 14) {
                     Label("Stockage", systemImage: "internaldrive").font(.headline)
                     // Game folders (found in Jeux or chosen with Jouer) count too, not only imported files.
@@ -497,6 +498,38 @@ struct MaxPS4HomeView: View {
             .shadow(color: .blue.opacity(0.28), radius: 18, y: 6)
         }
         .buttonStyle(.plain)
+    }
+
+    // What the installed signature really grants (see MaxPS4Entitlements).
+    private var entitlementStatus: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Autorisations iOS", systemImage: "checkmark.shield").font(.headline)
+            ForEach(MaxPS4Entitlements.current()) { item in
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: item.state == .granted ? "checkmark.circle.fill" : item.state == .missing ? "xmark.circle.fill" : "questionmark.circle.fill")
+                        .foregroundStyle(item.state == .granted ? .green : item.state == .missing ? .orange : .gray)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: item.title).font(.subheadline.weight(.semibold))
+                        Text(verbatim: item.detail).font(.caption).foregroundStyle(.white.opacity(0.55))
+                    }
+                    Spacer(minLength: 0)
+                    Text(item.state == .granted ? LocalizedStringKey("Actif") : item.state == .missing ? LocalizedStringKey("Absent") : LocalizedStringKey("Inconnu"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(item.state == .granted ? .green : item.state == .missing ? .orange : .gray)
+                }
+                .accessibilityElement(children: .combine)
+            }
+            let available = MaxPS4Entitlements.availableMemory()
+            if available > 0 {
+                Text("Mémoire disponible pour l’app : \(ByteCountFormatter.string(fromByteCount: Int64(available), countStyle: .memory))")
+                    .font(.footnote).foregroundStyle(.white.opacity(0.65))
+            }
+            Text("Lu dans la signature installée : SideStore ou LiveContainer peuvent retirer ou remplacer des autorisations.")
+                .font(.caption2).foregroundStyle(.white.opacity(0.45))
+        }
+        .padding(18).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
     }
 
     private func secondaryAction(

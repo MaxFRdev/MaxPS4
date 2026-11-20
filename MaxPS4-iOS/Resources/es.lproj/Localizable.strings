@@ -189,3 +189,15 @@
 
 "Select, pavé tactile" = "Select, panel táctil";
 "Start, Options" = "Start, Opciones";
+"Autorisations iOS" = "Permisos de iOS";
+"Actif" = "Activo";
+"Absent" = "Ausente";
+"Inconnu" = "Desconocido";
+"Débogage (JIT)" = "Depuración (JIT)";
+"Permet à StikDebug d’activer le JIT." = "Permite que StikDebug active el JIT.";
+"Adressage mémoire étendu" = "Direccionamiento de memoria ampliado";
+"Plus d’espace pour la mémoire de la PS4." = "Más espacio para la memoria de la PS4.";
+"Mémoire augmentée" = "Memoria aumentada";
+"iOS laisse le jeu utiliser plus de RAM." = "iOS deja que el juego use más RAM.";
+"Mémoire disponible pour l’app : %@" = "Memoria disponible para la app: %@";
+"Lu dans la signature installée : SideStore ou LiveContainer peuvent retirer ou remplacer des autorisations." = "Leído de la firma instalada: SideStore o LiveContainer pueden quitar o sustituir permisos.";
