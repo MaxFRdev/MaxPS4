@@ -90,7 +90,8 @@ A game that gets stuck leaves a report in **MaxPS4 › Rapports**: share it on [
 1. Download the IPA built by the [MaxPS4 FEXCore SideStore IPA](https://github.com/MaxFRdev/MaxPS4/actions/workflows/fexcore-app.yml) workflow (artifact **MaxPS4-FEXCore-SideStore.ipa**; GitHub may provide a ZIP archive: extract it to get the `.ipa` file before importing it into LiveContainer or SideStore) and install it with **SideStore**.
 2. In StikDebug, import the **same PairingFile** SideStore uses, then set up the connection and VPN following the StikDebug guide. The PairingFile allows pairing; it does not enable the JIT by itself.
 3. Go back to MaxPS4 and tap **JIT** to start the StikDebug activation. See [the SideStore + StikDebug protocol](docs/fexcore-stikdebug-jit.md), or [the LiveContainer steps](#enabling-the-jit-with-livecontainer).
-4. Copy your complete game folder (`eboot.bin`, `sce_module`, `sce_sys` and its data) into **On My iPhone › MaxPS4 › Jeux**, then tap **Play**.
+4. Optional but recommended for 3D games: [get more memory](#getting-more-memory).
+5. Copy your complete game folder (`eboot.bin`, `sce_module`, `sce_sys` and its data) into **On My iPhone › MaxPS4 › Jeux**, then tap **Play**.
 
 ### Enabling the JIT with LiveContainer
 
@@ -115,6 +116,27 @@ MaxPS4 needs the JIT to run games. Under LiveContainer, MaxPS4 itself asks StikD
 - StikDebug opens but the JIT stays inactive: check StikDebug's PairingFile and VPN, then try again.
 
 The PairingFile is specific to your iPhone: keep it private and never attach it to MaxPS4 reports. This method was validated on iPhone 15 Pro Max (iOS 27.2); it is not a guarantee for every device.
+
+### Getting more memory
+
+PS4 games need a lot of memory. By default iOS gives an app only part of the iPhone's RAM and a small address space, which limits the PS4 memory window to about 3 GB. The MaxPS4 IPA already asks for two Apple entitlements that lift these limits, but iOS only grants them when the **App ID** that signs the app allows them:
+
+| Entitlement | What it does |
+| --- | --- |
+| **Increased Memory Limit** (`com.apple.developer.kernel.increased-memory-limit`) | Lets MaxPS4 use more RAM before iOS closes it (about 6 GB on recent iPhones) |
+| **Extended Virtual Addressing** (`com.apple.developer.kernel.extended-virtual-addressing`) | Gives MaxPS4 a large address space: the PS4 memory window can reach 24 GB instead of about 3 GB |
+
+**With a free Apple account: iRAM+**
+1. Install **iRAM+** and sign in with the **same Apple account** SideStore uses.
+2. Select MaxPS4's App ID (or **LiveContainer's** if you run MaxPS4 inside LiveContainer) and enable **both** Increased Memory Limit and Extended Virtual Addressing.
+3. Refresh or reinstall the app in SideStore so it downloads the new provisioning profile.
+
+**With a paid Apple Developer account**
+1. On [developer.apple.com](https://developer.apple.com/account/resources/identifiers/list), open **Certificates, Identifiers & Profiles › Identifiers**.
+2. Open MaxPS4's App ID (or LiveContainer's if you run MaxPS4 inside it) and check **Increased Memory Limit** and **Extended Virtual Addressing**, then save.
+3. Refresh or reinstall the app in SideStore, signed with that account.
+
+**Check it**: in **MaxPS4 › Réglages › Autorisations iOS**, each line should show **Actif** (active) in green, with the memory still available to the app below. When a game runs, the session report's **Mémoire** line shows the window MaxPS4 obtained (e.g. *fenêtre … (24 Gio)*). Nothing breaks without these entitlements: MaxPS4 just uses a smaller window, and heavy games may run out of memory. They don't add physical RAM, and iOS may still cap an app's memory (around 6 GB on iPhone).
 
 MaxPS4 decrypts nothing: you need an already-extracted game folder from games you own. Development continues in several experimental branches and pull requests; check the progress table above for recent work.
 
