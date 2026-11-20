@@ -21,9 +21,8 @@ namespace {
 // with one empty guard reservation (user tag VM_MEMORY_GUARD, no access,
 // no maximum access), where PS4 games place fixed mappings (Call of Duty:
 // Modern Warfare Remastered at 0x2001000000). Whether [address, address +
-// size) lies inside such a guard, which is then given back for that span.
-// `status` gets the host's answer to the release (0: released).
-bool release_guard(uint64_t address, uint64_t size, int& status) {
+// size) lies inside such a guard.
+bool in_guard(uint64_t address, uint64_t size) {
     vm_address_t region = vm_address_t(address);
     vm_size_t region_size = 0;
     natural_t depth = 0;
@@ -32,26 +31,28 @@ bool release_guard(uint64_t address, uint64_t size, int& status) {
     if (::vm_region_recurse_64(::mach_task_self(), &region, &region_size, &depth,
                                reinterpret_cast<vm_region_recurse_info_t>(&info), &count) != KERN_SUCCESS)
         return false;
-    if (region > address || region + region_size < address + size || info.user_tag != VM_MEMORY_GUARD ||
-        info.protection != VM_PROT_NONE || info.max_protection != VM_PROT_NONE || info.is_submap)
-        return false;
-    const kern_return_t kr = ::vm_deallocate(::mach_task_self(), vm_address_t(address), vm_size_t(size));
-    status = int(kr);
-    return kr == KERN_SUCCESS;
+    return region <= address && region + region_size >= address + size && info.user_tag == VM_MEMORY_GUARD &&
+           info.protection == VM_PROT_NONE && info.max_protection == VM_PROT_NONE && !info.is_submap;
 }
 #endif
 bool reserve_exact(uint64_t address, uint64_t size, int& status) {
 #if defined(__APPLE__)
     vm_address_t at = vm_address_t(address);
     kern_return_t kr = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size), VM_FLAGS_FIXED);
-    if (kr == KERN_NO_SPACE) {
-        // Inside iOS's empty guard: take that span back from it, then retry.
-        int released = 0;
-        if (release_guard(address, size, released)) {
-            at = vm_address_t(address);
-            kr = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size), VM_FLAGS_FIXED);
-        } else if (released) {
-            kr = kern_return_t(1000 + released); // The guard refused: 1000 + its answer.
+    if (kr == KERN_NO_SPACE && in_guard(address, size)) {
+        // Inside iOS's empty guard, which is permanent (vm_deallocate only
+        // splits it): overwrite that span instead, with vm_allocate, then
+        // mmap. Their answers, for the report: 2000 + vm_allocate's,
+        // 3000 + mmap's errno.
+        at = vm_address_t(address);
+        const kern_return_t overwrite = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size),
+                                                      VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+        if (overwrite == KERN_SUCCESS && at == vm_address_t(address)) kr = KERN_SUCCESS;
+        else {
+            void* want = reinterpret_cast<void*>(address);
+            void* got = ::mmap(want, size_t(size), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            if (got == want) { kr = KERN_SUCCESS; at = vm_address_t(address); }
+            else kr = kern_return_t(got == MAP_FAILED ? 3000 + errno : 2000 + int(overwrite));
         }
     }
     status = int(kr);
