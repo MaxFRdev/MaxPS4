@@ -1042,7 +1042,11 @@ static maxps4_fex_guest_fault guest_fault(int signal, int code, uint64_t address
     fault.signal = signal; fault.code = code; fault.address = address; fault.rip = state.rip;
     fault.rsp = state.gregs[x86::REG_RSP]; fault.rbp = state.gregs[x86::REG_RBP];
     fault.rax = state.gregs[x86::REG_RAX]; fault.rdi = state.gregs[x86::REG_RDI]; fault.rsi = state.gregs[x86::REG_RSI];
-    for (uint32_t i = 0; i < 4; ++i) {
+    fault.rbx = state.gregs[x86::REG_RBX]; fault.rcx = state.gregs[x86::REG_RCX]; fault.rdx = state.gregs[x86::REG_RDX];
+    fault.r8 = state.gregs[x86::REG_R8]; fault.r9 = state.gregs[x86::REG_R9]; fault.r10 = state.gregs[x86::REG_R10];
+    fault.r11 = state.gregs[x86::REG_R11]; fault.r12 = state.gregs[x86::REG_R12]; fault.r13 = state.gregs[x86::REG_R13];
+    fault.r14 = state.gregs[x86::REG_R14]; fault.r15 = state.gregs[x86::REG_R15];
+    for (uint32_t i = 0; i < 16; ++i) {
         uint64_t word = 0;
         if (!read(fault.rsp + 8 * i, &word, sizeof(word))) break;
         fault.stack[i] = word; fault.stack_words = i + 1;

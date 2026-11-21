@@ -45,6 +45,21 @@ inline constexpr GameWatch game_watches[] = {
     {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0xeb24760, "pages libres réserve 0"},
     {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0xeb24764, "pages libres réserve 1"},
 };
+// Diagnostic traps: an error path replaced by UD2 (and NOPs), so the game
+// stops there with its registers in the report instead of relaunching itself.
+// CoD's "Out of memory 28" (0x61e093, LEA RDI of the message): its allocator's
+// commit found no pages to map though its pools are full.
+struct GameTrap {
+    const char* game;
+    const char* module;
+    uint64_t offset;
+    uint8_t expected[7];
+    const char* label;
+};
+inline constexpr GameTrap game_traps[] = {
+    {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x61e093, {0x48, 0x8d, 0x3d, 0xb4, 0x73, 0x33, 0x00},
+     "Out of memory 28"},
+};
 using GameWatchAddresses = std::vector<std::pair<std::string, uint64_t>>; // Label, guest address.
 
 // Where moved bases go: this far into the window, and the window's top part
@@ -75,6 +90,17 @@ inline std::string apply_game_patches(GuestELF& image, uint64_t window, uint64_t
             std::snprintf(line, sizeof line, "[MaxPS4] %s : mémoire virtuelle du jeu 0x%llx -> 0x%llx (zone interdite par iOS)\n",
                           patch.game, (unsigned long long)patch.ps4_base, (unsigned long long)target);
             report += line;
+            for (const auto& trap : game_traps) {
+                if (std::strcmp(trap.game, patch.game)) continue;
+                for (const auto& m : image.module_records()) {
+                    if (m.name != trap.module) continue;
+                    const uint8_t ud2[7] = {0x0f, 0x0b, 0x90, 0x90, 0x90, 0x90, 0x90};
+                    const bool armed = image.patch(m.base + trap.offset, trap.expected, ud2, sizeof(ud2));
+                    std::snprintf(line, sizeof line, "[MaxPS4] %s : piège de diagnostic sur « %s » à 0x%llx%s\n", patch.game,
+                                  trap.label, (unsigned long long)trap.offset, armed ? "" : " (octets différents, non posé)");
+                    report += line;
+                }
+            }
             if (watches)
                 for (const auto& watch : game_watches)
                     if (!std::strcmp(watch.game, patch.game))

@@ -637,10 +637,13 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private func registers(_ fault: maxps4_fex_guest_fault) -> String {
         func hex(_ value: UInt64) -> String { "0x" + String(value, radix: 16) }
         let words = withUnsafeBytes(of: fault.stack) { raw in
-            Array(raw.bindMemory(to: UInt64.self).prefix(Int(min(fault.stack_words, 4))))
+            Array(raw.bindMemory(to: UInt64.self).prefix(Int(min(fault.stack_words, 16))))
         }
         let stack = words.isEmpty ? "illisible" : words.map(hex).joined(separator: " ")
-        return "\nRegistres : RSP \(hex(fault.rsp)) · RBP \(hex(fault.rbp)) · RAX \(hex(fault.rax)) · RDI \(hex(fault.rdi)) · RSI \(hex(fault.rsi))\nPile à RSP : \(stack)"
+        return "\nRegistres : RSP \(hex(fault.rsp)) · RBP \(hex(fault.rbp)) · RAX \(hex(fault.rax)) · RDI \(hex(fault.rdi)) · RSI \(hex(fault.rsi))" +
+            "\nRBX \(hex(fault.rbx)) · RCX \(hex(fault.rcx)) · RDX \(hex(fault.rdx)) · R8 \(hex(fault.r8)) · R9 \(hex(fault.r9)) · R10 \(hex(fault.r10)) · R11 \(hex(fault.r11))" +
+            "\nR12 \(hex(fault.r12)) · R13 \(hex(fault.r13)) · R14 \(hex(fault.r14)) · R15 \(hex(fault.r15))" +
+            "\nPile à RSP : \(stack)"
     }
     private func failure(_ text: String, _ code: Int32) -> NSError {
         NSError(domain: "MaxPS4.Game", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "\(text) (\(code))"])
