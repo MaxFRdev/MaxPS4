@@ -1888,7 +1888,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
                     const char* known = service_name(static_cast<maxps4::PS4KernelService>(found->token));
                     name = known ? known : "service " + std::to_string(found->token);
                 }
-                engine->fault_note = "[MaxPS4] RIP dans le relais HLE de " + name + " (au retour de cette fonction)\n";
+                engine->fault_note += "[MaxPS4] RIP dans le relais HLE de " + name + " (au retour de cette fonction)\n";
             }
             engine->fault_note += maxps4::read_game_watches(engine->probe.watches,
                 [&](uint64_t at, void* out, size_t n) { return engine->probe.memory && engine->probe.memory->read(at, out, n); });
