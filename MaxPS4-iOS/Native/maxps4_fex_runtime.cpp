@@ -2528,13 +2528,42 @@ extern "C" int32_t maxps4_fex_engine_host_map(maxps4_fex_engine* engine, char* t
 extern "C" uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine* engine) {
     return engine ? engine->staged_ps4.spare_address_space() : 0;
 }
+// argv[0] as the report shows it: its base64 payload ('~' for '=', as CoD's
+// launcher writes it) decoded, printable bytes as they are and others as
+// \xNN; the raw text when it is not base64.
+static std::string readable_argument(const std::string& argument) {
+    auto value = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::string bytes;
+    uint32_t bits = 0; int count = 0;
+    for (char c : argument) {
+        if (c == '~' || c == '=') break;
+        const int v = value(c);
+        if (v < 0) return argument;
+        bits = (bits << 6) | uint32_t(v); count += 6;
+        if (count >= 8) { count -= 8; bytes += char((bits >> count) & 0xff); }
+    }
+    std::string out;
+    for (unsigned char c : bytes) {
+        if (c >= 0x20 && c < 0x7f) out += char(c);
+        else { char hex[5]; std::snprintf(hex, sizeof hex, "\\x%02x", c); out += hex; }
+    }
+    return out;
+}
 extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     std::string out = engine->libkernel.console();
     // A launcher eboot.bin booted its game instead (load_game): said first.
     if (!engine->launcher_target.empty())
         out = (engine->exec_set ? "[MaxPS4] relancé par sceSystemServiceLoadExec : /app0/" + engine->launcher_target +
-                                  " (argv[0] de " + std::to_string(engine->exec_argument.size()) + " caractères)\n" :
+                                  " (argv[0] de " + std::to_string(engine->exec_argument.size()) + " caractères)\n" +
+                                  "[MaxPS4] argv[0] décodé : " + readable_argument(engine->exec_argument) + "\n" :
                "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n") +
               engine->game_patches + out;
     else out = engine->game_patches + out;
