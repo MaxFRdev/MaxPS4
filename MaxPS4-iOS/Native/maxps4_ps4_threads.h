@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include "maxps4_ps4_abi.h"
 #include "maxps4_ps4_guest_memory.h"
 #include <array>
@@ -18,6 +19,9 @@ namespace maxps4 {
 // leave 2 in their slot, which stays invalid.
 class PS4Threads final {
 public:
+    // For the status report: the mutex at `slot` as "owner N, type T, count C",
+    // or empty when no mutex is registered there.
+    std::string describe_mutex(uint64_t slot);
     // PS4 mutex types (scePthreadMutexattrSettype). Error-checking is the default.
     enum MutexType : uint32_t { error_check = 1, recursive = 2, normal = 3, adaptive = 4 };
     static constexpr uint64_t default_stack = 1024 * 1024, minimum_stack = 16 * 1024;

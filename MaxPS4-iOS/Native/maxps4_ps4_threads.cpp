@@ -927,3 +927,11 @@ Error PS4Threads::flag_cancel(uint64_t handle, uint64_t pattern, uint64_t waiter
     return ok;
 }
 } // namespace maxps4
+
+std::string maxps4::PS4Threads::describe_mutex(uint64_t slot) {
+    std::lock_guard<std::mutex> lock(guard_);
+    const Mutex* mutex = lookup(slot);
+    if (!mutex) return {};
+    return "détenu par le thread " + std::to_string(mutex->owner) + ", type " + std::to_string(mutex->type) +
+           ", " + std::to_string(mutex->count) + " fois";
+}

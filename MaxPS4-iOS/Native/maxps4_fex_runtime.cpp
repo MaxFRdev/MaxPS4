@@ -131,7 +131,7 @@ public:
     // Per guest thread: the HLE call in progress, or the last one and when it
     // returned, so a stalled game shows where each of its threads waits.
     struct Activity {
-        std::atomic<uint64_t> thread {0}, since {0}, returned {0};
+        std::atomic<uint64_t> thread {0}, since {0}, returned {0}, argument {0}; // argument: RDI of the call.
         std::atomic<uint32_t> service {0};
         std::atomic<bool> inside {false};
     };
@@ -247,7 +247,7 @@ public:
                 }
             }
             Activity* slot = activity_slot();
-            if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns(); slot->inside = true; }
+            if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->argument = call.rdi; slot->since = now_ns(); slot->inside = true; }
             const uint64_t timed_from = timing && timing->enabled() ? now_ns() : 0;
             if (timed_from && (orbis == maxps4::PS4KernelService::video_submit ||
                                orbis == maxps4::PS4KernelService::gnm_submit_flip ||
@@ -3143,9 +3143,25 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         const double seconds = double(now - std::min(now, a.since.load())) / 1e9;
         const auto returned = (unsigned long long)a.returned.load();
         char line[192];
-        if (a.inside.load())
-            std::snprintf(line, sizeof line, "thread %llu : dans %s depuis %.1f s (%llu appels)\n",
+        if (a.inside.load()) {
+            std::snprintf(line, sizeof line, "thread %llu : dans %s depuis %.1f s (%llu appels)",
                 (unsigned long long)thread, name, seconds, returned);
+            // A wait on a mutex or a condition: which one, and who holds it.
+            std::string detail;
+            const uint64_t argument = a.argument.load();
+            if (seconds >= 2 && (raw == uint32_t(maxps4::PS4KernelService::mutex_lock) ||
+                                 raw == uint32_t(maxps4::PS4KernelService::cond_wait))) {
+                char where[64];
+                std::snprintf(where, sizeof where, " · objet 0x%llx", (unsigned long long)argument);
+                detail = where;
+                if (raw == uint32_t(maxps4::PS4KernelService::mutex_lock)) {
+                    const std::string held = engine->libkernel.threads().describe_mutex(argument);
+                    detail += held.empty() ? " (verrou inconnu)" : " " + held;
+                }
+            }
+            out += line + detail + "\n";
+            continue;
+        }
         else
             std::snprintf(line, sizeof line, "thread %llu : code du jeu depuis %.1f s, dernier %s (%llu appels)\n",
                 (unsigned long long)thread, seconds, name, returned);
