@@ -2290,7 +2290,32 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (!c.rsp || c.rsp > UINT64_MAX - 8 || !memory_.read(c.rsp + 8, pitch, 8)) return PS4VideoOut::error(2);
         return videoout_.set_attribute(c.rdi, uint32_t(c.rsi), uint32_t(c.rdx), uint32_t(c.rcx), uint32_t(c.r8), uint32_t(c.r9), uint32_t(get_le(pitch, 8)));
     }
-    case S::video_register: return videoout_.register_buffers(c.rdi, signed32(c.rsi), c.rdx, signed32(c.rcx), c.r8);
+    case S::video_register: {
+        const int64_t result = videoout_.register_buffers(c.rdi, signed32(c.rsi), c.rdx, signed32(c.rcx), c.r8);
+        // A refused buffer address (0x80290013): which one and how much of it
+        // is mapped readable, in the stop report (games quit on this error).
+        if (result == int32_t(0x80290013)) {
+            auto hex = [](uint64_t value) { char text[20]; std::snprintf(text, sizeof text, "%llx", (unsigned long long)value); return std::string(text); };
+            uint8_t attribute[24] = {};
+            (void)memory_.read(c.r8, attribute, sizeof(attribute));
+            const uint64_t pitch = get_le(attribute + 20, 4), height = get_le(attribute + 16, 4), bytes = pitch * height * 4;
+            std::string line = "[MaxPS4] sceVideoOutRegisterBuffers refusé : format 0x" + hex(get_le(attribute, 4)) +
+                " tiling " + std::to_string(get_le(attribute + 4, 4)) + " " + std::to_string(get_le(attribute + 12, 4)) + "x" +
+                std::to_string(height) + " pitch " + std::to_string(pitch) + " (" + std::to_string(bytes >> 10) + " Kio)";
+            for (int32_t i = 0; i < signed32(c.rcx) && i < 16; ++i) {
+                uint8_t wire[8] = {};
+                const uint64_t address = memory_.read(c.rdx + uint64_t(i) * 8, wire, 8) ? get_le(wire, 8) : 0;
+                const size_t readable = address ? std::max(memory_.contiguous(address, size_t(bytes), 4),
+                                                           dynamic_ ? dynamic_->contiguous(address, size_t(bytes), 4) : 0) : 0;
+                line += " · image " + std::to_string(i) + " 0x" + hex(address) + " lisible " + std::to_string(readable >> 10) + " Kio";
+            }
+            line += "\n";
+            std::lock_guard<std::mutex> guard(lock_);
+            console_.insert(console_.end(), line.begin(), line.end());
+            if (console_.size() > console_limit) console_.erase(console_.begin(), console_.end() - std::ptrdiff_t(console_limit));
+        }
+        return result;
+    }
     case S::video_unregister: return videoout_.unregister_buffers(c.rdi, signed32(c.rsi));
     case S::video_submit: videoout_.pace(); return videoout_.submit(c.rdi, signed32(c.rsi), signed32(c.rdx), c.rcx);
     case S::video_pending: return videoout_.pending(c.rdi);
