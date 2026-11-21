@@ -1046,6 +1046,8 @@ static maxps4_fex_guest_fault guest_fault(int signal, int code, uint64_t address
     fault.r8 = state.gregs[x86::REG_R8]; fault.r9 = state.gregs[x86::REG_R9]; fault.r10 = state.gregs[x86::REG_R10];
     fault.r11 = state.gregs[x86::REG_R11]; fault.r12 = state.gregs[x86::REG_R12]; fault.r13 = state.gregs[x86::REG_R13];
     fault.r14 = state.gregs[x86::REG_R14]; fault.r15 = state.gregs[x86::REG_R15];
+    if (fault.rbx && read(fault.rbx, fault.at_rbx, sizeof(fault.at_rbx))) fault.at_words |= 1;
+    if (fault.rax && read(fault.rax, fault.at_rax, sizeof(fault.at_rax))) fault.at_words |= 2;
     for (uint32_t i = 0; i < 16; ++i) {
         uint64_t word = 0;
         if (!read(fault.rsp + 8 * i, &word, sizeof(word))) break;

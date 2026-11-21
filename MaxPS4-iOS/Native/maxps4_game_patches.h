@@ -60,6 +60,11 @@ struct GameTrap {
 inline constexpr GameTrap game_traps[] = {
     {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x61e093, {0x48, 0x8d, 0x3d, 0xb4, 0x73, 0x33, 0x00},
      "Out of memory 28"},
+    // Right after the dvar 0x227ec93f's registration, where it reads the
+    // string dvar it registered before (RBX) and faulted on its value (0):
+    // MOV R15,[RBX+0x10]; MOV R14,RAX.
+    {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x582ce2, {0x4c, 0x8b, 0x7b, 0x10, 0x49, 0x89, 0xc6},
+     "lecture du dvar texte c4d5bbe7"},
 };
 // A game's whole fixed virtual layout, moved as one block by a multiple of
 // 16 GiB (1 GiB if that does not fit) so offsets inside it keep their low
