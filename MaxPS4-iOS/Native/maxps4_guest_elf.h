@@ -148,7 +148,7 @@ public:
     // stack top, just above 64 bytes of params).
     static constexpr uint64_t entryAreaBytes = 4096;
     uint64_t write_entry_params();
-    // argv[0] that write_entry_params writes (at most 31 bytes; "eboot.bin"
+    // argv[0] that write_entry_params writes (at most entryAreaBytes - 33 bytes; "eboot.bin"
     // by default). A game booted in place of its launcher gets "": CoD:
     // Modern Warfare Remastered base64-decodes argv[0] from the launcher and
     // takes its default start-up for an empty one.

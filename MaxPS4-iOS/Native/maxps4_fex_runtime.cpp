@@ -119,6 +119,11 @@ public:
     std::atomic<int> callback_error {0};
     std::atomic<bool> exited {false};
     std::atomic<int32_t> exit_status {0};
+    // sceSystemServiceLoadExec: the executable and argv[0] the game asked for
+    // (exec_lock), for the session to boot next.
+    std::mutex exec_lock;
+    bool exec_requested = false;
+    std::string exec_path, exec_argument;
     // Per guest thread: the HLE call in progress, or the last one and when it
     // returned, so a stalled game shows where each of its threads waits.
     struct Activity {
@@ -267,6 +272,25 @@ public:
                     address = guest_tls ? reinterpret_cast<const uint8_t*>(guest_tls) : image->thread_pointer_host();
                 }
                 result = static_cast<int64_t>(reinterpret_cast<uintptr_t>(address));
+            } else if (orbis == maxps4::PS4KernelService::load_exec) {
+                // sceSystemServiceLoadExec(path, argv): remember both, then end
+                // the run as exit(0) does (the trampoline's HLT follows).
+                char path[256] = {};
+                std::string argument;
+                (void)memory->read_cstring(call.rdi, path, sizeof(path));
+                uint64_t argv0 = 0;
+                if (call.rsi && memory->read(call.rsi, &argv0, sizeof(argv0)) && argv0) {
+                    std::vector<char> text(4096, 0);
+                    if (memory->read_cstring(argv0, text.data(), text.size())) argument = text.data();
+                }
+                {
+                    std::lock_guard<std::mutex> guard(exec_lock);
+                    exec_requested = true; exec_path = path; exec_argument = std::move(argument);
+                }
+                result = 0;
+                bool first = false;
+                if (exited.compare_exchange_strong(first, true)) exit_status = 0;
+                if (threads) guest_thread_service(*threads,maxps4::PS4KernelService::process_exit,call);
             } else if (orbis == maxps4::PS4KernelService::process_exit || orbis == maxps4::PS4KernelService::abort_process) {
                 // The entry's exit function: the status (EDI) becomes RAX, and the
                 // HLT that follows this SYSCALL ends the calling thread. The first
@@ -294,7 +318,8 @@ public:
             if (timed_from) timing->record(static_cast<uint32_t>(orbis), now_ns() - timed_from);
             if (!frequent(orbis)) {
                 RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}, posix};
-                if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)
+                if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat ||
+                    orbis == maxps4::PS4KernelService::load_exec)
                     (void)memory->read_cstring(call.rdi, entry.path, sizeof(entry.path));
                 std::lock_guard<std::mutex> guard(recent_lock);
                 recent[recent_next++ % recent.size()] = entry;
@@ -319,6 +344,7 @@ public:
             // is RET: the return address becomes the thread's return trampoline,
             // whose own exit call ends it.
             if (threads && orbis != maxps4::PS4KernelService::thread_exit && orbis != maxps4::PS4KernelService::process_exit &&
+                orbis != maxps4::PS4KernelService::load_exec &&
                 orbis != maxps4::PS4KernelService::abort_process && guest_thread_ending(*threads)) {
                 uint8_t back[8];
                 const uint64_t exit_at = image->thread_return();
@@ -1408,6 +1434,10 @@ struct maxps4_fex_engine {
     std::string update_directory; // For load_game (set_update); empty: none.
     std::string launcher_target;  // The /app0 game a launcher eboot.bin LoadExecs, booted instead (empty: none).
     std::string game_patches;     // What maxps4_game_patches.h changed in this run, one line each.
+    // Set before load_game when a run's sceSystemServiceLoadExec asked for
+    // another executable: its /app0 path and the argv[0] it passed.
+    bool exec_set = false;
+    std::string exec_path, exec_argument;
     maxps4::GuestFrame frame;
     uint64_t frame_sequence = 0;
     bool frame_code_cached = false;
@@ -1683,7 +1713,9 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     }
     if (ps4_entry) {
         // A game booted in place of its launcher (load_game): an empty argv[0].
-        image.entry_program = engine->launcher_target.empty() ? "eboot.bin" : "";
+        // After sceSystemServiceLoadExec: the argv[0] the game passed.
+        image.entry_program = engine->exec_set ? engine->exec_argument :
+            engine->launcher_target.empty() ? "eboot.bin" : "";
         initial_rsp = image.write_entry_params();
         if (!initial_rsp) return -EFAULT;
     } else {
@@ -1695,6 +1727,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     }
     engine->probe.exited = false;
     engine->probe.exit_status = 0;
+    { std::lock_guard<std::mutex> guard(engine->probe.exec_lock); engine->probe.exec_requested = false; }
     auto* thread = engine->context->CreateThread(initial_rip, initial_rsp);
     if (!thread) return -ENOMEM;
     struct DestroyThread {
@@ -2302,9 +2335,27 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
         std::vector<File> files;
         for (const auto& found : maxps4::discover_app_modules(root, update)) files.push_back({found.path, found.root_level, {}});
         std::filesystem::path eboot = !update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin";
+        // The executable a previous run's sceSystemServiceLoadExec named.
+        if (engine->exec_set) {
+            std::string name = engine->exec_path;
+            if (name.rfind("/app0/", 0) == 0) name.erase(0, 6);
+            const std::filesystem::path relative(name);
+            if (name.empty() || name.find("..") != std::string::npos || relative.is_absolute()) {
+                if (diagnostic && capacity) std::snprintf(diagnostic, capacity, "sceSystemServiceLoadExec : chemin refusé %s", engine->exec_path.c_str());
+                return -ENOENT;
+            }
+            const auto found = !update.empty() && std::filesystem::is_regular_file(update / relative, error) ? update / relative : root / relative;
+            if (!std::filesystem::is_regular_file(found, error)) {
+                if (diagnostic && capacity) std::snprintf(diagnostic, capacity, "sceSystemServiceLoadExec : %s introuvable", engine->exec_path.c_str());
+                return -ENOENT;
+            }
+            eboot = found;
+        }
         // A launcher eboot that only LoadExecs the real game: boot that game
         // (maxps4_app_modules.h). It keeps the eboot.bin module name.
-        if (const auto target = maxps4::launcher_target(eboot, root, update); !target.empty()) {
+        if (engine->exec_set) {
+            engine->launcher_target = eboot.filename().string();
+        } else if (const auto target = maxps4::launcher_target(eboot, root, update); !target.empty()) {
             std::fprintf(stderr, "maxps4: eboot.bin is a launcher (sceSystemServiceLoadExec); booting /app0/%s\n",
                          target.filename().string().c_str());
             engine->launcher_target = target.filename().string();
@@ -2446,6 +2497,23 @@ extern "C" int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine* engine, ui
     if (!engine->staged_ps4.heap(*window, *window_size)) *window = *window_size = 0;
     return 0;
 }
+extern "C" int32_t maxps4_fex_engine_exec_request(maxps4_fex_engine* engine, char* path, size_t path_capacity,
+                                                  char* argument, size_t argument_capacity) {
+    if (!engine || !path || !path_capacity || !argument || !argument_capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.exec_lock);
+    if (!engine->probe.exec_requested) return 0;
+    if (engine->probe.exec_path.size() >= path_capacity || engine->probe.exec_argument.size() >= argument_capacity) return -ENAMETOOLONG;
+    std::memcpy(path, engine->probe.exec_path.c_str(), engine->probe.exec_path.size() + 1);
+    std::memcpy(argument, engine->probe.exec_argument.c_str(), engine->probe.exec_argument.size() + 1);
+    return 1;
+}
+extern "C" int32_t maxps4_fex_engine_set_exec(maxps4_fex_engine* engine, const char* path, const char* argument) {
+    if (!engine) return -EINVAL;
+    engine->exec_set = path && *path;
+    engine->exec_path = engine->exec_set ? path : "";
+    engine->exec_argument = engine->exec_set && argument ? argument : "";
+    return 0;
+}
 extern "C" int32_t maxps4_fex_engine_host_map(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     uint64_t window = 0, window_size = 0;
@@ -2465,7 +2533,9 @@ extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* te
     std::string out = engine->libkernel.console();
     // A launcher eboot.bin booted its game instead (load_game): said first.
     if (!engine->launcher_target.empty())
-        out = "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n" +
+        out = (engine->exec_set ? "[MaxPS4] relancé par sceSystemServiceLoadExec : /app0/" + engine->launcher_target +
+                                  " (argv[0] de " + std::to_string(engine->exec_argument.size()) + " caractères)\n" :
+               "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n") +
               engine->game_patches + out;
     else out = engine->game_patches + out;
     if (out.size() >= capacity) out.erase(0, out.size() - (capacity - 1));

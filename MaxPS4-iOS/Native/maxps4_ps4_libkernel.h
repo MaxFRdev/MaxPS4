@@ -123,7 +123,10 @@ enum class PS4KernelService : uint32_t {
     gnm_dispatch_indirect_mec, thread_getname,
     trophy_game_info, trophy_group_info, trophy_unlock_state, rtc_time_t,
     attr_getschedparam, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_post, uuid_create,
-    net_pton, net_ntop
+    net_pton, net_ntop,
+    // sceSystemServiceLoadExec(path, argv): the game replaces itself; the run
+    // ends like exit and the session boots `path` with argv[0] (runtime).
+    load_exec
 };
 // Token bit of a trampoline whose function follows the POSIX convention: -1
 // with the error in the calling thread's errno (__Error) instead of an Orbis

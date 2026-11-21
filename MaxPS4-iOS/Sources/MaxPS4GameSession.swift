@@ -76,6 +76,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var engine: OpaquePointer?
     private var bridge: MaxPS4GameMetalBridge?
     private var stopped = false
+    var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
     private var ready = false
     private var port: UInt64 = 1
     private var missingSince: Date?
@@ -102,6 +103,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
     }
     // What the last run left for the player, set before run() returns.
     struct Outcome { var missing: [String] = []; var crashed = false; var report: URL? }
+    // What the last run's sceSystemServiceLoadExec asked for: the /app0
+    // executable and argv[0] to boot next (nil: none).
+    struct ExecRequest: Sendable { var path: String; var argument: String }
+    private(set) var execRequest: ExecRequest?
     private(set) var outcome = Outcome()
     private var inputEngine: OpaquePointer?
     private var displayed = 0
@@ -478,7 +483,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
         }
         setStage("fermée")
     }
-    func run(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false, progress: @escaping @Sendable (String) -> Void) -> String {
+    func run(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false, exec: ExecRequest? = nil, progress: @escaping @Sendable (String) -> Void) -> String {
+        execRequest = nil
         dispatchPrecondition(condition: .onQueue(MaxPS4FEXMetalExecution.queue))
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -502,6 +508,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             progress(String(localized: "Lecture du dossier et chargement de eboot.bin et des PRX…", bundle: .maxps4))
             // An extracted update: its eboot.bin and modules first, and over /app0.
             _ = (update?.path ?? "").withCString { maxps4_fex_engine_set_update(opened, $0) }
+            // A previous run's sceSystemServiceLoadExec: its executable and argv[0].
+            if let exec {
+                _ = exec.path.withCString { path in exec.argument.withCString { maxps4_fex_engine_set_exec(opened, path, $0) } }
+            }
             let loaded = url.path.withCString { path in
                 diagnostic.withUnsafeMutableBufferPointer {
                     maxps4_fex_engine_load_game(opened, path, &relocation, $0.baseAddress, $0.count)
@@ -579,6 +589,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             let ran = maxps4_fex_engine_run_orbis(opened, &value, &backend, &entry)
             setStage("jeu arrêté, rapport de fin")
             lock.lock(); let wasStopped = stopped; let frames = displayed; lock.unlock()
+            var execPath = [CChar](repeating: 0, count: 512), execArgument = [CChar](repeating: 0, count: 8192)
+            if !wasStopped, maxps4_fex_engine_exec_request(opened, &execPath, execPath.count, &execArgument, execArgument.count) == 1 {
+                execRequest = ExecRequest(path: String(cString: execPath), argument: String(cString: execArgument))
+            }
             var fault = maxps4_fex_guest_fault()
             _ = maxps4_fex_engine_last_guest_fault(opened, &fault)
             let relativeRIP = fault.rip >= relocation ? fault.rip - relocation : fault.rip
@@ -683,12 +697,20 @@ final class MaxPS4GameSource: @unchecked Sendable {
             }
         }
         MaxPS4FEXMetalExecution.queue.async { [weak self] in
-            let result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling, frameTiming: frameTiming) { [weak self] text in
+            let progress: @Sendable (String) -> Void = { [weak self] text in
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.generation == id, self.running else { return }
                     self.launched = true; Self.draining = nil
                     self.report = text
                 }
+            }
+            var result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling, frameTiming: frameTiming, progress: progress)
+            // The game replaced itself (sceSystemServiceLoadExec): boot what it
+            // asked for, a few times at most, unless the session was stopped.
+            var relaunches = 0
+            while let exec = source.execRequest, relaunches < 4, !source.isStopped {
+                relaunches += 1
+                result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling, frameTiming: frameTiming, exec: exec, progress: progress)
             }
             DispatchQueue.main.async {
                 guard let self else { return }

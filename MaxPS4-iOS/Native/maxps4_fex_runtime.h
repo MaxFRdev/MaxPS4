@@ -370,6 +370,13 @@ int32_t maxps4_fex_engine_console(maxps4_fex_engine *engine, char *text, size_t 
 // The host's address-space bounds and its first mappings from the PS4
 // application area (0x1000000000) up to the mmap window, for a report.
 int32_t maxps4_fex_engine_host_map(maxps4_fex_engine *engine, char *text, size_t capacity);
+// After a run: 1 and the /app0 path and argv[0] its sceSystemServiceLoadExec
+// asked for (0: none; -ENAMETOOLONG: a buffer is too small).
+int32_t maxps4_fex_engine_exec_request(maxps4_fex_engine *engine, char *path, size_t path_capacity,
+                                       char *argument, size_t argument_capacity);
+// Before load_game: boot `path` (a /app0 file) with argv[0] `argument`,
+// as a previous run's sceSystemServiceLoadExec asked (null or "": eboot.bin).
+int32_t maxps4_fex_engine_set_exec(maxps4_fex_engine *engine, const char *path, const char *argument);
 uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine *engine);
 int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine *engine, uint64_t *app_area,
     uint64_t *app_area_size, uint64_t *window, uint64_t *window_size, int32_t *app_area_status);

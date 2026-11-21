@@ -445,6 +445,7 @@ constexpr Binding bindings[] = {
      false, false, 0, nullptr, 0, "libSceLibcInternal"},
     {"sceSystemServiceParamGetInt", "fZo48un7LK4", PS4KernelService::system_param_int, "libSceSystemService"},
     {"sceSystemServiceGetStatus", "rPo6tV8D9bM", PS4KernelService::system_status, "libSceSystemService"},
+    {"sceSystemServiceLoadExec", "JoBqSQt1yyA", PS4KernelService::load_exec, "libSceSystemService", false, true},
     {"sceSystemServiceReceiveEvent", "656LMQSrg6U", PS4KernelService::system_event, "libSceSystemService"},
     {"sceSystemServiceHideSplashScreen", "Vo5V8KAwCmk", PS4KernelService::succeed, "libSceSystemService"},
     // Save data (shadPS4 libraries/save_data): one directory at a time.
