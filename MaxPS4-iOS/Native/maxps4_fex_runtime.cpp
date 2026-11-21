@@ -288,15 +288,7 @@ public:
                     if (memory->read_cstring(argv0, text.data(), text.size())) argument = text.data();
                 }
                 std::string state = kernel ? "[MaxPS4] à la demande de relance, mémoire directe : " + kernel->direct_report() + "\n" : "";
-                for (const auto& [label, address] : watches) {
-                    uint32_t value = 0;
-                    char line[160];
-                    if (memory->read(address, &value, sizeof(value)))
-                        std::snprintf(line, sizeof line, "[MaxPS4] %s : %u (%llu Mio)\n", label.c_str(), value,
-                                      (unsigned long long)((uint64_t(value) << 16) >> 20));
-                    else std::snprintf(line, sizeof line, "[MaxPS4] %s : illisible\n", label.c_str());
-                    state += line;
-                }
+                state += maxps4::read_game_watches(watches, [&](uint64_t at, void* out, size_t n) { return memory->read(at, out, n); });
                 {
                     std::lock_guard<std::mutex> guard(exec_lock);
                     exec_requested = true; exec_path = path; exec_argument = std::move(argument); exec_state = std::move(state);
@@ -1864,6 +1856,8 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
                 }
                 engine->fault_note = "[MaxPS4] RIP dans le relais HLE de " + name + " (au retour de cette fonction)\n";
             }
+            engine->fault_note += maxps4::read_game_watches(engine->probe.watches,
+                [&](uint64_t at, void* out, size_t n) { return engine->probe.memory && engine->probe.memory->read(at, out, n); });
         }
         if (signal) {
             engine->frame_code_cached = false;

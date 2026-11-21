@@ -17,7 +17,6 @@
 #include <cstring>
 #include <tuple>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace maxps4 {
@@ -41,10 +40,14 @@ struct GameWatch {
     const char* module;
     uint64_t offset;          // From the module base.
     const char* label;
+    uint32_t width = 4;       // 8: a 64-bit value (a pointer), shown in hex.
 };
 inline constexpr GameWatch game_watches[] = {
     {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0xeb24760, "pages libres réserve 0"},
     {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0xeb24764, "pages libres réserve 1"},
+    {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x9fc520, "GOT scePthreadAttrInit", 8},
+    {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x9fc530, "GOT scePthreadCreate", 8},
+    {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x9fba98, "GOT __stack_chk_guard", 8},
 };
 // Diagnostic traps: an error path replaced by UD2 (and NOPs), so the game
 // stops there with its registers in the report instead of relaunching itself.
@@ -60,10 +63,10 @@ struct GameTrap {
 inline constexpr GameTrap game_traps[] = {
     {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x61e093, {0x48, 0x8d, 0x3d, 0xb4, 0x73, 0x33, 0x00},
      "Out of memory 28"},
-    // After its pools' set-up (0x582fd8..0x583670), before it starts a
-    // thread (0x599870): the SharePlay-time fault is before or after this.
-    {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x583672, {0x48, 0x8d, 0x3d, 0x97, 0xf7, 0x20, 0x00},
-     "fin de l'initialisation des pools"},
+    // Just before its thread set-up's first call, scePthreadAttrInit through
+    // the GOT slot 0x9fc520 (watched below): MOV RDI,R15; CALL.
+    {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x5998a1, {0x4c, 0x89, 0xff, 0xe8, 0x5f, 0xb6, 0x32},
+     "appel de scePthreadAttrInit"},
 };
 // A game's whole fixed virtual layout, moved as one block by a multiple of
 // 16 GiB (1 GiB if that does not fit) so offsets inside it keep their low
@@ -108,7 +111,8 @@ inline bool game_needs_layout_window(const Segments& segments) {
     return false;
 }
 
-using GameWatchAddresses = std::vector<std::pair<std::string, uint64_t>>; // Label, guest address.
+struct GameWatchAddress { std::string label; uint64_t address; uint32_t width; };
+using GameWatchAddresses = std::vector<GameWatchAddress>;
 
 // Where moved bases go: this far into the window, and the window's top part
 // from there on is the games' (PS4VirtualMemory::set_placement_end).
@@ -122,6 +126,25 @@ inline constexpr uint64_t game_virtual_alignment = uint64_t(2) << 20;
 // Applies the patches that match `image` and returns what was done, one line
 // each ("" when nothing matched). `placement_end` gets the address where
 // MaxPS4's own placements must stop (0: no patch applied).
+// The watched values as report lines, read through `read(address, out, size)`.
+template <class Read>
+inline std::string read_game_watches(const GameWatchAddresses& watches, Read&& read) {
+    std::string out;
+    for (const auto& watch : watches) {
+        char line[200];
+        uint64_t value = 0;
+        if (!read(watch.address, &value, watch.width))
+            std::snprintf(line, sizeof line, "[MaxPS4] %s : illisible\n", watch.label.c_str());
+        else if (watch.width == 8)
+            std::snprintf(line, sizeof line, "[MaxPS4] %s : 0x%llx\n", watch.label.c_str(), (unsigned long long)value);
+        else
+            std::snprintf(line, sizeof line, "[MaxPS4] %s : %llu (%llu Mio)\n", watch.label.c_str(), (unsigned long long)value,
+                          (unsigned long long)((value << 16) >> 20));
+        out += line;
+    }
+    return out;
+}
+
 inline std::string apply_game_patches(GuestELF& image, uint64_t window, uint64_t window_size, uint64_t& placement_end,
                                       GameWatchAddresses* watches = nullptr) {
     placement_end = 0;
@@ -201,7 +224,7 @@ inline std::string apply_game_patches(GuestELF& image, uint64_t window, uint64_t
                 for (const auto& watch : game_watches)
                     if (!std::strcmp(watch.game, patch.game))
                         for (const auto& m : image.module_records())
-                            if (m.name == watch.module) watches->push_back({watch.label, m.base + watch.offset});
+                            if (m.name == watch.module) watches->push_back({watch.label, m.base + watch.offset, watch.width});
         }
     }
     return report;
