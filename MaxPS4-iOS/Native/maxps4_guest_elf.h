@@ -182,6 +182,11 @@ public:
         std::vector<Segment> segments;
     };
     const std::vector<ModuleRecord>& module_records() const { return records; }
+    // Rewrites `length` bytes of loaded guest memory at `address`, before any
+    // of it ran, when they read `expected` (a per-game patch,
+    // maxps4_game_patches.h): host pages that are read-only are opened for
+    // the write and closed again. False, unchanged, otherwise.
+    bool patch(uint64_t address, const uint8_t* expected, const uint8_t* replacement, size_t length);
     const std::vector<Segment>& segments() const { return regions; }
 private:
     friend class PS4DynamicLinker;

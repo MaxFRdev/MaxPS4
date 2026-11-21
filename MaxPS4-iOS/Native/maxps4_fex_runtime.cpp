@@ -2,6 +2,7 @@
 #include "maxps4_fex_runtime.h"
 #include "maxps4_guest_stack.h"
 #include "maxps4_app_modules.h"
+#include "maxps4_game_patches.h"
 #include "maxps4_orbis_v4_execution_gate.h"
 #include <algorithm>
 #include <set>
@@ -1406,6 +1407,7 @@ struct maxps4_fex_engine {
     uint64_t relocation = 0; // Of the loaded game, for relative profile RIPs.
     std::string update_directory; // For load_game (set_update); empty: none.
     std::string launcher_target;  // The /app0 game a launcher eboot.bin LoadExecs, booted instead (empty: none).
+    std::string game_patches;     // What maxps4_game_patches.h changed in this run, one line each.
     maxps4::GuestFrame frame;
     uint64_t frame_sequence = 0;
     bool frame_code_cached = false;
@@ -1671,6 +1673,14 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     // Its startup stub then lays out the PS4 entry stack from EntryParams at
     // the stack top, as shadPS4 does; the bounded paths keep the SysV auxv.
     const bool ps4_entry = image.general();
+    engine->game_patches.clear();
+    if (ps4_entry) {
+        // Per-game patches of the loaded code, before any of it runs.
+        uint64_t window = 0, window_size = 0, placement_end = 0;
+        if (image.heap(window, window_size))
+            engine->game_patches = maxps4::apply_game_patches(image, window, window_size, placement_end);
+        engine->dynamic_ps4.set_placement_end(placement_end);
+    }
     if (ps4_entry) {
         // A game booted in place of its launcher (load_game): an empty argv[0].
         image.entry_program = engine->launcher_target.empty() ? "eboot.bin" : "";
@@ -2455,7 +2465,9 @@ extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* te
     std::string out = engine->libkernel.console();
     // A launcher eboot.bin booted its game instead (load_game): said first.
     if (!engine->launcher_target.empty())
-        out = "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n" + out;
+        out = "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n" +
+              engine->game_patches + out;
+    else out = engine->game_patches + out;
     if (out.size() >= capacity) out.erase(0, out.size() - (capacity - 1));
     std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
     return int32_t(out.size());

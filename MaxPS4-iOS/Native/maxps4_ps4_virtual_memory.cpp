@@ -382,6 +382,9 @@ Error PS4VirtualMemory::place_unrecorded(uint64_t hint, uint64_t length, uint64_
     auto page_end = [](uint64_t end) {
         return end > UINT64_MAX - (page_size - 1) ? UINT64_MAX : (end + page_size - 1) / page_size * page_size;
     };
+    // A game's own fixed area (set_placement_end) is not ours to fill.
+    if (host && !fixed && placement_end_ > window && placement_end_ < window + window_bytes)
+        window_bytes = placement_end_ - window;
     uint64_t start = host ? window : base;
     if (host && hint > window && hint < window + window_bytes) start = hint; // A search start, not a demand.
     uint64_t candidate = fixed ? hint : align(start);

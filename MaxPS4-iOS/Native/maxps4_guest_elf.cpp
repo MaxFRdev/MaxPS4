@@ -784,6 +784,21 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
         return 0;
     } catch (const std::bad_alloc&) { clear(); return -ENOMEM; }
 }
+bool GuestELF::patch(uint64_t address, const uint8_t* expected, const uint8_t* replacement, size_t length) {
+    if (!length || !identity) return false;
+    const uint64_t host_page = static_cast<uint64_t>(::sysconf(_SC_PAGESIZE));
+    const uint8_t* current = translate(address, length, 4);
+    if (!current || std::memcmp(current, expected, length) != 0) return false;
+    // The host pages of a code segment are read-only (PROT_READ): open them.
+    const uint64_t first = address / host_page * host_page;
+    const uint64_t last = (address + length + host_page - 1) / host_page * host_page;
+    auto* pages = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(current) - (address - first));
+    const bool writable = translate(address, length, 2) != nullptr;
+    if (!writable && ::mprotect(pages, size_t(last - first), PROT_READ | PROT_WRITE) != 0) return false;
+    std::memcpy(const_cast<uint8_t*>(current), replacement, length);
+    if (!writable) ::mprotect(pages, size_t(last - first), PROT_READ);
+    return true;
+}
 uint64_t GuestELF::write_entry_params() {
     // EntryParams {int argc; u32 pad; const char* argv[3]} then argv[0].
     if (!entry_params_address) return 0;

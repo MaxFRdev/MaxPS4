@@ -57,6 +57,10 @@ public:
     const uint8_t* translate(uint64_t address, size_t length, uint32_t permissions) const override;
     size_t contiguous(uint64_t address, size_t limit, uint32_t permissions) const override;
     void reset();
+    // Placements MaxPS4 chooses (not fixed ones) end below `end`, inside the
+    // window: the rest is a game's own fixed area (maxps4_game_patches.h).
+    // 0: the whole window. reset() keeps it.
+    void set_placement_end(uint64_t end) { placement_end_ = end; }
     size_t allocated() const { return used_; }
     // Placements that did not go as asked, newest last: a fixed PS4 address
     // outside the window the host refused, placed at `result` instead (a game
@@ -89,6 +93,7 @@ private:
     const GuestELF& image_;
     std::vector<Region> regions_;
     size_t used_ = 0;
+    uint64_t placement_end_ = 0;
     // Read by the session report while the game maps memory.
     mutable std::mutex moved_lock_;
     std::array<Moved, moved_limit> moved_ {};
