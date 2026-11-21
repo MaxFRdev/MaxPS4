@@ -65,6 +65,11 @@ using GameWatchAddresses = std::vector<std::pair<std::string, uint64_t>>; // Lab
 // Where moved bases go: this far into the window, and the window's top part
 // from there on is the games' (PS4VirtualMemory::set_placement_end).
 inline constexpr uint64_t game_virtual_offset = uint64_t(16) << 30;
+// The moved base keeps the alignment games assume of a PS4 address: the
+// window is only 16 KiB aligned, and CoD rounds its regions to 64 KiB pages
+// from the base (an unaligned base made its first commit 0 pages long, then
+// "Out of memory 28"). 2 MiB, for large pages too.
+inline constexpr uint64_t game_virtual_alignment = uint64_t(2) << 20;
 
 // Applies the patches that match `image` and returns what was done, one line
 // each ("" when nothing matched). `placement_end` gets the address where
@@ -74,8 +79,8 @@ inline std::string apply_game_patches(GuestELF& image, uint64_t window, uint64_t
     placement_end = 0;
     if (watches) watches->clear();
     std::string report;
-    if (!window || window_size <= game_virtual_offset) return report;
-    const uint64_t target = window + game_virtual_offset;
+    if (!window || window_size <= game_virtual_offset + game_virtual_alignment) return report;
+    const uint64_t target = (window + game_virtual_offset + game_virtual_alignment - 1) & ~(game_virtual_alignment - 1);
     for (const auto& patch : game_virtual_bases) {
         for (const auto& module : image.module_records()) {
             if (module.name != patch.module) continue;
