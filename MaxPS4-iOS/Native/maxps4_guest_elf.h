@@ -103,6 +103,8 @@ public:
         return false;
     }
     bool has_hle() const { return !thunks.empty(); }
+    // The HLE relays, sorted by address (fault reports name the one a RIP is in).
+    const std::vector<OrbisLinker::Thunk>& hle_thunks() const { return thunks; }
     // __tls_get_addr for the single static-TLS thread: host address of byte
     // `offset` of module `module`'s block, or null if the module has no block
     // or the offset is outside it. Never returns memory outside the TLS region.

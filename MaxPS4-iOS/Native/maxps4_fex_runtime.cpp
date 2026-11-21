@@ -1440,6 +1440,7 @@ struct maxps4_fex_engine {
     bool orbis_admitted = false;
     maxps4_fex_cpu_report cpu_report{};
     maxps4_fex_guest_fault last_fault{};
+    std::string fault_note; // Set with last_fault: the HLE relay its RIP is in.
     uint32_t time_limit_ms = 0; // 0: no limit.
     std::atomic<bool> stop_requested{false};
     // The running main thread's guard, for sampling; guarded by sample_lock.
@@ -1843,6 +1844,25 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
                 if (host) std::memcpy(d, host, n);
                 return host != nullptr;
             });
+        // A fault RIP inside an HLE relay (the instruction after its SYSCALL is
+        // its RET): name the function, whose return went wrong.
+        engine->fault_note.clear();
+        if (signal) {
+            const uint64_t rip = engine->last_fault.rip;
+            auto found = std::upper_bound(image.hle_thunks().begin(), image.hle_thunks().end(), rip,
+                [](uint64_t value, const maxps4::OrbisLinker::Thunk& thunk) { return value < thunk.address; });
+            if (found != image.hle_thunks().begin() && rip - (--found)->address < maxps4::OrbisLinker::thunkSize) {
+                std::string name;
+                if (found->token >= maxps4::missing_import_token) {
+                    const uint32_t stub = found->token - maxps4::missing_import_token;
+                    name = stub < engine->missing_imports.size() ? "(absente) " + engine->missing_imports[stub] : "(absente)";
+                } else {
+                    const char* known = service_name(static_cast<maxps4::PS4KernelService>(found->token));
+                    name = known ? known : "service " + std::to_string(found->token);
+                }
+                engine->fault_note = "[MaxPS4] RIP dans le relais HLE de " + name + " (au retour de cette fonction)\n";
+            }
+        }
         if (signal) {
             engine->frame_code_cached = false;
             return signal == SIGURG ? (engine->stop_requested.load() ? -ECANCELED : -ETIMEDOUT) :
@@ -2586,6 +2606,7 @@ extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* te
                "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n") +
               engine->game_patches + out;
     else out = engine->game_patches + out;
+    out += engine->fault_note;
     {
         // This run asked for a relaunch: why (its argv[0]) and in what state.
         std::lock_guard<std::mutex> guard(engine->probe.exec_lock);
