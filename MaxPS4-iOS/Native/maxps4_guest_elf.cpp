@@ -1,4 +1,7 @@
 #include "maxps4_guest_elf.h"
+#include "maxps4_game_patches.h"
+#include <iterator>
+#include <tuple>
 #include "maxps4_guest_range.h"
 #include "maxps4_ps4_guest_memory.h"
 #include "maxps4_ps4_libkernel.h"
@@ -264,9 +267,22 @@ int GuestELF::prepare_orbis_general(const std::vector<OrbisLinker::Input>& input
             ::munmap(spare, size_t(generalHeadroom));
             return true;
         };
+        // A game with a fixed layout to move (maxps4_game_patches.h) asks for
+        // a window it fits in first, then the usual sizes.
+        std::vector<uint64_t> heap_sizes;
+        for (const auto& module : measured.modules) {
+            std::vector<std::tuple<uint64_t, const uint8_t*, uint64_t>> segments;
+            for (const auto& segment : module.image.segments)
+                segments.emplace_back(segment.header.address, segment.bytes.data(), segment.bytes.size());
+            if (game_needs_layout_window(segments)) {
+                heap_sizes = {game_layout_window, game_layout_window - (uint64_t(10) << 30)};
+                break;
+            }
+        }
+        heap_sizes.insert(heap_sizes.end(), std::begin(generalHeapSizes), std::end(generalHeapSizes));
         void* reserved = MAP_FAILED;
         for (const bool headroom : {true, false}) {
-            for (const uint64_t heap : generalHeapSizes) {
+            for (const uint64_t heap : heap_sizes) {
                 layout(heap);
                 for (const unsigned bits : {40U, 47U}) {
                     user_end = uint64_t{1} << bits;
