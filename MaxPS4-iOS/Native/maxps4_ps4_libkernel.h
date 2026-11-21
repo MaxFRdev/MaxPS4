@@ -8,7 +8,9 @@
 #include "maxps4_ps4_audio_out.h"
 #include "maxps4_ps4_gnm.h"
 #include "maxps4_ps4_gnm_queue.h"
+#include <algorithm>
 #include <array>
+#include <cstdio>
 #include <map>
 #include <string>
 #include <vector>
@@ -228,6 +230,19 @@ public:
     // The last console_limit bytes the game wrote to its stdout and stderr.
     std::string console() { std::lock_guard<std::mutex> guard(lock_); return std::string(console_.begin(), console_.end()); }
     static constexpr size_t console_limit = 4096;
+    // How much of the 5056 MiB of direct memory the game holds, for the stop
+    // report: "allouée X Mio en N blocs · libre Y Mio".
+    std::string direct_report() {
+        std::lock_guard<std::mutex> guard(lock_);
+        uint64_t used = 0, largest = 0;
+        for (const auto& [at, bytes] : direct_) { used += bytes; largest = std::max(largest, bytes); }
+        const uint64_t total = uint64_t(5056) << 20;
+        char line[160];
+        std::snprintf(line, sizeof line, "allouée %llu Mio en %zu blocs (le plus grand %llu Mio) · libre %llu Mio",
+                      (unsigned long long)(used >> 20), direct_.size(), (unsigned long long)(largest >> 20),
+                      (unsigned long long)((used < total ? total - used : 0) >> 20));
+        return line;
+    }
     static constexpr int32_t abort_status = 134; // As a process killed by SIGABRT.
 private:
     PS4GuestMemory& memory_;

@@ -124,6 +124,10 @@ public:
     std::mutex exec_lock;
     bool exec_requested = false;
     std::string exec_path, exec_argument;
+    // What the run looked like when it asked for the relaunch (exec_lock): the
+    // direct memory it held and maxps4_game_patches.h's watched globals.
+    std::string exec_state;
+    maxps4::GameWatchAddresses watches;
     // Per guest thread: the HLE call in progress, or the last one and when it
     // returned, so a stalled game shows where each of its threads waits.
     struct Activity {
@@ -283,9 +287,19 @@ public:
                     std::vector<char> text(4096, 0);
                     if (memory->read_cstring(argv0, text.data(), text.size())) argument = text.data();
                 }
+                std::string state = kernel ? "[MaxPS4] à la demande de relance, mémoire directe : " + kernel->direct_report() + "\n" : "";
+                for (const auto& [label, address] : watches) {
+                    uint32_t value = 0;
+                    char line[160];
+                    if (memory->read(address, &value, sizeof(value)))
+                        std::snprintf(line, sizeof line, "[MaxPS4] %s : %u (%llu Mio)\n", label.c_str(), value,
+                                      (unsigned long long)((uint64_t(value) << 16) >> 20));
+                    else std::snprintf(line, sizeof line, "[MaxPS4] %s : illisible\n", label.c_str());
+                    state += line;
+                }
                 {
                     std::lock_guard<std::mutex> guard(exec_lock);
-                    exec_requested = true; exec_path = path; exec_argument = std::move(argument);
+                    exec_requested = true; exec_path = path; exec_argument = std::move(argument); exec_state = std::move(state);
                 }
                 result = 0;
                 bool first = false;
@@ -1704,11 +1718,12 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     // the stack top, as shadPS4 does; the bounded paths keep the SysV auxv.
     const bool ps4_entry = image.general();
     engine->game_patches.clear();
+    engine->probe.watches.clear();
     if (ps4_entry) {
         // Per-game patches of the loaded code, before any of it runs.
         uint64_t window = 0, window_size = 0, placement_end = 0;
         if (image.heap(window, window_size))
-            engine->game_patches = maxps4::apply_game_patches(image, window, window_size, placement_end);
+            engine->game_patches = maxps4::apply_game_patches(image, window, window_size, placement_end, &engine->probe.watches);
         engine->dynamic_ps4.set_placement_end(placement_end);
     }
     if (ps4_entry) {
@@ -2567,6 +2582,13 @@ extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* te
                "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n") +
               engine->game_patches + out;
     else out = engine->game_patches + out;
+    {
+        // This run asked for a relaunch: why (its argv[0]) and in what state.
+        std::lock_guard<std::mutex> guard(engine->probe.exec_lock);
+        if (engine->probe.exec_requested)
+            out += "[MaxPS4] ce lancement demande à être relancé, argv[0] décodé : " +
+                   readable_argument(engine->probe.exec_argument) + "\n" + engine->probe.exec_state;
+    }
     if (out.size() >= capacity) out.erase(0, out.size() - (capacity - 1));
     std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
     return int32_t(out.size());
