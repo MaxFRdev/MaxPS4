@@ -318,7 +318,9 @@ enum MaxPS4Reports {
         let stamp = DateFormatter(); stamp.dateFormat = "yyyyMMdd-HHmmss"; stamp.locale = Locale(identifier: "en_US_POSIX")
         let file = folder.appendingPathComponent("\(MaxPS4Saves.gameID(for: game))-\(stamp.string(from: Date())).txt")
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-        let header = "MaxPS4 build \(version) · \(game.lastPathComponent) · \(Date())\n\n"
+        // The source revision the IPA was built from: each CI build has its own.
+        let revision = (Bundle.main.object(forInfoDictionaryKey: "MaxPS4SourceRevision") as? String).map { " (" + $0.prefix(7) + ")" } ?? ""
+        let header = "MaxPS4 build \(version)\(revision) · \(game.lastPathComponent) · \(Date())\n\n"
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try (header + text).write(to: file, atomically: true, encoding: .utf8)

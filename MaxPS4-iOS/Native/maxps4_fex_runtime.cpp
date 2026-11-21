@@ -2,6 +2,7 @@
 #include "maxps4_fex_runtime.h"
 #include "maxps4_guest_stack.h"
 #include "maxps4_app_modules.h"
+#include "maxps4_game_patches.h"
 #include "maxps4_orbis_v4_execution_gate.h"
 #include <algorithm>
 #include <set>
@@ -118,6 +119,15 @@ public:
     std::atomic<int> callback_error {0};
     std::atomic<bool> exited {false};
     std::atomic<int32_t> exit_status {0};
+    // sceSystemServiceLoadExec: the executable and argv[0] the game asked for
+    // (exec_lock), for the session to boot next.
+    std::mutex exec_lock;
+    bool exec_requested = false;
+    std::string exec_path, exec_argument;
+    // What the run looked like when it asked for the relaunch (exec_lock): the
+    // direct memory it held and maxps4_game_patches.h's watched globals.
+    std::string exec_state;
+    maxps4::GameWatchAddresses watches;
     // Per guest thread: the HLE call in progress, or the last one and when it
     // returned, so a stalled game shows where each of its threads waits.
     struct Activity {
@@ -266,6 +276,27 @@ public:
                     address = guest_tls ? reinterpret_cast<const uint8_t*>(guest_tls) : image->thread_pointer_host();
                 }
                 result = static_cast<int64_t>(reinterpret_cast<uintptr_t>(address));
+            } else if (orbis == maxps4::PS4KernelService::load_exec) {
+                // sceSystemServiceLoadExec(path, argv): remember both, then end
+                // the run as exit(0) does (the trampoline's HLT follows).
+                char path[256] = {};
+                std::string argument;
+                (void)memory->read_cstring(call.rdi, path, sizeof(path));
+                uint64_t argv0 = 0;
+                if (call.rsi && memory->read(call.rsi, &argv0, sizeof(argv0)) && argv0) {
+                    std::vector<char> text(4096, 0);
+                    if (memory->read_cstring(argv0, text.data(), text.size())) argument = text.data();
+                }
+                std::string state = kernel ? "[MaxPS4] à la demande de relance, mémoire directe : " + kernel->direct_report() + "\n" : "";
+                state += maxps4::read_game_watches(watches, [&](uint64_t at, void* out, size_t n) { return memory->read(at, out, n); });
+                {
+                    std::lock_guard<std::mutex> guard(exec_lock);
+                    exec_requested = true; exec_path = path; exec_argument = std::move(argument); exec_state = std::move(state);
+                }
+                result = 0;
+                bool first = false;
+                if (exited.compare_exchange_strong(first, true)) exit_status = 0;
+                if (threads) guest_thread_service(*threads,maxps4::PS4KernelService::process_exit,call);
             } else if (orbis == maxps4::PS4KernelService::process_exit || orbis == maxps4::PS4KernelService::abort_process) {
                 // The entry's exit function: the status (EDI) becomes RAX, and the
                 // HLT that follows this SYSCALL ends the calling thread. The first
@@ -293,7 +324,8 @@ public:
             if (timed_from) timing->record(static_cast<uint32_t>(orbis), now_ns() - timed_from);
             if (!frequent(orbis)) {
                 RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}, posix};
-                if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat)
+                if (orbis == maxps4::PS4KernelService::open || orbis == maxps4::PS4KernelService::stat ||
+                    orbis == maxps4::PS4KernelService::load_exec)
                     (void)memory->read_cstring(call.rdi, entry.path, sizeof(entry.path));
                 std::lock_guard<std::mutex> guard(recent_lock);
                 recent[recent_next++ % recent.size()] = entry;
@@ -318,6 +350,7 @@ public:
             // is RET: the return address becomes the thread's return trampoline,
             // whose own exit call ends it.
             if (threads && orbis != maxps4::PS4KernelService::thread_exit && orbis != maxps4::PS4KernelService::process_exit &&
+                orbis != maxps4::PS4KernelService::load_exec &&
                 orbis != maxps4::PS4KernelService::abort_process && guest_thread_ending(*threads)) {
                 uint8_t back[8];
                 const uint64_t exit_at = image->thread_return();
@@ -557,6 +590,15 @@ public:
     std::atomic<int> signal {0};
     int32_t code = 0;
     uint64_t address = 0;
+    // The host side of a guest fault: PC, LR, whether in JIT code, and then
+    // the guest RIP that host PC belongs to (0 when not in JIT code).
+    uint64_t fault_pc = 0, fault_lr = 0, fault_rip = 0;
+    bool fault_in_jit = false;
+    void describe(maxps4_fex_guest_fault& out) const {
+        if (!fault_pc) return;
+        out.host_pc = fault_pc; out.host_lr = fault_lr; out.exact_rip = fault_rip;
+        out.host_where = fault_in_jit ? 1 : 2;
+    }
     // maxps4_fex_engine_sample_main_thread: the next SIGURG seen while
     // `sample_request` is set records where the guarded thread is, then
     // lets it run on. `where`: 1 JIT code, 2 FEX dispatcher, 3 other host code.
@@ -925,6 +967,12 @@ private:
             if (stop) {
                 guard->code = number == SIGURG ? 0 : info->si_code;
                 guard->address = number == SIGURG ? 0 : reinterpret_cast<uintptr_t>(info->si_addr);
+                // Where the host was: in JIT code, the exact guest RIP comes
+                // from the host PC (State.rip is only the last block stored).
+                if (number != SIGURG) {
+                    guard->fault_pc = pc; guard->fault_lr = lr; guard->fault_in_jit = in_jit;
+                    guard->fault_rip = in_jit ? guard->context->RestoreRIPFromHostPC(guard->thread, pc) : 0;
+                }
                 guard->signal.store(number);
                 sp = guard->thread->CurrentFrame->ReturningStackLocation;
                 pc = stop;
@@ -992,6 +1040,29 @@ private:
     std::condition_variable watch;
     bool finished = false;
 };
+// A guest fault with the registers FEX last stored and the words at RSP.
+// `read(address, destination, length)` reads guest memory.
+template <class State, class Read>
+static maxps4_fex_guest_fault guest_fault(int signal, int code, uint64_t address, const State& state, const Read& read) {
+    namespace x86 = FEXCore::X86State;
+    maxps4_fex_guest_fault fault {};
+    fault.signal = signal; fault.code = code; fault.address = address; fault.rip = state.rip;
+    fault.rsp = state.gregs[x86::REG_RSP]; fault.rbp = state.gregs[x86::REG_RBP];
+    fault.rax = state.gregs[x86::REG_RAX]; fault.rdi = state.gregs[x86::REG_RDI]; fault.rsi = state.gregs[x86::REG_RSI];
+    fault.rbx = state.gregs[x86::REG_RBX]; fault.rcx = state.gregs[x86::REG_RCX]; fault.rdx = state.gregs[x86::REG_RDX];
+    fault.r8 = state.gregs[x86::REG_R8]; fault.r9 = state.gregs[x86::REG_R9]; fault.r10 = state.gregs[x86::REG_R10];
+    fault.r11 = state.gregs[x86::REG_R11]; fault.r12 = state.gregs[x86::REG_R12]; fault.r13 = state.gregs[x86::REG_R13];
+    fault.r14 = state.gregs[x86::REG_R14]; fault.r15 = state.gregs[x86::REG_R15];
+    if (fault.rbx && read(fault.rbx, fault.at_rbx, sizeof(fault.at_rbx))) fault.at_words |= 1;
+    if (fault.rax && read(fault.rax, fault.at_rax, sizeof(fault.at_rax))) fault.at_words |= 2;
+    if (fault.r12 && read(fault.r12, fault.at_r12, sizeof(fault.at_r12))) fault.at_words |= 4;
+    for (uint32_t i = 0; i < 16; ++i) {
+        uint64_t word = 0;
+        if (!read(fault.rsp + 8 * i, &word, sizeof(word))) break;
+        fault.stack[i] = word; fault.stack_words = i + 1;
+    }
+    return fault;
+}
 // Initial FEX state of one guest thread (main or child): zero integer
 // registers, RIP/RSP, FS base, a guarded CALL/RET stack and a GDT holding one
 // 64-bit user code segment. Owns that host memory until the thread is gone.
@@ -1054,6 +1125,13 @@ public:
     // Locks and waits of a stopping run return EINTR (PS4Threads::interrupt);
     // later runs block normally again.
     ~GuestThreads() { finish(); identities.resume(); }
+    // Guest memory for a fault report: mapped memory, else the image (stacks).
+    bool guest_read(uint64_t address, void* destination, size_t length) const {
+        if (memory.read(address, destination, length)) return true;
+        const auto* host = image.translate(address, length, 4);
+        if (host) std::memcpy(destination, host, length);
+        return host != nullptr;
+    }
     GuestThreads(const GuestThreads&) = delete;
     GuestThreads& operator=(const GuestThreads&) = delete;
     // scePthreadCreate(PthreadT* out, attr, entry, arg, name): *out = the new
@@ -1260,8 +1338,12 @@ private:
                     context->ExecuteThread(fex);
                     const int signal = guard.signal.load();
                     // SIGURG only comes from finish(): a stop, not a fault.
-                    if (signal && signal != SIGURG)
-                        fault = {signal, guard.code, guard.address, fex->CurrentFrame->State.rip};
+                    if (signal && signal != SIGURG) {
+                        fault = guest_fault(signal, guard.code, guard.address, fex->CurrentFrame->State,
+                            [this](uint64_t a, void* d, size_t n) { return guest_read(a, d, n); });
+                        guard.describe(fault);
+                        fault.thread_entry = thread.entry; fault.thread_rsp = thread.rsp;
+                    }
                 }
                 context->DestroyThread(fex);
             }
@@ -1371,6 +1453,7 @@ struct maxps4_fex_engine {
     bool orbis_admitted = false;
     maxps4_fex_cpu_report cpu_report{};
     maxps4_fex_guest_fault last_fault{};
+    std::string fault_note; // Set with last_fault: the HLE relay its RIP is in.
     uint32_t time_limit_ms = 0; // 0: no limit.
     std::atomic<bool> stop_requested{false};
     // The running main thread's guard, for sampling; guarded by sample_lock.
@@ -1381,6 +1464,12 @@ struct maxps4_fex_engine {
     std::atomic<bool> profiling{false};
     uint64_t relocation = 0; // Of the loaded game, for relative profile RIPs.
     std::string update_directory; // For load_game (set_update); empty: none.
+    std::string launcher_target;  // The /app0 game a launcher eboot.bin LoadExecs, booted instead (empty: none).
+    std::string game_patches;     // What maxps4_game_patches.h changed in this run, one line each.
+    // Set before load_game when a run's sceSystemServiceLoadExec asked for
+    // another executable: its /app0 path and the argv[0] it passed.
+    bool exec_set = false;
+    std::string exec_path, exec_argument;
     maxps4::GuestFrame frame;
     uint64_t frame_sequence = 0;
     bool frame_code_cached = false;
@@ -1646,7 +1735,20 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     // Its startup stub then lays out the PS4 entry stack from EntryParams at
     // the stack top, as shadPS4 does; the bounded paths keep the SysV auxv.
     const bool ps4_entry = image.general();
+    engine->game_patches.clear();
+    engine->probe.watches.clear();
     if (ps4_entry) {
+        // Per-game patches of the loaded code, before any of it runs.
+        uint64_t window = 0, window_size = 0, placement_end = 0;
+        if (image.heap(window, window_size))
+            engine->game_patches = maxps4::apply_game_patches(image, window, window_size, placement_end, &engine->probe.watches);
+        engine->dynamic_ps4.set_placement_end(placement_end);
+    }
+    if (ps4_entry) {
+        // A game booted in place of its launcher (load_game): an empty argv[0].
+        // After sceSystemServiceLoadExec: the argv[0] the game passed.
+        image.entry_program = engine->exec_set ? engine->exec_argument :
+            engine->launcher_target.empty() ? "eboot.bin" : "";
         initial_rsp = image.write_entry_params();
         if (!initial_rsp) return -EFAULT;
     } else {
@@ -1658,6 +1760,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     }
     engine->probe.exited = false;
     engine->probe.exit_status = 0;
+    { std::lock_guard<std::mutex> guard(engine->probe.exec_lock); engine->probe.exec_requested = false; }
     auto* thread = engine->context->CreateThread(initial_rip, initial_rsp);
     if (!thread) return -ENOMEM;
     struct DestroyThread {
@@ -1747,7 +1850,49 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
         if (signal == SIGURG && engine->probe.exited) signal = 0;
         // RIP is the guest position FEX last stored (block granularity).
         if (threads && threads->faulted(child)) { engine->last_fault = child; signal = child.signal; }
-        else if (signal) engine->last_fault = {signal, guard.code, guard.address, state.rip};
+        else if (signal) engine->last_fault = guest_fault(signal, guard.code, guard.address, state,
+            [&](uint64_t a, void* d, size_t n) {
+                if (engine->system_memory.read(a, d, n)) return true;
+                const auto* host = image.translate(a, n, 4); // The image, its stack included.
+                if (host) std::memcpy(d, host, n);
+                return host != nullptr;
+            });
+        // A fault RIP inside an HLE relay (the instruction after its SYSCALL is
+        // its RET): name the function, whose return went wrong.
+        engine->fault_note.clear();
+        if (signal && !(threads && child.signal)) guard.describe(engine->last_fault);
+        if (signal && engine->last_fault.host_pc) {
+            char line[260];
+            const auto& f = engine->last_fault;
+            std::snprintf(line, sizeof line, "[MaxPS4] faute côté hôte : PC 0x%llx (%s) · LR 0x%llx · RIP invité exact 0x%llx\n",
+                          (unsigned long long)f.host_pc, f.host_where == 1 ? "code JIT" : "dispatcher FEX",
+                          (unsigned long long)f.host_lr, (unsigned long long)f.exact_rip);
+            engine->fault_note += line;
+        }
+        if (signal && engine->last_fault.thread_entry) {
+            char line[200];
+            std::snprintf(line, sizeof line, "[MaxPS4] faute dans un thread secondaire : entrée 0x%llx · pile initiale 0x%llx\n",
+                          (unsigned long long)engine->last_fault.thread_entry, (unsigned long long)engine->last_fault.thread_rsp);
+            engine->fault_note += line;
+        }
+        if (signal) {
+            const uint64_t rip = engine->last_fault.rip;
+            auto found = std::upper_bound(image.hle_thunks().begin(), image.hle_thunks().end(), rip,
+                [](uint64_t value, const maxps4::OrbisLinker::Thunk& thunk) { return value < thunk.address; });
+            if (found != image.hle_thunks().begin() && rip - (--found)->address < maxps4::OrbisLinker::thunkSize) {
+                std::string name;
+                if (found->token >= maxps4::missing_import_token) {
+                    const uint32_t stub = found->token - maxps4::missing_import_token;
+                    name = stub < engine->missing_imports.size() ? "(absente) " + engine->missing_imports[stub] : "(absente)";
+                } else {
+                    const char* known = service_name(static_cast<maxps4::PS4KernelService>(found->token));
+                    name = known ? known : "service " + std::to_string(found->token);
+                }
+                engine->fault_note += "[MaxPS4] RIP dans le relais HLE de " + name + " (au retour de cette fonction)\n";
+            }
+            engine->fault_note += maxps4::read_game_watches(engine->probe.watches,
+                [&](uint64_t at, void* out, size_t n) { return engine->probe.memory && engine->probe.memory->read(at, out, n); });
+        }
         if (signal) {
             engine->frame_code_cached = false;
             return signal == SIGURG ? (engine->stop_requested.load() ? -ECANCELED : -ETIMEDOUT) :
@@ -2248,16 +2393,44 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
                     std::vector<std::string> dependencies; std::vector<const char*> pointers;
                     bool optional = false; };
     try {
+        engine->launcher_target.clear();
         const std::filesystem::path root(directory), update(engine->update_directory);
         std::error_code error;
         // PRX files of /app0/sce_module and of the root of /app0 (loaded by the
         // game through sceKernelLoadStartModule, e.g. MK Legacy Kollection's
         // /app0/pancake_libretro_ps4.prx); the update's replace the game's of
         // the same name and add its own (maxps4_app_modules.h).
-        struct File { std::filesystem::path path; bool optional; };
+        struct File { std::filesystem::path path; bool optional; std::string as; };
         std::vector<File> files;
-        for (const auto& found : maxps4::discover_app_modules(root, update)) files.push_back({found.path, found.root_level});
-        files.push_back({!update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin", false});
+        for (const auto& found : maxps4::discover_app_modules(root, update)) files.push_back({found.path, found.root_level, {}});
+        std::filesystem::path eboot = !update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin";
+        // The executable a previous run's sceSystemServiceLoadExec named.
+        if (engine->exec_set) {
+            std::string name = engine->exec_path;
+            if (name.rfind("/app0/", 0) == 0) name.erase(0, 6);
+            const std::filesystem::path relative(name);
+            if (name.empty() || name.find("..") != std::string::npos || relative.is_absolute()) {
+                if (diagnostic && capacity) std::snprintf(diagnostic, capacity, "sceSystemServiceLoadExec : chemin refusé %s", engine->exec_path.c_str());
+                return -ENOENT;
+            }
+            const auto found = !update.empty() && std::filesystem::is_regular_file(update / relative, error) ? update / relative : root / relative;
+            if (!std::filesystem::is_regular_file(found, error)) {
+                if (diagnostic && capacity) std::snprintf(diagnostic, capacity, "sceSystemServiceLoadExec : %s introuvable", engine->exec_path.c_str());
+                return -ENOENT;
+            }
+            eboot = found;
+        }
+        // A launcher eboot that only LoadExecs the real game: boot that game
+        // (maxps4_app_modules.h). It keeps the eboot.bin module name.
+        if (engine->exec_set) {
+            engine->launcher_target = eboot.filename().string();
+        } else if (const auto target = maxps4::launcher_target(eboot, root, update); !target.empty()) {
+            std::fprintf(stderr, "maxps4: eboot.bin is a launcher (sceSystemServiceLoadExec); booting /app0/%s\n",
+                         target.filename().string().c_str());
+            engine->launcher_target = target.filename().string();
+            eboot = target;
+        }
+        files.push_back({eboot, false, "eboot.bin"});
         // A root-level file is optional: one that is unreadable, not an ELF/SELF
         // the metadata parser accepts, or not a PRX (0xfe18) is skipped, and the
         // game boots as before. sce_module modules and the eboot stay required.
@@ -2266,7 +2439,7 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
         std::string skipped;
         for (const auto& file : files) {
             Module m;
-            m.name = file.path.filename().string();
+            m.name = file.as.empty() ? file.path.filename().string() : file.as;
             m.optional = file.optional;
             std::ifstream in(file.path, std::ios::binary);
             if (!in) {
@@ -2393,12 +2566,84 @@ extern "C" int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine* engine, ui
     if (!engine->staged_ps4.heap(*window, *window_size)) *window = *window_size = 0;
     return 0;
 }
+extern "C" int32_t maxps4_fex_engine_exec_request(maxps4_fex_engine* engine, char* path, size_t path_capacity,
+                                                  char* argument, size_t argument_capacity) {
+    if (!engine || !path || !path_capacity || !argument || !argument_capacity) return -EINVAL;
+    std::lock_guard<std::mutex> guard(engine->probe.exec_lock);
+    if (!engine->probe.exec_requested) return 0;
+    if (engine->probe.exec_path.size() >= path_capacity || engine->probe.exec_argument.size() >= argument_capacity) return -ENAMETOOLONG;
+    std::memcpy(path, engine->probe.exec_path.c_str(), engine->probe.exec_path.size() + 1);
+    std::memcpy(argument, engine->probe.exec_argument.c_str(), engine->probe.exec_argument.size() + 1);
+    return 1;
+}
+extern "C" int32_t maxps4_fex_engine_set_exec(maxps4_fex_engine* engine, const char* path, const char* argument) {
+    if (!engine) return -EINVAL;
+    engine->exec_set = path && *path;
+    engine->exec_path = engine->exec_set ? path : "";
+    engine->exec_argument = engine->exec_set && argument ? argument : "";
+    return 0;
+}
+extern "C" int32_t maxps4_fex_engine_host_map(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    uint64_t window = 0, window_size = 0;
+    if (!engine->staged_ps4.heap(window, window_size)) window = 0;
+    // From the PS4 application area to the window: where fixed PS4 mappings go.
+    const std::string out = maxps4::PS4VirtualMemory::host_map(maxps4::PS4VirtualMemory::app_area_base,
+                                                               window ? window : maxps4::PS4VirtualMemory::app_area_base << 3);
+    const size_t n = std::min(out.size(), capacity - 1);
+    std::memcpy(text, out.data(), n); text[n] = 0;
+    return int32_t(n);
+}
 extern "C" uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine* engine) {
     return engine ? engine->staged_ps4.spare_address_space() : 0;
+}
+// argv[0] as the report shows it: its base64 payload ('~' for '=', as CoD's
+// launcher writes it) decoded, printable bytes as they are and others as
+// \xNN; the raw text when it is not base64.
+static std::string readable_argument(const std::string& argument) {
+    auto value = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::string bytes;
+    uint32_t bits = 0; int count = 0;
+    for (char c : argument) {
+        if (c == '~' || c == '=') break;
+        const int v = value(c);
+        if (v < 0) return argument;
+        bits = (bits << 6) | uint32_t(v); count += 6;
+        if (count >= 8) { count -= 8; bytes += char((bits >> count) & 0xff); }
+    }
+    std::string out;
+    for (unsigned char c : bytes) {
+        if (c >= 0x20 && c < 0x7f) out += char(c);
+        else { char hex[5]; std::snprintf(hex, sizeof hex, "\\x%02x", c); out += hex; }
+    }
+    return out;
 }
 extern "C" int32_t maxps4_fex_engine_console(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     std::string out = engine->libkernel.console();
+    // A launcher eboot.bin booted its game instead (load_game): said first.
+    if (!engine->launcher_target.empty())
+        out = (engine->exec_set ? "[MaxPS4] relancé par sceSystemServiceLoadExec : /app0/" + engine->launcher_target +
+                                  " (argv[0] de " + std::to_string(engine->exec_argument.size()) + " caractères)\n" +
+                                  "[MaxPS4] argv[0] décodé : " + readable_argument(engine->exec_argument) + "\n" :
+               "[MaxPS4] eboot.bin est un lanceur (sceSystemServiceLoadExec) : démarrage de /app0/" + engine->launcher_target + "\n") +
+              engine->game_patches + out;
+    else out = engine->game_patches + out;
+    out += engine->fault_note;
+    {
+        // This run asked for a relaunch: why (its argv[0]) and in what state.
+        std::lock_guard<std::mutex> guard(engine->probe.exec_lock);
+        if (engine->probe.exec_requested)
+            out += "[MaxPS4] ce lancement demande à être relancé, argv[0] décodé : " +
+                   readable_argument(engine->probe.exec_argument) + "\n" + engine->probe.exec_state;
+    }
     if (out.size() >= capacity) out.erase(0, out.size() - (capacity - 1));
     std::memcpy(text, out.data(), out.size()); text[out.size()] = 0;
     return int32_t(out.size());

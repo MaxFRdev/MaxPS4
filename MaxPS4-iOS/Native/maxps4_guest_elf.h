@@ -103,6 +103,8 @@ public:
         return false;
     }
     bool has_hle() const { return !thunks.empty(); }
+    // The HLE relays, sorted by address (fault reports name the one a RIP is in).
+    const std::vector<OrbisLinker::Thunk>& hle_thunks() const { return thunks; }
     // __tls_get_addr for the single static-TLS thread: host address of byte
     // `offset` of module `module`'s block, or null if the module has no block
     // or the offset is outside it. Never returns memory outside the TLS region.
@@ -143,7 +145,16 @@ public:
     // ends the run (service process_exit). Rewrites them and returns their
     // address, which is also the initial RSP; 0 for other images.
     static constexpr uint64_t entryParamsBytes = 64;
+    // The params sit this far below the stack top, the rest zero: startup code
+    // reads past them (CoD: Modern Warfare Remastered's libc faulted at the
+    // stack top, just above 64 bytes of params).
+    static constexpr uint64_t entryAreaBytes = 4096;
     uint64_t write_entry_params();
+    // argv[0] that write_entry_params writes (at most entryAreaBytes - 33 bytes; "eboot.bin"
+    // by default). A game booted in place of its launcher gets "": CoD:
+    // Modern Warfare Remastered base64-decodes argv[0] from the launcher and
+    // takes its default start-up for an empty one.
+    std::string entry_program = "eboot.bin";
     // General images: the sceKernelMmap window (guest = host addresses);
     // false otherwise. Not part of segments(): translate() ignores it.
     uint64_t spare_address_space() const { return spare_bytes; }
@@ -173,6 +184,11 @@ public:
         std::vector<Segment> segments;
     };
     const std::vector<ModuleRecord>& module_records() const { return records; }
+    // Rewrites `length` bytes of loaded guest memory at `address`, before any
+    // of it ran, when they read `expected` (a per-game patch,
+    // maxps4_game_patches.h): host pages that are read-only are opened for
+    // the write and closed again. False, unchanged, otherwise.
+    bool patch(uint64_t address, const uint8_t* expected, const uint8_t* replacement, size_t length);
     const std::vector<Segment>& segments() const { return regions; }
 private:
     friend class PS4DynamicLinker;

@@ -140,8 +140,29 @@ int main() {
         CHECK(d[0].choice == ModuleChoice::keep && d[1].choice == ModuleChoice::keep && d[2].choice == ModuleChoice::keep);
     }
 
+    {
+        // Launcher eboot.bin (CoD: Modern Warfare Remastered): imports
+        // sceSystemServiceLoadExec (NID JoBqSQt1yyA) and names /app0 games.
+        const fs::path game = base / "launcher", update = base / "launcher-update";
+        const std::string launcher = std::string("\x7f" "ELF") + std::string(4, '\0') + "/app0/../x.elf" + '\0' +
+            "/app0/default.elf" + '\0' + "/app0/default_mp.elf" + '\0' + "JoBqSQt1yyA#G#H";
+        touch(game / "eboot.bin", launcher);
+        CHECK(maxps4::launcher_target(game / "eboot.bin", game, {}).empty()); // named games absent
+        touch(game / "default_mp.elf");
+        CHECK(maxps4::launcher_target(game / "eboot.bin", game, {}) == game / "default_mp.elf");
+        touch(game / "default.elf");
+        CHECK(maxps4::launcher_target(game / "eboot.bin", game, {}) == game / "default.elf"); // first named wins
+        touch(update / "default.elf");
+        CHECK(maxps4::launcher_target(game / "eboot.bin", game, update) == update / "default.elf"); // update first
+        // Without the LoadExec import, or a regular game: not a launcher.
+        touch(game / "eboot.bin", "/app0/default.elf");
+        CHECK(maxps4::launcher_target(game / "eboot.bin", game, {}).empty());
+        touch(game / "eboot.bin", launcher + std::string(1 << 20, 'x'));
+        CHECK(maxps4::launcher_target(game / "eboot.bin", game, {}).empty());
+    }
+
     std::error_code ignored;
     fs::remove_all(base, ignored);
-    std::puts("PASS app modules: sce_module only, root-level PRX, several, update precedence, missing folders, invalid file, module variants");
+    std::puts("PASS app modules: sce_module only, root-level PRX, several, update precedence, missing folders, invalid file, module variants, launcher eboot");
     return 0;
 }

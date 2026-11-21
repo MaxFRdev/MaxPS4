@@ -250,5 +250,17 @@ int main() {
     assert(resolve_libkernel("kBJzF8x4SyE", "libkernel", "libkernel", 1) == S::batch_map2);
     assert(resolve_libkernel("nvEwfYAImTs", "libSceGnmDriver", "libSceGnmDriver", 1) == S::gnm_unsupported);
     assert(resolve_libkernel("jtkqXpAOY6w", "libSceGnmDriver", "libSceGnmDriver", 1) == S::gnm_gs_rings);
+    // Releasing part of a block keeps the rest allocated (CoD gives back 4 MiB
+    // of a 2 GiB block), and a map may span adjacent allocations.
+    assert(invoke(S::direct_allocate, {0x100000, 0x200000, 0x40000, 0, 0, phys}) == 0); // [0x100000, 0x140000)
+    assert(invoke(S::direct_allocate, {0x100000, 0x200000, 0x40000, 0, 0, phys}) == 0); // [0x140000, 0x180000)
+    assert(invoke(S::direct_release, {0x110000, 0x10000}) == 0);
+    assert(invoke(S::direct_map, {where, 0x10000, 3, 0, 0x110000, 0}) == kernel_error(inval)); // Released.
+    assert(invoke(S::direct_map, {where, 0x10000, 3, 0, 0x100000, 0}) == 0);                   // Head kept.
+    assert(invoke(S::direct_map, {where, 0x60000, 3, 0, 0x120000, 0}) == 0);                   // Tail + next block.
+    assert(invoke(S::direct_map, {where, 0x70000, 3, 0, 0x120000, 0}) == kernel_error(inval)); // Past both.
+    assert(invoke(S::direct_release, {0x110000, 0x10000}) == kernel_error(noent));
+    assert(invoke(S::direct_release, {0x100000, 0x80000}) == 0);
+    assert(invoke(S::direct_map, {where, 0x10000, 3, 0, 0x100000, 0}) == kernel_error(inval));
     std::puts("PS4 virtual memory and clock checks passed");
 }

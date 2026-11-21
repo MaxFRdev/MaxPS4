@@ -445,6 +445,7 @@ constexpr Binding bindings[] = {
      false, false, 0, nullptr, 0, "libSceLibcInternal"},
     {"sceSystemServiceParamGetInt", "fZo48un7LK4", PS4KernelService::system_param_int, "libSceSystemService"},
     {"sceSystemServiceGetStatus", "rPo6tV8D9bM", PS4KernelService::system_status, "libSceSystemService"},
+    {"sceSystemServiceLoadExec", "JoBqSQt1yyA", PS4KernelService::load_exec, "libSceSystemService", false, true},
     {"sceSystemServiceReceiveEvent", "656LMQSrg6U", PS4KernelService::system_event, "libSceSystemService"},
     {"sceSystemServiceHideSplashScreen", "Vo5V8KAwCmk", PS4KernelService::succeed, "libSceSystemService"},
     // Save data (shadPS4 libraries/save_data): one directory at a time.
@@ -2289,7 +2290,33 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (!c.rsp || c.rsp > UINT64_MAX - 8 || !memory_.read(c.rsp + 8, pitch, 8)) return PS4VideoOut::error(2);
         return videoout_.set_attribute(c.rdi, uint32_t(c.rsi), uint32_t(c.rdx), uint32_t(c.rcx), uint32_t(c.r8), uint32_t(c.r9), uint32_t(get_le(pitch, 8)));
     }
-    case S::video_register: return videoout_.register_buffers(c.rdi, signed32(c.rsi), c.rdx, signed32(c.rcx), c.r8);
+    case S::video_register: {
+        const int64_t result = videoout_.register_buffers(c.rdi, signed32(c.rsi), c.rdx, signed32(c.rcx), c.r8);
+        // A refused buffer address (0x80290013): which one and how much of it
+        // is mapped readable, in the stop report (games quit on this error).
+        if (result == int32_t(0x80290013)) {
+            auto hex = [](uint64_t value) { char text[20]; std::snprintf(text, sizeof text, "%llx", (unsigned long long)value); return std::string(text); };
+            uint8_t attribute[24] = {};
+            (void)memory_.read(c.r8, attribute, sizeof(attribute));
+            const uint64_t pitch = get_le(attribute + 20, 4), height = get_le(attribute + 16, 4), bytes = pitch * height * 4;
+            std::string line = "[MaxPS4] sceVideoOutRegisterBuffers refusé : format 0x" + hex(get_le(attribute, 4)) +
+                " tiling " + std::to_string(get_le(attribute + 4, 4)) + " " + std::to_string(get_le(attribute + 12, 4)) + "x" +
+                std::to_string(height) + " pitch " + std::to_string(pitch) + " (" + std::to_string(bytes >> 10) + " Kio)";
+            for (int32_t i = 0; i < signed32(c.rcx) && i < 16; ++i) {
+                uint8_t wire[8] = {};
+                const uint64_t address = memory_.read(c.rdx + uint64_t(i) * 8, wire, 8) ? get_le(wire, 8) : 0;
+                const size_t readable = address ? std::max(memory_.contiguous(address, size_t(bytes), 4),
+                                                           dynamic_ ? dynamic_->contiguous(address, size_t(bytes), 4) : 0) : 0;
+                line += " · image " + std::to_string(i) + " 0x" + hex(address) + " lisible " + std::to_string(readable >> 10) + " Kio";
+            }
+            line += "\n";
+            std::lock_guard<std::mutex> guard(lock_);
+            for (const auto& entry : batch_log_) line += "[MaxPS4]   BatchMap " + entry + "\n";
+            console_.insert(console_.end(), line.begin(), line.end());
+            if (console_.size() > console_limit) console_.erase(console_.begin(), console_.end() - std::ptrdiff_t(console_limit));
+        }
+        return result;
+    }
     case S::video_unregister: return videoout_.unregister_buffers(c.rdi, signed32(c.rsi));
     case S::video_submit: videoout_.pace(); return videoout_.submit(c.rdi, signed32(c.rsi), signed32(c.rdx), c.rcx);
     case S::video_pending: return videoout_.pending(c.rdi);
@@ -2620,6 +2647,16 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
             case 3: result = memory_service(S::flexible_map_unnamed, {entry, length, protection, flags}); break;
             default: result = kernel_error(inval); break;
             }
+            {
+                // The last entries, for the stop report.
+                char line[160];
+                std::snprintf(line, sizeof line, "op %d 0x%llx +0x%llx phys 0x%llx prot 0x%llx type %u -> %lld",
+                              signed32(uint32_t(get_le(e + 28, 4))), (unsigned long long)start, (unsigned long long)length,
+                              (unsigned long long)offset, (unsigned long long)protection, unsigned(e[25]), (long long)result);
+                std::lock_guard<std::mutex> guard(lock_);
+                batch_log_.push_back(line);
+                if (batch_log_.size() > 12) batch_log_.erase(batch_log_.begin());
+            }
             if (result) break;
         }
         if (c.rdx && !write(c.rdx, uint32_t(done), 4)) return kernel_error(fault);
@@ -2854,9 +2891,19 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
     // sceKernelReleaseDirectMemory(start, length): whole allocations in the range.
     case S::direct_release: {
         if (!aligned(c.rdi) || !c.rsi || !aligned(c.rsi)) return kernel_error(inval);
+        // Only [low, high) is released: the parts of a block outside it stay
+        // allocated (CoD gives back 4 MiB of a 2 GiB block and maps the rest).
+        if (c.rsi > UINT64_MAX - c.rdi) return kernel_error(inval);
+        const uint64_t low = c.rdi, high = c.rdi + c.rsi;
         bool released = false;
-        for (auto it = direct_.lower_bound(c.rdi); it != direct_.end() && it->first < c.rdi + c.rsi;) {
+        auto it = direct_.upper_bound(low);
+        if (it != direct_.begin()) --it;
+        while (it != direct_.end() && it->first < high) {
+            const uint64_t start = it->first, end = start + it->second;
+            if (end <= low) { ++it; continue; }
             it = direct_.erase(it);
+            if (start < low) direct_[start] = low - start;
+            if (end > high) it = direct_.emplace(high, end - high).first;
             released = true;
         }
         return released ? 0 : kernel_error(noent);
@@ -2868,12 +2915,19 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
         uint32_t protection = 0;
         if (!read_pointer(c.rdi, hint)) return kernel_error(fault);
         if (!c.rsi || !aligned(c.rsi) || !aligned(c.r8) || !cpu(c.rdx, protection)) return kernel_error(inval);
+        // Every byte of [physical, physical + length) is allocated, possibly
+        // by several adjacent allocations (CoD maps runs of its pool's pages).
+        if (c.rsi > UINT64_MAX - c.r8) return kernel_error(inval);
         auto owner = direct_.upper_bound(c.r8);
         if (owner == direct_.begin()) return kernel_error(inval);
         --owner;
         const uint64_t offset = c.r8 - owner->first;
-        if (offset >= owner->second || c.rsi > owner->second - offset)
-            return kernel_error(inval);
+        if (offset >= owner->second) return kernel_error(inval);
+        auto next = owner;
+        for (uint64_t covered = owner->first + owner->second; covered < c.r8 + c.rsi;) {
+            if (++next == direct_.end() || next->first != covered) return kernel_error(inval);
+            covered += next->second;
+        }
         uint64_t mapped = 0;
         const Error e = dynamic_->place(hint, c.rsi, std::max<uint64_t>(c.r9, page), protection, (c.rcx & 0x10) != 0, mapped);
         if (e) {

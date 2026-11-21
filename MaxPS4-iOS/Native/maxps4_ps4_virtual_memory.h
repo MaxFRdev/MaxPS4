@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include "maxps4_guest_elf.h"
 #include "maxps4_ps4_abi.h"
 #include <array>
@@ -36,6 +37,10 @@ public:
     // host's answer (0: granted; a Mach kern_return_t on iOS, errno elsewhere).
     static constexpr uint64_t app_area_base = 0x1000000000ULL, app_area_size = uint64_t(16) << 30;
     static void app_area(uint64_t& base, uint64_t& size, int& status);
+    // The host's view of [from, to), for a report: its address-space bounds
+    // and the first mappings there (start, size, protection, user tag).
+    // Empty where the host cannot say.
+    static std::string host_map(uint64_t from, uint64_t to);
     // Unreal Engine games make thousands of small mappings.
     static constexpr size_t region_limit = 65536;
     static constexpr uint64_t base = 0x1000000000ULL;
@@ -52,6 +57,10 @@ public:
     const uint8_t* translate(uint64_t address, size_t length, uint32_t permissions) const override;
     size_t contiguous(uint64_t address, size_t limit, uint32_t permissions) const override;
     void reset();
+    // Placements MaxPS4 chooses (not fixed ones) end below `end`, inside the
+    // window: the rest is a game's own fixed area (maxps4_game_patches.h).
+    // 0: the whole window. reset() keeps it.
+    void set_placement_end(uint64_t end) { placement_end_ = end; }
     size_t allocated() const { return used_; }
     // Placements that did not go as asked, newest last: a fixed PS4 address
     // outside the window the host refused, placed at `result` instead (a game
@@ -84,6 +93,7 @@ private:
     const GuestELF& image_;
     std::vector<Region> regions_;
     size_t used_ = 0;
+    uint64_t placement_end_ = 0;
     // Read by the session report while the game maps memory.
     mutable std::mutex moved_lock_;
     std::array<Moved, moved_limit> moved_ {};

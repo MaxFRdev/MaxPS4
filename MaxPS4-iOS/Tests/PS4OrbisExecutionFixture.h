@@ -245,7 +245,8 @@ inline std::vector<uint8_t> make_general_fault_app(int kind) {
     auto b=make(false);
     using orbis_fixture::put;
     std::vector<uint8_t> code;
-    if (kind == 0) code={0x8b,0x84,0x24,0x00,0x10,0,0, 0xf4};
+    // 0: MOV EAX,[RSP+0x2000], past the stack top (the 4 KiB entry area included).
+    if (kind == 0) code={0x8b,0x84,0x24,0x00,0x20,0,0, 0xf4};
     else if (kind == 1) code={0xc7,0x05,0xf6,0xff,0xff,0xff,0,0,0,0, 0xf4};
     else if (kind == 2) code={0x0f,0x0b, 0xf4};
     else if (kind == 3) code={0xeb,0xfe, 0xf4};

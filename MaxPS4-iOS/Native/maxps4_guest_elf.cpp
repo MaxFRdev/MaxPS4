@@ -1,4 +1,7 @@
 #include "maxps4_guest_elf.h"
+#include "maxps4_game_patches.h"
+#include <iterator>
+#include <tuple>
 #include "maxps4_guest_range.h"
 #include "maxps4_ps4_guest_memory.h"
 #include "maxps4_ps4_libkernel.h"
@@ -264,9 +267,22 @@ int GuestELF::prepare_orbis_general(const std::vector<OrbisLinker::Input>& input
             ::munmap(spare, size_t(generalHeadroom));
             return true;
         };
+        // A game with a fixed layout to move (maxps4_game_patches.h) asks for
+        // a window it fits in first, then the usual sizes.
+        std::vector<uint64_t> heap_sizes;
+        for (const auto& module : measured.modules) {
+            std::vector<std::tuple<uint64_t, const uint8_t*, uint64_t>> segments;
+            for (const auto& segment : module.image.segments)
+                segments.emplace_back(segment.header.address, segment.bytes.data(), segment.bytes.size());
+            if (game_needs_layout_window(segments)) {
+                heap_sizes = {game_layout_window, game_layout_window - (uint64_t(10) << 30)};
+                break;
+            }
+        }
+        heap_sizes.insert(heap_sizes.end(), std::begin(generalHeapSizes), std::end(generalHeapSizes));
         void* reserved = MAP_FAILED;
         for (const bool headroom : {true, false}) {
-            for (const uint64_t heap : generalHeapSizes) {
+            for (const uint64_t heap : heap_sizes) {
                 layout(heap);
                 for (const unsigned bits : {40U, 47U}) {
                     user_end = uint64_t{1} << bits;
@@ -435,7 +451,7 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
             slot_stride = (generalStack + tls_bytes.size() + page - 1) / page * page + page;
             // EntryParams sit at the top of the stack; the stub points RDI at
             // them and RSI at its exit function.
-            const uint64_t params = stack_low + generalStack - entryParamsBytes;
+            const uint64_t params = stack_low + generalStack - entryAreaBytes;
             const uint64_t exit_function = start + entry_at + entry_block;
             auto& bytes = copy.modules[stub_module].image.segments[0].bytes;
             for (size_t b = 0; b < 8; ++b) {
@@ -766,7 +782,7 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
         }
         if (stack_low) {
             stack_address = stack_low; stack_bytes = generalStack;
-            entry_params_address = stack_low + generalStack - entryParamsBytes;
+            entry_params_address = stack_low + generalStack - entryAreaBytes;
             // sceKernelMmap window: after a guard page, PROT_NONE until mapped.
             heap_address = heap_low;
             heap_bytes = heap_window;
@@ -784,16 +800,30 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
         return 0;
     } catch (const std::bad_alloc&) { clear(); return -ENOMEM; }
 }
+bool GuestELF::patch(uint64_t address, const uint8_t* expected, const uint8_t* replacement, size_t length) {
+    if (!length || !identity) return false;
+    const uint64_t host_page = static_cast<uint64_t>(::sysconf(_SC_PAGESIZE));
+    const uint8_t* current = translate(address, length, 4);
+    if (!current || std::memcmp(current, expected, length) != 0) return false;
+    // The host pages of a code segment are read-only (PROT_READ): open them.
+    const uint64_t first = address / host_page * host_page;
+    const uint64_t last = (address + length + host_page - 1) / host_page * host_page;
+    auto* pages = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(current) - (address - first));
+    const bool writable = translate(address, length, 2) != nullptr;
+    if (!writable && ::mprotect(pages, size_t(last - first), PROT_READ | PROT_WRITE) != 0) return false;
+    std::memcpy(const_cast<uint8_t*>(current), replacement, length);
+    if (!writable) ::mprotect(pages, size_t(last - first), PROT_READ);
+    return true;
+}
 uint64_t GuestELF::write_entry_params() {
     // EntryParams {int argc; u32 pad; const char* argv[3]} then argv[0].
     if (!entry_params_address) return 0;
-    auto* params = const_cast<uint8_t*>(translate(entry_params_address, entryParamsBytes, 6));
+    auto* params = const_cast<uint8_t*>(translate(entry_params_address, entryAreaBytes, 6));
     if (!params) return 0;
-    static constexpr char program[] = "eboot.bin";
     const uint64_t words[4] = {1, entry_params_address + 32, 0, 0};
-    std::memset(params, 0, entryParamsBytes);
+    std::memset(params, 0, entryAreaBytes);
     std::memcpy(params, words, sizeof(words));
-    std::memcpy(params + 32, program, sizeof(program));
+    std::memcpy(params + 32, entry_program.data(), std::min<size_t>(entry_program.size(), entryAreaBytes - 33));
     return entry_params_address;
 }
 bool GuestELF::prepare_thread(size_t slot, uint64_t& stack_top, uint64_t& tp) {

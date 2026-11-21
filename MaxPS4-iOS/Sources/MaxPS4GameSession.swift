@@ -76,6 +76,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var engine: OpaquePointer?
     private var bridge: MaxPS4GameMetalBridge?
     private var stopped = false
+    var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
     private var ready = false
     private var port: UInt64 = 1
     private var missingSince: Date?
@@ -102,6 +103,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
     }
     // What the last run left for the player, set before run() returns.
     struct Outcome { var missing: [String] = []; var crashed = false; var report: URL? }
+    // What the last run's sceSystemServiceLoadExec asked for: the /app0
+    // executable and argv[0] to boot next (nil: none).
+    struct ExecRequest: Sendable { var path: String; var argument: String }
+    private(set) var execRequest: ExecRequest?
     private(set) var outcome = Outcome()
     private var inputEngine: OpaquePointer?
     private var displayed = 0
@@ -198,7 +203,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let zone = areaSize == 0 ? "zone PS4 0x1000000000 refusée par iOS (code \(status))"
             : "zone PS4 0x\(String(area, radix: 16)) (\(gib(areaSize)) Gio)"
         let spare = maxps4_fex_engine_spare_address_space(engine) >> 20
-        return "Mémoire : \(zone) · fenêtre 0x\(String(window, radix: 16)) (\(gib(windowSize)) Gio) · encore libre après elle : \(spare) Mio"
+        var hostMap = [CChar](repeating: 0, count: 1024)
+        let mapped = maxps4_fex_engine_host_map(engine, &hostMap, hostMap.count) > 0
+            ? "\niOS avant la fenêtre : " + String(cString: hostMap) : ""
+        return "Mémoire : \(zone) · fenêtre 0x\(String(window, radix: 16)) (\(gib(windowSize)) Gio) · encore libre après elle : \(spare) Mio\(mapped)"
     }
     // What the game printed last (its own error messages), invalid UTF-8 replaced.
     private func console(_ engine: OpaquePointer) -> String {
@@ -475,7 +483,8 @@ final class MaxPS4GameSource: @unchecked Sendable {
         }
         setStage("fermée")
     }
-    func run(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false, progress: @escaping @Sendable (String) -> Void) -> String {
+    func run(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false, exec: ExecRequest? = nil, progress: @escaping @Sendable (String) -> Void) -> String {
+        execRequest = nil
         dispatchPrecondition(condition: .onQueue(MaxPS4FEXMetalExecution.queue))
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -499,6 +508,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             progress(String(localized: "Lecture du dossier et chargement de eboot.bin et des PRX…", bundle: .maxps4))
             // An extracted update: its eboot.bin and modules first, and over /app0.
             _ = (update?.path ?? "").withCString { maxps4_fex_engine_set_update(opened, $0) }
+            // A previous run's sceSystemServiceLoadExec: its executable and argv[0].
+            if let exec {
+                _ = exec.path.withCString { path in exec.argument.withCString { maxps4_fex_engine_set_exec(opened, path, $0) } }
+            }
             let loaded = url.path.withCString { path in
                 diagnostic.withUnsafeMutableBufferPointer {
                     maxps4_fex_engine_load_game(opened, path, &relocation, $0.baseAddress, $0.count)
@@ -576,6 +589,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             let ran = maxps4_fex_engine_run_orbis(opened, &value, &backend, &entry)
             setStage("jeu arrêté, rapport de fin")
             lock.lock(); let wasStopped = stopped; let frames = displayed; lock.unlock()
+            var execPath = [CChar](repeating: 0, count: 512), execArgument = [CChar](repeating: 0, count: 8192)
+            if !wasStopped, maxps4_fex_engine_exec_request(opened, &execPath, execPath.count, &execArgument, execArgument.count) == 1 {
+                execRequest = ExecRequest(path: String(cString: execPath), argument: String(cString: execArgument))
+            }
             var fault = maxps4_fex_guest_fault()
             _ = maxps4_fex_engine_last_guest_fault(opened, &fault)
             let relativeRIP = fault.rip >= relocation ? fault.rip - relocation : fault.rip
@@ -613,7 +630,30 @@ final class MaxPS4GameSource: @unchecked Sendable {
             // 0x4d50 (maxps4_dispatch_fault.h): FEX could not compile the guest block at RIP.
             let uncompilable = fault.code == 0x4d50
                 ? "\nInstruction x86 non prise en charge par FEX à RIP 0x\(String(fault.rip, radix: 16)) : octets dans Documents/maxps4-fatal-fault.txt." : ""
-            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\(uncompilable)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16))."
+            return "Exécution terminée (\(ran)), backend \(backend), \(frames) images. \(metal)\(uncompilable)\nSignal \(fault.signal), code \(fault.code), adresse mémoire 0x\(String(fault.address, radix: 16)), RIP 0x\(String(fault.rip, radix: 16)).\nRelocation 0x\(String(relocation, radix: 16)), RIP relatif 0x\(String(relativeRIP, radix: 16)).\(registers(fault))"
+    }
+    // Where the guest was: its registers and the first words at RSP (a
+    // return address there shows a call that went astray).
+    private func pointed(_ fault: maxps4_fex_guest_fault) -> String {
+        func words(_ tuple: (UInt64, UInt64, UInt64, UInt64)) -> String {
+            [tuple.0, tuple.1, tuple.2, tuple.3].map { "0x" + String($0, radix: 16) }.joined(separator: " ")
+        }
+        var out = ""
+        if fault.at_words & 1 != 0 { out += "\nÀ RBX : " + words(fault.at_rbx) }
+        if fault.at_words & 2 != 0 { out += "\nÀ RAX : " + words(fault.at_rax) }
+        if fault.at_words & 4 != 0 { out += "\nÀ R12 : " + words(fault.at_r12) }
+        return out
+    }
+    private func registers(_ fault: maxps4_fex_guest_fault) -> String {
+        func hex(_ value: UInt64) -> String { "0x" + String(value, radix: 16) }
+        let words = withUnsafeBytes(of: fault.stack) { raw in
+            Array(raw.bindMemory(to: UInt64.self).prefix(Int(min(fault.stack_words, 16))))
+        }
+        let stack = words.isEmpty ? "illisible" : words.map(hex).joined(separator: " ")
+        return "\nRegistres : RSP \(hex(fault.rsp)) · RBP \(hex(fault.rbp)) · RAX \(hex(fault.rax)) · RDI \(hex(fault.rdi)) · RSI \(hex(fault.rsi))" +
+            "\nRBX \(hex(fault.rbx)) · RCX \(hex(fault.rcx)) · RDX \(hex(fault.rdx)) · R8 \(hex(fault.r8)) · R9 \(hex(fault.r9)) · R10 \(hex(fault.r10)) · R11 \(hex(fault.r11))" +
+            "\nR12 \(hex(fault.r12)) · R13 \(hex(fault.r13)) · R14 \(hex(fault.r14)) · R15 \(hex(fault.r15))" +
+            pointed(fault) + "\nPile à RSP : \(stack)"
     }
     private func failure(_ text: String, _ code: Int32) -> NSError {
         NSError(domain: "MaxPS4.Game", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "\(text) (\(code))"])
@@ -670,12 +710,20 @@ final class MaxPS4GameSource: @unchecked Sendable {
             }
         }
         MaxPS4FEXMetalExecution.queue.async { [weak self] in
-            let result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling, frameTiming: frameTiming) { [weak self] text in
+            let progress: @Sendable (String) -> Void = { [weak self] text in
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.generation == id, self.running else { return }
                     self.launched = true; Self.draining = nil
                     self.report = text
                 }
+            }
+            var result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling, frameTiming: frameTiming, progress: progress)
+            // The game replaced itself (sceSystemServiceLoadExec): boot what it
+            // asked for, a few times at most, unless the session was stopped.
+            var relaunches = 0
+            while let exec = source.execRequest, relaunches < 4, !source.isStopped {
+                relaunches += 1
+                result = source.run(url: url, update: update, addons: addons, device: device, nativeTextures: nativeTextures, tso: tso, outputHeight: outputHeight, profiling: profiling, frameTiming: frameTiming, exec: exec, progress: progress)
             }
             DispatchQueue.main.async {
                 guard let self else { return }

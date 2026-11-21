@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <new>
 #include <sys/mman.h>
+#include <cstdio>
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
@@ -15,10 +16,45 @@ namespace {
 // a mapping: Darwin's mmap may ignore an address hint even for a free span,
 // so iOS asks vm_allocate for that fixed span (it fails if anything is
 // there). `status` is the host's answer (0: granted).
+#if defined(__APPLE__)
+// With extended virtual addressing, iOS covers [0x1000000000, 0x7000000000)
+// with one empty guard reservation (user tag VM_MEMORY_GUARD, no access,
+// no maximum access), where PS4 games place fixed mappings (Call of Duty:
+// Modern Warfare Remastered at 0x2001000000). Whether [address, address +
+// size) lies inside such a guard.
+bool in_guard(uint64_t address, uint64_t size) {
+    vm_address_t region = vm_address_t(address);
+    vm_size_t region_size = 0;
+    natural_t depth = 0;
+    vm_region_submap_info_data_64_t info {};
+    mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+    if (::vm_region_recurse_64(::mach_task_self(), &region, &region_size, &depth,
+                               reinterpret_cast<vm_region_recurse_info_t>(&info), &count) != KERN_SUCCESS)
+        return false;
+    return region <= address && region + region_size >= address + size && info.user_tag == VM_MEMORY_GUARD &&
+           info.protection == VM_PROT_NONE && info.max_protection == VM_PROT_NONE && !info.is_submap;
+}
+#endif
 bool reserve_exact(uint64_t address, uint64_t size, int& status) {
 #if defined(__APPLE__)
     vm_address_t at = vm_address_t(address);
-    const kern_return_t kr = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size), VM_FLAGS_FIXED);
+    kern_return_t kr = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size), VM_FLAGS_FIXED);
+    if (kr == KERN_NO_SPACE && in_guard(address, size)) {
+        // Inside iOS's empty guard, which is permanent (vm_deallocate only
+        // splits it): overwrite that span instead, with vm_allocate, then
+        // mmap. Their answers, for the report: 2000 + vm_allocate's,
+        // 3000 + mmap's errno.
+        at = vm_address_t(address);
+        const kern_return_t overwrite = ::vm_allocate(::mach_task_self(), &at, vm_size_t(size),
+                                                      VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+        if (overwrite == KERN_SUCCESS && at == vm_address_t(address)) kr = KERN_SUCCESS;
+        else {
+            void* want = reinterpret_cast<void*>(address);
+            void* got = ::mmap(want, size_t(size), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            if (got == want) { kr = KERN_SUCCESS; at = vm_address_t(address); }
+            else kr = kern_return_t(got == MAP_FAILED ? 3000 + errno : 2000 + int(overwrite));
+        }
+    }
     status = int(kr);
     if (kr != KERN_SUCCESS) return false;
     if (at != vm_address_t(address) || ::mprotect(reinterpret_cast<void*>(address), size_t(size), PROT_NONE) != 0) {
@@ -54,6 +90,47 @@ bool in_app_area(uint64_t address, uint64_t size) {
 }
 void PS4VirtualMemory::app_area(uint64_t& base, uint64_t& size, int& status) {
     base = app_area_reservation.base; size = app_area_reservation.size; status = app_area_reservation.status;
+}
+std::string PS4VirtualMemory::host_map(uint64_t from, uint64_t to) {
+#if defined(__APPLE__)
+    std::string out;
+    char line[160];
+    task_vm_info_data_t info {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (::task_info(::mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS &&
+        count >= TASK_VM_INFO_REV2_COUNT) {
+        std::snprintf(line, sizeof line, "espace d'adresses iOS 0x%llx - 0x%llx",
+                      (unsigned long long)info.min_address, (unsigned long long)info.max_address);
+        out += line;
+    }
+    vm_address_t address = vm_address_t(from);
+    unsigned shown = 0;
+    while (address < to && shown < 8) {
+        vm_size_t size = 0;
+        natural_t depth = 0;
+        vm_region_submap_info_data_64_t region {};
+        mach_msg_type_number_t region_count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (::vm_region_recurse_64(::mach_task_self(), &address, &size, &depth,
+                                   reinterpret_cast<vm_region_recurse_info_t>(&region), &region_count) != KERN_SUCCESS)
+            break;
+        if (address >= to) break;
+        std::snprintf(line, sizeof line, "%s0x%llx +0x%llx prot %d/%d tag %u", out.empty() ? "" : " · ",
+                      (unsigned long long)address, (unsigned long long)size, region.protection, region.max_protection,
+                      region.user_tag);
+        out += line;
+        ++shown;
+        address += size;
+    }
+    if (!shown) {
+        std::snprintf(line, sizeof line, "%saucune mapping entre 0x%llx et 0x%llx", out.empty() ? "" : " · ",
+                      (unsigned long long)from, (unsigned long long)to);
+        out += line;
+    }
+    return out;
+#else
+    (void)from; (void)to;
+    return {};
+#endif
 }
 Error PS4VirtualMemory::permissions(uint32_t protection, uint8_t& out) {
     // PS4 PROT_READ=1, WRITE=2, EXEC=4, unlike ELF p_flags.
@@ -305,6 +382,9 @@ Error PS4VirtualMemory::place_unrecorded(uint64_t hint, uint64_t length, uint64_
     auto page_end = [](uint64_t end) {
         return end > UINT64_MAX - (page_size - 1) ? UINT64_MAX : (end + page_size - 1) / page_size * page_size;
     };
+    // A game's own fixed area (set_placement_end) is not ours to fill.
+    if (host && !fixed && placement_end_ > window && placement_end_ < window + window_bytes)
+        window_bytes = placement_end_ - window;
     uint64_t start = host ? window : base;
     if (host && hint > window && hint < window + window_bytes) start = hint; // A search start, not a demand.
     uint64_t candidate = fixed ? hint : align(start);
@@ -463,19 +543,34 @@ void PS4VirtualMemory::reset() {
 }
 size_t PS4VirtualMemory::contiguous(uint64_t address, size_t limit, uint32_t permissions) const {
     if (!limit || !permissions || (permissions & ~7U)) return 0;
-    const size_t r = holding(address);
+    size_t r = holding(address);
     if (r == SIZE_MAX) return 0;
-    const Region& region = regions_[r];
-    const uint64_t relative = address - region.address;
-    const size_t first = size_t(relative / page_size);
-    // Only the pages `limit` reaches: a region can hold a million of them.
-    const uint64_t reach = (relative + std::min<uint64_t>(limit, region.size - relative) + page_size - 1) / page_size;
-    const size_t end = size_t(std::min<uint64_t>(reach, region.pages.size()));
-    size_t last = first;
-    while (last < end && region.pages[last] != 0xff &&
-           (region.pages[last] & permissions) == permissions) ++last;
-    if (last == first) return 0;
-    return std::min(limit, size_t(last * page_size - relative));
+    // Through the following regions too while they continue both the guest
+    // range and the host bytes (adjacent maps in the window): CoD's second
+    // frame buffer starts in the first one's last page and goes on in its own map.
+    size_t total = 0;
+    uint64_t at = address;
+    while (total < limit) {
+        const Region& region = regions_[r];
+        const uint64_t relative = at - region.address;
+        const size_t first = size_t(relative / page_size);
+        const size_t want = limit - total;
+        // Only the pages `want` reaches: a region can hold a million of them.
+        const uint64_t reach = (relative + std::min<uint64_t>(want, region.size - relative) + page_size - 1) / page_size;
+        const size_t end = size_t(std::min<uint64_t>(reach, region.pages.size()));
+        size_t last = first;
+        while (last < end && region.pages[last] != 0xff &&
+               (region.pages[last] & permissions) == permissions) ++last;
+        const size_t got = last == first ? 0 : std::min<size_t>(want, size_t(last * page_size - relative));
+        total += got;
+        if (total >= limit || last < region.pages.size() || region.address + region.size - at != got) break;
+        const size_t next = r + 1;
+        if (next >= regions_.size() || regions_[next].address != region.address + region.size ||
+            regions_[next].data != region.data + region.size) break;
+        at = regions_[next].address;
+        r = next;
+    }
+    return total;
 }
 const uint8_t* PS4VirtualMemory::translate(uint64_t address, size_t size, uint32_t permissions) const {
     if (!size || contiguous(address, size, permissions) != size) return nullptr;
