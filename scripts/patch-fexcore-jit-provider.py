@@ -54,6 +54,14 @@ EXTRA = {
          '  return ThreadOwner.release();\n}\n\nvoid ContextImpl::DestroyThread'),
     ],
     BACKEND: [
+        # The prepared pool holds ONE code buffer, of MAX_CODE_SIZE: a larger
+        # one can't be allocated later (CoD filled 16 MiB during its start).
+        ('  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;',
+         '''#if defined(__APPLE__) && TARGET_OS_IPHONE
+  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 128;
+#else
+  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;
+#endif'''),
         ('    LookupCache = fextl::make_unique<GuestToHostMap>();',
          '''    try {
       LookupCache = fextl::make_unique<GuestToHostMap>();

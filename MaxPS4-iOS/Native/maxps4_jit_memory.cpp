@@ -180,7 +180,7 @@ extern "C" int32_t maxps4_jit_prepare() {
     if (mailbox.nonce != expected_nonce) return -EAGAIN;
     std::atomic_thread_fence(std::memory_order_acquire);
     if (mailbox.status != 1) return reject_stage(EACCES, "mailbox-status");
-    const std::array sizes {size_t{16384}, size_t{16 * 1024 * 1024}, page_size};
+    const std::array sizes {size_t{16384}, size_t{128 * 1024 * 1024}, page_size};
     // Claim ALL addresses before attempting remaps, so rollback releases every
     // debugger-owned RX allocation even if the first remap is denied.
     for (size_t i = 0; i < regions.size(); ++i) {
