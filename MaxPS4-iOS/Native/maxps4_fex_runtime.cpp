@@ -1858,7 +1858,6 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
                           (unsigned long long)guard.fault_pc, guard.fault_in_jit ? "code JIT" : "dispatcher FEX",
                           (unsigned long long)guard.fault_lr, (unsigned long long)guard.fault_rip);
             engine->fault_note += line;
-            if (guard.fault_rip) engine->last_fault.rip = guard.fault_rip;
         }
         if (signal) {
             const uint64_t rip = engine->last_fault.rip;
