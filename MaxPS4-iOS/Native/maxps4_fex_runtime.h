@@ -239,6 +239,12 @@ typedef struct maxps4_fex_guest_fault {
     uint64_t rbx, rcx, rdx, r8, r9, r10, r11, r12, r13, r14, r15;
     uint64_t at_rbx[4], at_rax[4], at_r12[4]; // Words at RBX, RAX and R12 when readable.
     uint32_t at_words; // Bits 0, 1, 2: at_rbx, at_rax, at_r12 read.
+    // The host side (0 when unknown): PC, LR, 1 JIT code / 2 FEX dispatcher,
+    // the exact guest RIP of a fault in JIT code; and, for a guest thread
+    // other than the main one, its entry and initial stack.
+    uint64_t host_pc, host_lr, exact_rip;
+    uint32_t host_where;
+    uint64_t thread_entry, thread_rsp;
 } maxps4_fex_guest_fault;
 int32_t maxps4_fex_engine_last_guest_fault(const maxps4_fex_engine *engine,
                                            maxps4_fex_guest_fault *fault);

@@ -594,6 +594,11 @@ public:
     // the guest RIP that host PC belongs to (0 when not in JIT code).
     uint64_t fault_pc = 0, fault_lr = 0, fault_rip = 0;
     bool fault_in_jit = false;
+    void describe(maxps4_fex_guest_fault& out) const {
+        if (!fault_pc) return;
+        out.host_pc = fault_pc; out.host_lr = fault_lr; out.exact_rip = fault_rip;
+        out.host_where = fault_in_jit ? 1 : 2;
+    }
     // maxps4_fex_engine_sample_main_thread: the next SIGURG seen while
     // `sample_request` is set records where the guarded thread is, then
     // lets it run on. `where`: 1 JIT code, 2 FEX dispatcher, 3 other host code.
@@ -1333,9 +1338,12 @@ private:
                     context->ExecuteThread(fex);
                     const int signal = guard.signal.load();
                     // SIGURG only comes from finish(): a stop, not a fault.
-                    if (signal && signal != SIGURG)
+                    if (signal && signal != SIGURG) {
                         fault = guest_fault(signal, guard.code, guard.address, fex->CurrentFrame->State,
                             [this](uint64_t a, void* d, size_t n) { return guest_read(a, d, n); });
+                        guard.describe(fault);
+                        fault.thread_entry = thread.entry; fault.thread_rsp = thread.rsp;
+                    }
                 }
                 context->DestroyThread(fex);
             }
@@ -1852,11 +1860,19 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
         // A fault RIP inside an HLE relay (the instruction after its SYSCALL is
         // its RET): name the function, whose return went wrong.
         engine->fault_note.clear();
-        if (signal && !(threads && child.signal) && guard.fault_pc) {
-            char line[200];
+        if (signal && !(threads && child.signal)) guard.describe(engine->last_fault);
+        if (signal && engine->last_fault.host_pc) {
+            char line[260];
+            const auto& f = engine->last_fault;
             std::snprintf(line, sizeof line, "[MaxPS4] faute côté hôte : PC 0x%llx (%s) · LR 0x%llx · RIP invité exact 0x%llx\n",
-                          (unsigned long long)guard.fault_pc, guard.fault_in_jit ? "code JIT" : "dispatcher FEX",
-                          (unsigned long long)guard.fault_lr, (unsigned long long)guard.fault_rip);
+                          (unsigned long long)f.host_pc, f.host_where == 1 ? "code JIT" : "dispatcher FEX",
+                          (unsigned long long)f.host_lr, (unsigned long long)f.exact_rip);
+            engine->fault_note += line;
+        }
+        if (signal && engine->last_fault.thread_entry) {
+            char line[200];
+            std::snprintf(line, sizeof line, "[MaxPS4] faute dans un thread secondaire : entrée 0x%llx · pile initiale 0x%llx\n",
+                          (unsigned long long)engine->last_fault.thread_entry, (unsigned long long)engine->last_fault.thread_rsp);
             engine->fault_note += line;
         }
         if (signal) {
