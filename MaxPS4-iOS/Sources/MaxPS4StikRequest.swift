@@ -62,3 +62,23 @@ enum MaxPS4StikRequest {
         return request.url
     }
 }
+
+/// The game an automatic test run asks for, read once per launch.
+enum MaxPS4AutoLaunch {
+    static let fileName = "MaxPS4-autolaunch.txt"
+    static func consume(arguments: [String] = ProcessInfo.processInfo.arguments,
+                        environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let file = documents.appendingPathComponent(fileName)
+        if let text = try? String(contentsOf: file, encoding: .utf8) {
+            try? FileManager.default.removeItem(at: file) // One run per request.
+            let title = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty { return title }
+        }
+        if let index = arguments.firstIndex(of: "-MaxPS4AutoLaunch"), index + 1 < arguments.count {
+            return arguments[index + 1]
+        }
+        if let title = environment["MAXPS4_AUTOLAUNCH"], !title.isEmpty { return title }
+        return nil
+    }
+}

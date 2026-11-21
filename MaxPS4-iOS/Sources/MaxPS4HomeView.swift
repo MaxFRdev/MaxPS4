@@ -41,6 +41,29 @@ struct MaxPS4HomeView: View {
         let query = gameSearch.trimmingCharacters(in: .whitespacesAndNewlines)
         return folders.local.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
     }
+    // Automatic test runs (scripts/maxps4-autotest.py): a game asked for by
+    // Documents/MaxPS4-autolaunch.txt (its TITLE_ID, or "recent"), the
+    // -MaxPS4AutoLaunch argument or MAXPS4_AUTOLAUNCH starts by itself, once
+    // the JIT is active; MaxPS4 asks StikDebug for it first when it is not.
+    @State private var autoLaunchTitle: String?
+    private func autoLaunch(afterActivation: Bool) {
+        if autoLaunchTitle == nil, !afterActivation { autoLaunchTitle = MaxPS4AutoLaunch.consume() }
+        guard let title = autoLaunchTitle, playingFolder == nil else { return }
+        folders.scanDocuments()
+        let game = title.lowercased() == "recent" ? folders.recent :
+            folders.local.first { MaxPS4Saves.gameID(for: $0.url).caseInsensitiveCompare(title) == .orderedSame }?.url
+        guard let game else { message = "Lancement automatique : jeu \(title) introuvable"; autoLaunchTitle = nil; return }
+#if MAXPS4_FEX_APP
+        if maxps4_jit_state() != 2 {
+            // Asked once; after StikDebug, launched whatever its outcome (the
+            // report then says why the JIT is missing).
+            if !afterActivation { message = MaxPS4StikActivation.begin { message = $0 }; return }
+            _ = MaxPS4StikActivation.confirmation()
+        }
+#endif
+        autoLaunchTitle = nil
+        playingFolder = MaxPS4PlayingFolder(url: game)
+    }
     private var libraryEmpty: Bool { emulator.games.isEmpty && folders.folders.isEmpty && folders.local.isEmpty }
     private var libraryCount: Int { folders.local.count + folders.folders.count + emulator.games.count }
     var body: some View {
@@ -65,7 +88,13 @@ struct MaxPS4HomeView: View {
             }
         }
         // Back from the Files app: pick up games copied into MaxPS4's folder.
-        .onChange(of: scenePhase) { _, phase in if phase == .active { folders.scanDocuments() } }
+        // Back from StikDebug: an automatic launch waiting for the JIT goes on.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            folders.scanDocuments()
+            autoLaunch(afterActivation: true)
+        }
+        .task { autoLaunch(afterActivation: false) }
         .sheet(isPresented: $showingJIT) { MaxPS4JITSetupView() }
         .sheet(item: $selectedGameDetails, onDismiss: {
             selectedTitleInfo = nil
