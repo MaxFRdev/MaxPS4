@@ -2311,6 +2311,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
             }
             line += "\n";
             std::lock_guard<std::mutex> guard(lock_);
+            for (const auto& entry : batch_log_) line += "[MaxPS4]   BatchMap " + entry + "\n";
             console_.insert(console_.end(), line.begin(), line.end());
             if (console_.size() > console_limit) console_.erase(console_.begin(), console_.end() - std::ptrdiff_t(console_limit));
         }
@@ -2645,6 +2646,16 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
             case 2: case 4: result = memory_service(S::mtype_protect, {start, length, e[25], protection}); break;
             case 3: result = memory_service(S::flexible_map_unnamed, {entry, length, protection, flags}); break;
             default: result = kernel_error(inval); break;
+            }
+            {
+                // The last entries, for the stop report.
+                char line[160];
+                std::snprintf(line, sizeof line, "op %d 0x%llx +0x%llx phys 0x%llx prot 0x%llx type %u -> %lld",
+                              signed32(uint32_t(get_le(e + 28, 4))), (unsigned long long)start, (unsigned long long)length,
+                              (unsigned long long)offset, (unsigned long long)protection, unsigned(e[25]), (long long)result);
+                std::lock_guard<std::mutex> guard(lock_);
+                batch_log_.push_back(line);
+                if (batch_log_.size() > 12) batch_log_.erase(batch_log_.begin());
             }
             if (result) break;
         }

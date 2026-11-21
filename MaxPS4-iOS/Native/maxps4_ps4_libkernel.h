@@ -229,6 +229,7 @@ public:
     PS4GnmQueue& graphics() { return graphics_; }
     // The last console_limit bytes the game wrote to its stdout and stderr.
     std::string console() { std::lock_guard<std::mutex> guard(lock_); return std::string(console_.begin(), console_.end()); }
+    std::vector<std::string> batch_log_; // Last sceKernelBatchMap entries (lock_).
     static constexpr size_t console_limit = 4096;
     // How much of the 5056 MiB of direct memory the game holds, for the stop
     // report: "allouée X Mio en N blocs · libre Y Mio".
