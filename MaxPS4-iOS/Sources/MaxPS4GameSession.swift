@@ -641,6 +641,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         var out = ""
         if fault.at_words & 1 != 0 { out += "\nÀ RBX : " + words(fault.at_rbx) }
         if fault.at_words & 2 != 0 { out += "\nÀ RAX : " + words(fault.at_rax) }
+        if fault.at_words & 4 != 0 { out += "\nÀ R12 : " + words(fault.at_r12) }
         return out
     }
     private func registers(_ fault: maxps4_fex_guest_fault) -> String {
