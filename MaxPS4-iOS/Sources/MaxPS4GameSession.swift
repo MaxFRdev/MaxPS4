@@ -428,11 +428,11 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let timing = String(format: "Préparation : verrou session %.1f ms · cible %.1f ms · copie %.1f ms",
                             lockWait * 1000, (located - started - lockWait) * 1000,
                             (ProcessInfo.processInfo.systemUptime - located) * 1000)
+        // A flipped buffer the GPU never drew (CoD during its loading): the
+        // screen stays black and the game carries on; stopping it after 5 s
+        // ended every CoD run before its first drawn frame.
         guard let texture = copied else {
             if missingSince == nil { missingSince = Date() }
-            if Date().timeIntervalSince(missingSince!) > 5 {
-                throw failure("Aucune texture Metal pour le buffer retourné", -EIO)
-            }
             return nil
         }
         missingSince = nil
