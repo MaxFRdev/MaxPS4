@@ -594,6 +594,23 @@ public:
     // the guest RIP that host PC belongs to (0 when not in JIT code).
     uint64_t fault_pc = 0, fault_lr = 0, fault_rip = 0;
     bool fault_in_jit = false;
+    uint64_t fault_esr = 0, fault_far = 0, fault_x[29] {};
+    uint32_t fault_words[8] {}; // PC - 16 .. PC + 16.
+    bool fault_words_read = false;
+    std::string host_detail() const {
+        if (!fault_pc) return {};
+        std::string out;
+        char line[160];
+        std::snprintf(line, sizeof line, "[MaxPS4] faute ARM : ESR 0x%llx · FAR 0x%llx · instructions (PC-16..PC+12)",
+                      (unsigned long long)fault_esr, (unsigned long long)fault_far);
+        out += line;
+        if (fault_words_read)
+            for (int i = 0; i < 8; ++i) { std::snprintf(line, sizeof line, i == 4 ? " [%08x]" : " %08x", fault_words[i]); out += line; }
+        else out += " illisibles";
+        out += "\n[MaxPS4] registres ARM :";
+        for (int i = 0; i < 29; ++i) { std::snprintf(line, sizeof line, " x%d=%llx", i, (unsigned long long)fault_x[i]); out += line; }
+        return out + "\n";
+    }
     void describe(maxps4_fex_guest_fault& out) const {
         if (!fault_pc) return;
         out.host_pc = fault_pc; out.host_lr = fault_lr; out.exact_rip = fault_rip;
@@ -972,6 +989,17 @@ private:
                 if (number != SIGURG) {
                     guard->fault_pc = pc; guard->fault_lr = lr; guard->fault_in_jit = in_jit;
                     guard->fault_rip = in_jit ? guard->context->RestoreRIPFromHostPC(guard->thread, pc) : 0;
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+                    // What the CPU saw: exception syndrome, fault address, its
+                    // registers and the instruction words around PC (read with
+                    // vm_read_overwrite: an unreadable PC fails, never faults).
+                    guard->fault_esr = machine->uc_mcontext->__es.__esr;
+                    guard->fault_far = machine->uc_mcontext->__es.__far;
+                    for (int i = 0; i < 29; ++i) guard->fault_x[i] = machine->uc_mcontext->__ss.__x[i];
+                    vm_size_t got = 0;
+                    guard->fault_words_read = vm_read_overwrite(mach_task_self(), vm_address_t(pc - 16), sizeof(guard->fault_words),
+                        vm_address_t(guard->fault_words), &got) == KERN_SUCCESS && got == sizeof(guard->fault_words);
+#endif
                 }
                 guard->signal.store(number);
                 sp = guard->thread->CurrentFrame->ReturningStackLocation;
@@ -1296,6 +1324,7 @@ public:
             thread.used = false;
         }
     }
+    std::string fault_detail() const { std::lock_guard guard(lock); return first_detail; }
     bool faulted(maxps4_fex_guest_fault& out) const {
         std::lock_guard guard(lock);
         out = first_fault;
@@ -1326,6 +1355,7 @@ private:
         ProbeAddressSpace::guest_tls = thread.fs;
         current = &thread;
         maxps4_fex_guest_fault fault {};
+        std::string detail;
         bool skip = false;
         { std::lock_guard guard(lock); skip = stopping; }
         if (!skip) {
@@ -1343,6 +1373,7 @@ private:
                             [this](uint64_t a, void* d, size_t n) { return guest_read(a, d, n); });
                         guard.describe(fault);
                         fault.thread_entry = thread.entry; fault.thread_rsp = thread.rsp;
+                        detail = guard.host_detail();
                     }
                 }
                 context->DestroyThread(fex);
@@ -1352,7 +1383,7 @@ private:
         bool stop_main = false;
         {
             std::lock_guard guard(lock);
-            if (fault.signal && !first_fault.signal) { first_fault = fault; stop_main = stopping = true; }
+            if (fault.signal && !first_fault.signal) { first_fault = fault; first_detail = detail; stop_main = stopping = true; }
             if (thread.ends_process) stop_main = stopping = true;
             thread.finished = true; // `thread` may be reused from here on.
         }
@@ -1378,6 +1409,8 @@ private:
     std::array<Thread, maxps4::GuestELF::generalThreads> threads {};
     bool stopping = false, main_done = false, main_exited = false, timed_out = false;
     maxps4_fex_guest_fault first_fault {};
+    std::string first_detail; // The first fault's host CPU state (lock).
+
     static inline thread_local Thread* current = nullptr;
     std::atomic<bool> ending_ {false};
 };
@@ -1860,7 +1893,8 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
         // A fault RIP inside an HLE relay (the instruction after its SYSCALL is
         // its RET): name the function, whose return went wrong.
         engine->fault_note.clear();
-        if (signal && !(threads && child.signal)) guard.describe(engine->last_fault);
+        if (signal && !(threads && child.signal)) { guard.describe(engine->last_fault); engine->fault_note += guard.host_detail(); }
+        if (signal && threads && child.signal) engine->fault_note += threads->fault_detail();
         if (signal && engine->last_fault.host_pc) {
             char line[260];
             const auto& f = engine->last_fault;
