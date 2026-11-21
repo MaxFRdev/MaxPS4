@@ -63,10 +63,6 @@ struct GameTrap {
 inline constexpr GameTrap game_traps[] = {
     {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x61e093, {0x48, 0x8d, 0x3d, 0xb4, 0x73, 0x33, 0x00},
      "Out of memory 28"},
-    // Inside the thread set-up (0x599870), at its read of the stack guard
-    // through R12 (the GOT's __stack_chk_guard): MOV RAX,[R12]; MOV [RBP-0x30],RAX.
-    {"Call of Duty: Modern Warfare Remastered", "eboot.bin", 0x59988e, {0x49, 0x8b, 0x04, 0x24, 0x48, 0x89, 0x45},
-     "lecture de __stack_chk_guard"},
 };
 // A game's whole fixed virtual layout, moved as one block by a multiple of
 // 16 GiB (1 GiB if that does not fit) so offsets inside it keep their low

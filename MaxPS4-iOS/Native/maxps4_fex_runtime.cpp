@@ -590,6 +590,10 @@ public:
     std::atomic<int> signal {0};
     int32_t code = 0;
     uint64_t address = 0;
+    // The host side of a guest fault: PC, LR, whether in JIT code, and then
+    // the guest RIP that host PC belongs to (0 when not in JIT code).
+    uint64_t fault_pc = 0, fault_lr = 0, fault_rip = 0;
+    bool fault_in_jit = false;
     // maxps4_fex_engine_sample_main_thread: the next SIGURG seen while
     // `sample_request` is set records where the guarded thread is, then
     // lets it run on. `where`: 1 JIT code, 2 FEX dispatcher, 3 other host code.
@@ -958,6 +962,12 @@ private:
             if (stop) {
                 guard->code = number == SIGURG ? 0 : info->si_code;
                 guard->address = number == SIGURG ? 0 : reinterpret_cast<uintptr_t>(info->si_addr);
+                // Where the host was: in JIT code, the exact guest RIP comes
+                // from the host PC (State.rip is only the last block stored).
+                if (number != SIGURG) {
+                    guard->fault_pc = pc; guard->fault_lr = lr; guard->fault_in_jit = in_jit;
+                    guard->fault_rip = in_jit ? guard->context->RestoreRIPFromHostPC(guard->thread, pc) : 0;
+                }
                 guard->signal.store(number);
                 sp = guard->thread->CurrentFrame->ReturningStackLocation;
                 pc = stop;
@@ -1842,6 +1852,14 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
         // A fault RIP inside an HLE relay (the instruction after its SYSCALL is
         // its RET): name the function, whose return went wrong.
         engine->fault_note.clear();
+        if (signal && !(threads && child.signal) && guard.fault_pc) {
+            char line[200];
+            std::snprintf(line, sizeof line, "[MaxPS4] faute côté hôte : PC 0x%llx (%s) · LR 0x%llx · RIP invité exact 0x%llx\n",
+                          (unsigned long long)guard.fault_pc, guard.fault_in_jit ? "code JIT" : "dispatcher FEX",
+                          (unsigned long long)guard.fault_lr, (unsigned long long)guard.fault_rip);
+            engine->fault_note += line;
+            if (guard.fault_rip) engine->last_fault.rip = guard.fault_rip;
+        }
         if (signal) {
             const uint64_t rip = engine->last_fault.rip;
             auto found = std::upper_bound(image.hle_thunks().begin(), image.hle_thunks().end(), rip,
