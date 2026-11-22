@@ -22,6 +22,9 @@ public:
     // For the status report: the mutex at `slot` as "owner N, type T, count C",
     // or empty when no mutex is registered there.
     std::string describe_mutex(uint64_t slot);
+    // Count/max of a semaphore, the events of an equeue (diagnostics).
+    std::string describe_sema(uint64_t handle);
+    std::string describe_equeue(uint64_t handle);
     // PS4 mutex types (scePthreadMutexattrSettype). Error-checking is the default.
     enum MutexType : uint32_t { error_check = 1, recursive = 2, normal = 3, adaptive = 4 };
     static constexpr uint64_t default_stack = 1024 * 1024, minimum_stack = 16 * 1024;

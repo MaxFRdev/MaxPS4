@@ -110,6 +110,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private(set) var outcome = Outcome()
     private var inputEngine: OpaquePointer?
     private var displayed = 0
+    private var blankFlips = 0
     private var started: TimeInterval?
     // Rewritten each heartbeat so a run that crashes the app leaves its state.
     private var liveReport: URL?
@@ -175,7 +176,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let missing = missingImports(engine)
         let compatibility = missing.called.isEmpty ? "" : "Fonctions PS4 manquantes appelées : \(missing.called.count) sur \(missing.total) absentes · "
             + missing.called.prefix(5).joined(separator: " · ") + "\n"
-        let text = compatibility + inputDelays(engine) + padPlayers(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
+        let text = compatibility + inputDelays(engine) + padPlayers(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · flips sans image \(blankFlips) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
         if let liveReport {
             MaxPS4Reports.write(text + "\n\n" + movedMappings(engine) + "\n\nDerniers appels PS4 en échec :\n" + failedCalls(engine)
@@ -431,13 +432,24 @@ final class MaxPS4GameSource: @unchecked Sendable {
         // A flipped buffer the GPU never drew (CoD during its loading): the
         // screen stays black and the game carries on; stopping it after 5 s
         // ended every CoD run before its first drawn frame.
+        // The flip still has to happen for the game: CoD's flip thread signals
+        // a semaphore on each flip event, and a ticket left pending forever
+        // (no flip event, every later flip refused) deadlocked its loading.
         guard let texture = copied else {
             if missingSince == nil { missingSince = Date() }
+            retireBlank(ticket: info.ticket)
             return nil
         }
         missingSince = nil
         return Frame(info: info, texture: texture, event: displayEvent, eventValue: displayEventValue,
                      report: bridge.report + "\n" + timing)
+    }
+    // A flip whose buffer has no picture yet: done for the game (flip event,
+    // current buffer), black on screen, not counted as displayed.
+    private func retireBlank(ticket: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        guard let engine, !stopped else { return }
+        if maxps4_fex_engine_videoout_complete(engine, ticket, 1) == 0 { blankFlips += 1 }
     }
     @discardableResult func complete(ticket: UInt64, presented: Bool) -> Bool {
         lock.lock(); defer { lock.unlock() }

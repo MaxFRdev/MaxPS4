@@ -3159,6 +3159,18 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                     detail += held.empty() ? " (verrou inconnu)" : " " + held;
                 }
             }
+            if (seconds >= 2 && raw == uint32_t(maxps4::PS4KernelService::sema_wait)) {
+                const std::string state = engine->libkernel.threads().describe_sema(argument);
+                char where[64];
+                std::snprintf(where, sizeof where, " · sémaphore 0x%llx ", (unsigned long long)argument);
+                detail = where + (state.empty() ? std::string("inconnu") : state);
+            }
+            if (seconds >= 2 && raw == uint32_t(maxps4::PS4KernelService::equeue_wait)) {
+                const std::string state = engine->libkernel.threads().describe_equeue(argument);
+                char where[64];
+                std::snprintf(where, sizeof where, " · file 0x%llx ", (unsigned long long)argument);
+                detail = where + (state.empty() ? std::string("inconnue") : state);
+            }
             out += line + detail + "\n";
             continue;
         }

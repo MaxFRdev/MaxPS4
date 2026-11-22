@@ -1,6 +1,7 @@
 #include "maxps4_ps4_threads.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 
 namespace maxps4 {
 using namespace ps4;
@@ -934,4 +935,26 @@ std::string maxps4::PS4Threads::describe_mutex(uint64_t slot) {
     if (!mutex) return {};
     return "détenu par le thread " + std::to_string(mutex->owner) + ", type " + std::to_string(mutex->type) +
            ", " + std::to_string(mutex->count) + " fois";
+}
+std::string maxps4::PS4Threads::describe_sema(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(guard_);
+    for (const auto& sema : semas_)
+        if (sema.token && sema.token == handle)
+            return "compte " + std::to_string(sema.count) + "/" + std::to_string(sema.max) +
+                   ", " + std::to_string(sema.waiters) + " en attente";
+    return {};
+}
+std::string maxps4::PS4Threads::describe_equeue(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(guard_);
+    const Equeue* queue = find_equeue(handle);
+    if (!queue) return {};
+    std::string out;
+    for (const auto& event : queue->events) {
+        if (!event.used) continue;
+        char item[64];
+        std::snprintf(item, sizeof item, "%s%d/0x%llx%s", out.empty() ? "" : " ", int(event.filter),
+                      (unsigned long long)event.id, event.triggered ? "!" : "");
+        out += item;
+    }
+    return out.empty() ? "aucun événement" : "événements " + out;
 }
