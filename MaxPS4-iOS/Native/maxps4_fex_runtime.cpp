@@ -131,7 +131,7 @@ public:
     // Per guest thread: the HLE call in progress, or the last one and when it
     // returned, so a stalled game shows where each of its threads waits.
     struct Activity {
-        std::atomic<uint64_t> thread {0}, since {0}, returned {0}, argument {0}; // argument: RDI of the call.
+        std::atomic<uint64_t> thread {0}, since {0}, returned {0}, argument {0}, caller {0}; // argument: RDI of the call; caller: its return address.
         std::atomic<uint32_t> service {0};
         std::atomic<bool> inside {false};
     };
@@ -247,7 +247,13 @@ public:
                 }
             }
             Activity* slot = activity_slot();
-            if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->argument = call.rdi; slot->since = now_ns(); slot->inside = true; }
+            if (slot) {
+                // The thunk is reached by the import's JMP: [RSP] is the game's return address.
+                uint64_t back = 0;
+                if (!memory->read(logical(rsp), &back, sizeof(back))) back = 0;
+                slot->service = static_cast<uint32_t>(orbis); slot->argument = call.rdi; slot->caller = logical(back);
+                slot->since = now_ns(); slot->inside = true;
+            }
             const uint64_t timed_from = timing && timing->enabled() ? now_ns() : 0;
             if (timed_from && (orbis == maxps4::PS4KernelService::video_submit ||
                                orbis == maxps4::PS4KernelService::gnm_submit_flip ||
@@ -1750,7 +1756,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     engine->probe.private_stack_size = page;
     engine->probe.calls = 0;
     engine->probe.callback_error = 0;
-    for (auto& a : engine->probe.activity) { a.thread = 0; a.inside = false; a.returned = 0; }
+    for (auto& a : engine->probe.activity) { a.thread = 0; a.inside = false; a.returned = 0; a.caller = 0; }
     { std::lock_guard<std::mutex> guard(engine->probe.recent_lock); engine->probe.recent_next = 0; }
     struct ClearRange {
         ProbeAddressSpace& space;
@@ -3171,12 +3177,17 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                 std::snprintf(where, sizeof where, " · file 0x%llx ", (unsigned long long)argument);
                 detail = where + (state.empty() ? std::string("inconnue") : state);
             }
+            if (const uint64_t caller = a.caller.load()) {
+                char from[48];
+                std::snprintf(from, sizeof from, " ← 0x%llx", (unsigned long long)caller);
+                detail += from;
+            }
             out += line + detail + "\n";
             continue;
         }
         else
-            std::snprintf(line, sizeof line, "thread %llu : code du jeu depuis %.1f s, dernier %s (%llu appels)\n",
-                (unsigned long long)thread, seconds, name, returned);
+            std::snprintf(line, sizeof line, "thread %llu : code du jeu depuis %.1f s, dernier %s (%llu appels) ← 0x%llx\n",
+                (unsigned long long)thread, seconds, name, returned, (unsigned long long)a.caller.load());
         out += line;
     }
     const size_t n = std::min(capacity - 1, out.size());
