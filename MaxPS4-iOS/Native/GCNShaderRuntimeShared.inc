@@ -379,4 +379,13 @@ GCN_FN float4 gcn_image_load(GCNMemory M, GCNRes8 t, uint x, uint y) {
     if (((t.d[3] >> 20) & 0x1fu) != 8u || x >= w || y >= h) return float4(0.0f, 0.0f, 0.0f, 0.0f);
     return gcn_texel(M, t, int(x), int(y));
 }
+// A depth-compare sample: the reference against the fetched depth by the
+// S# DEPTH_COMPARE_FUNC (0 never ... 7 always), 1.0 where it passes.
+GCN_FN float4 gcn_depth_compare(float4 c, float q, uint f) {
+    float z = c[0];
+    bool p = f == 7u || (f == 1u && q < z) || (f == 2u && q == z) || (f == 3u && q <= z) ||
+             (f == 4u && q > z) || (f == 5u && q != z) || (f == 6u && q >= z);
+    float r = p ? 1.0f : 0.0f;
+    return float4(r, r, r, r);
+}
 )

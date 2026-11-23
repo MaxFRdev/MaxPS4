@@ -754,16 +754,25 @@ private:
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
         const unsigned op = i.opcode;
         unsigned first = 0;
-        if (op == 37 || op == 38 || op == 53 || op == 54) first = 1;
+        // Address order: offset (_O), bias (_B), depth reference (_C), coordinates.
+        const bool compare = (op >= 40 && op < 48) || (op >= 56 && op < 64);
+        const unsigned base = op & ~16u;
+        if (base == 37 || base == 38 || base == 45 || base == 46) first = 1;
         if (op >= 48 && op < 64) first += 1;
-        if ((op >= 40 && op < 48) || (op >= 56 && op < 64)) return fail("depth-compare sampling");
+        const unsigned reference = first;
+        if (compare) first += 1;
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
         std::string call;
         if (op >= 32 && op < 64) {
-            res += "GCNRes4 sm = {{" + s(samp) + ", " + s(samp + 1) + ", " + s(samp + 2) + ", " + s(samp + 3) + "}}; ";
+            // A depth-compare sample (shadow maps) reads the depth without the
+            // S# comparison, then compares the reference with it by the S#
+            // DEPTH_COMPARE_FUNC: 1.0 where it passes, 0.0 where not.
+            res += "GCNRes4 sm = {{" + s(samp) + (compare ? " & ~0x7000u" : "") + ", " + s(samp + 1) + ", " + s(samp + 2) + ", " + s(samp + 3) + "}}; ";
             call = "gcn_sample(M, t, sm, " + std::string(((w >> 12) & 1) ? "true" : "false") + ", gf(" + v(vaddr + first) + "), gf(" +
                    v(vaddr + first + 1) + "))";
+            if (compare)
+                call = "gcn_depth_compare(" + call + ", gf(" + v(vaddr + reference) + "), (" + s(samp) + " >> 12) & 7u)";
         } else if (op == 0 || op == 1) {
             call = "gcn_image_load(M, t, " + v(vaddr) + ", " + v(vaddr + 1) + ")";
         } else if (op == 8 || op == 9) {
