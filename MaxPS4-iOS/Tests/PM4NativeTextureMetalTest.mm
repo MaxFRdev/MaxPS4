@@ -406,6 +406,44 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
             std::printf("BC%u tile 13: worst difference with the shader's decode %u, %zu bytes over 2\n", dfmt == 35 ? 1 : 3, worst, far);
             assert(worst <= 4 && far * 100 < fast.size() && fast != refused);
         }
+        // 3e. Uncompressed T#s in tile mode 13, as Call of Duty's interface (a
+        //     tiled 1x1 white, 8_8 masks): copied once, untiled, into a texture
+        //     Metal filters, as close to the shader's own untiled read (the
+        //     reference, refused sampler) as 8-bit filtering allows.
+        for (unsigned dfmt : {10u, 3u}) {
+            constexpr unsigned tileW = 64, tileH = 32;
+            const unsigned bytes = tileW * tileH * (dfmt == 10 ? 4 : 2);
+            for (unsigned n = 0; n < bytes / 4; ++n) arena.put(image + 4 * n, noise(n * 5 + dfmt));
+            auto drawn = [&](bool nativeOnly, uint32_t sampler) {
+                PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
+                renderer.nativeSamplesOnly = nativeOnly;
+                const uint32_t tiled[12] = {std::uint32_t(image >> 8), dfmt << 20, (tileW - 1) | ((tileH - 1) << 14), 0x90d00facu,
+                                            (tileW - 1) << 13, 0, 0, 0, sampler, 0, 0x500000, 0};
+                std::memcpy(d.psUser, tiled, sizeof tiled);
+                id<MTLCommandBuffer> commands = [queue commandBuffer];
+                const bool encoded = renderer.encode(d, commands);
+                if (!encoded) std::printf("tiled T#: %s
+", renderer.error.c_str());
+                assert(encoded);
+                [commands commit]; [commands waitUntilCompleted];
+                assert(commands.status == MTLCommandBufferStatusCompleted && !commands.error);
+                if (nativeOnly && !(sampler >> 12)) assert(renderer.nativeDraws == 1 && renderer.microTiledCopies == 1);
+                return pixels(renderer.target(target));
+            };
+            const uint32_t clamp = 2 | (2 << 3);
+            const auto fast = drawn(true, clamp);
+            const auto slow = drawn(false, clamp | (1 << 12));
+            const auto refused = drawn(true, clamp | (1 << 12));
+            unsigned worst = 0;
+            std::size_t far = 0;
+            for (std::size_t k = 0; k < fast.size(); ++k) {
+                const unsigned difference = unsigned(std::abs(int(fast[k]) - int(slow[k])));
+                worst = std::max(worst, difference); far += difference > 2;
+            }
+            std::printf("dfmt %u tile 13: worst difference with the shader's untiled read %u, %zu bytes over 2
+", dfmt, worst, far);
+            assert(worst <= 2 && fast != refused);
+        }
         for (unsigned n = 0; n < imageW * imageH; ++n) arena.put(image + 4 * n, noise(n + 7));
         {
             const uint32_t linear[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,

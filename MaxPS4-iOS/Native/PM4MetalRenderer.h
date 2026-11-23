@@ -145,6 +145,7 @@ public:
     unsigned nativeDraws = 0; // draws given a native texture (nativeTextures)
     unsigned nativeViews = 0; // native textures given to those draws, up to 3 each
     unsigned targetReads = 0; // of which, a colour target an earlier draw rendered
+    unsigned microTiledCopies = 0; // micro-tiled T#s copied into a linear texture
     // T#s refused: none captured (per draw), format/tiling, outside the copied
     // ranges, alignment, Metal view refused; and the last refused T#.
     unsigned nativeMisses[5] = {};
@@ -258,6 +259,10 @@ private:
     std::uint64_t batchSerial_ = 0;
     std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, Decoded> bc7Textures_;
     id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt);
+    id<MTLTexture> microTiledTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch,
+                                     unsigned dfmt, unsigned tiling);
+    std::map<std::uint64_t, int> constantFillPrograms_;
+    bool constantFillProgram(std::uint64_t address);
     std::uint64_t decodedBytes_ = 0;
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
     std::map<std::uint64_t, bool> fillPrograms_;

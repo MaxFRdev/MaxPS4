@@ -928,6 +928,29 @@ int main() {
         fill(fillGuest,64,fillMulCS);
         if (![barrier.report containsString:@"remplissages 3 "]) std::printf("FAIL multiplying fill not recognised:\n%s\n", barrier.report.UTF8String);
         assert([barrier.report containsString:@"remplissages 3 "]);
+        // Call of Duty's variant: the value is the constant buffer's dword 0,
+        // the count the output V#'s NUM_RECORDS (8 user SGPRs).
+        constexpr std::uint64_t constantCS = 0x12600, constantValue = 0x12340, constantGuest = fillGuest + 0x400;
+        computeArena.code(constantCS, {0xbeeb03ff, 0x9, 0xc2020500, 0x936ac008, 0xd2ba0000, 0x0401006a, 0xbf8c007f,
+                                       0x7e020204, 0xd1a80004, 0x00020002, 0xe0102000, 0x80000100, 0xbf810000});
+        computeArena.put(constantValue, 0x3f800000);
+        {
+            constexpr std::uint32_t count = 100;
+            Stream stream;
+            stream.set(0x76,0x207,{64,1,1});
+            stream.set(0x76,0x20c,{std::uint32_t(constantCS>>8),0});
+            stream.set(0x76,0x213,{0x90}); // 8 user SGPRs, thread group id x
+            stream.set(0x76,0x240,{std::uint32_t(constantGuest),4u<<16,count,0x18024004,
+                                   std::uint32_t(constantValue),16u<<16,1,0x20077fac});
+            stream.words.insert(stream.words.end(),{0xc0031500U,(count+63)/64,1,1,1});
+            assert([barrier submit:stream.words.data() count:stream.words.size()] == 0);
+            if (![barrier.report containsString:@"remplissages 4 "]) std::printf("FAIL constant fill not recognised:
+%s
+", barrier.report.UTF8String);
+            assert([barrier.report containsString:@"remplissages 4 "]);
+            std::uint32_t edge[3]; assert(computeArena.memory.read(constantGuest,edge,4) && computeArena.memory.read(constantGuest+(count-1)*4,edge+1,8));
+            assert(edge[0] == 0x3f800000 && edge[1] == 0x3f800000 && edge[2] == 0);
+        }
         std::puts("PASS fill dispatches reach guest memory and targets without a kernel");
         const uint32_t bad[]={0};
         assert([bridge submit:bad count:1]!=0 && bridge.failure);

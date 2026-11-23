@@ -119,8 +119,8 @@ struct GameMetalState {
     NSString* report() const {
         const unsigned* m = renderer.nativeMisses;
         NSString* native = nativeTextures ? [NSString stringWithFormat:
-            @"\nTextures natives : %u dessins, %u textures (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
-            renderer.nativeDraws, renderer.nativeViews, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
+            @"\nTextures natives : %u dessins, %u textures (%u images rendues par le GPU, %u copies détuilées) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
+            renderer.nativeDraws, renderer.nativeViews, renderer.targetReads, renderer.microTiledCopies, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
         if (nativeTextures && !renderer.nativeLastPlane.empty())
             native = [native stringByAppendingFormat:@"\nDernier plan vidéo vu par Metal : %s", renderer.nativeLastPlane.c_str()];

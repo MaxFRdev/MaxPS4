@@ -2,6 +2,7 @@
 #include "GCNTranslator.hpp"
 #include "PM4ResourceScan.hpp"
 #include "PM4Blend.hpp"
+#include "GCNTiling.hpp"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wall"
 #pragma clang diagnostic ignored "-Wextra"
@@ -384,11 +385,35 @@ bool PM4MetalRenderer::fillProgram(std::uint64_t address) {
     return fillPrograms_[address] = same;
 }
 
+// Call of Duty's buffer fill: out[i] = constant buffer dword 0, for i below
+// the output V#'s NUM_RECORDS (8 user SGPRs: output V#, constant V#).
+bool PM4MetalRenderer::constantFillProgram(std::uint64_t address) {
+    const auto known = constantFillPrograms_.find(address);
+    if (known != constantFillPrograms_.end()) return known->second;
+    static const char* const expected[] = {
+        "s_mov_b32 vcc_hi, 0x9", "s_buffer_load_dword s4, s[4:7], 0x0", "s_mul_i32 vcc_lo, s8, 64",
+        "v_sad_u32 v0, vcc_lo, 0, v0", "s_waitcnt lgkmcnt(0)", "v_mov_b32 v1, s4", "v_cmpx_gt_u32 s[4:5], s2, v0",
+        "buffer_store_format_x v1, v0, s[0:3], 0 idxen", "s_endpgm"};
+    std::uint32_t words[24] = {};
+    bool same = code_.read(address, words, sizeof words);
+    std::size_t at = 0;
+    for (const char* line : expected) {
+        GCNInstruction i;
+        if (!same || decodeGCNInstruction(words + at, 24 - at, at, i) != GCNError::none) { same = false; break; }
+        const std::string text = gcnDisassemble(i);
+        if (text != line && !(line == expected[2] && text == "s_lshl_b32 vcc_lo, s8, 6")) { same = false; break; }
+        at += i.size;
+    }
+    return constantFillPrograms_[address] = same;
+}
+
 // A fill without its kernel, whose lanes cost far more than the stores: a blit
 // into a target, or a write to guest memory. False: run it as any dispatch.
 bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> commands) {
-    if (c.userCount != 12 || (c.rsrc2 & 0x380) != 0x80 || c.threads[0] != 64 || c.threads[1] != 1 || c.threads[2] != 1 ||
-        c.groups[1] != 1 || c.groups[2] != 1 || !fillProgram(c.program)) return false;
+    if ((c.rsrc2 & 0x380) != 0x80 || c.threads[0] != 64 || c.threads[1] != 1 || c.threads[2] != 1 ||
+        c.groups[1] != 1 || c.groups[2] != 1) return false;
+    const bool table = c.userCount == 12 && fillProgram(c.program);
+    if (!table && !(c.userCount == 8 && constantFillProgram(c.program))) return false;
     // A fill that goes to its kernel costs a GPU wait: the report says why.
     auto refuse = [&](const char* why, std::uint64_t at = 0, std::uint64_t length = 0) {
         ++fillsRefused;
@@ -402,13 +427,23 @@ bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> c
         return ((c.user[k + 1] >> 16) & 0x3fff) == 4 && !(c.user[k + 1] >> 30) && (c.user[k + 3] & 7) == 4 &&
                ((c.user[k + 3] >> 12) & 7) == 4 && ((c.user[k + 3] >> 15) & 15) == 4;
     };
-    std::uint32_t limits[2], value = 0; // Count and mask.
-    if (!dwords(0) || !dwords(4)) return refuse("format", base(4));
-    if (!c.user[10] || !code_.read(base(8), limits, sizeof limits)) return refuse("limites illisibles", base(8));
-    if (limits[1]) return refuse("motif de plusieurs valeurs", base(4), limits[1]);
-    if (c.user[2] && !code_.read(base(0), &value, 4)) return refuse("valeur illisible", base(0));
-    const std::uint64_t bytes = 4 * std::min<std::uint64_t>({std::uint64_t(c.groups[0]) * 64, limits[0], c.user[6]});
-    const std::uint64_t address = base(4);
+    std::uint32_t value = 0;
+    std::uint64_t bytes = 0, address = 0;
+    if (table) {
+        std::uint32_t limits[2]; // Count and mask.
+        if (!dwords(0) || !dwords(4)) return refuse("format", base(4));
+        if (!c.user[10] || !code_.read(base(8), limits, sizeof limits)) return refuse("limites illisibles", base(8));
+        if (limits[1]) return refuse("motif de plusieurs valeurs", base(4), limits[1]);
+        if (c.user[2] && !code_.read(base(0), &value, 4)) return refuse("valeur illisible", base(0));
+        bytes = 4 * std::min<std::uint64_t>({std::uint64_t(c.groups[0]) * 64, limits[0], c.user[6]});
+        address = base(4);
+    } else {
+        // The lanes below NUM_RECORDS (user[2]) store the constant buffer's dword 0.
+        if (!dwords(0)) return refuse("format", base(0));
+        if (!code_.read(base(4), &value, 4)) return refuse("valeur illisible", base(4));
+        bytes = 4 * std::min<std::uint64_t>(std::uint64_t(c.groups[0]) * 64, c.user[2]);
+        address = base(0);
+    }
     if (!bytes || bytes > (256ull << 20)) return refuse("taille", address, bytes);
     auto overlaps = [&](std::uint64_t at, std::uint64_t length) { return address < at + length && at < address + bytes; };
     Target* target = nullptr;
@@ -791,6 +826,56 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     return texture;
 }
 
+// An uncompressed T# in 1D micro tiling (index 5, 9 or 13: 8x8-element tiles,
+// GCNTiling.hpp) copied once into a linear texture of the same format, so the
+// shader samples it natively instead of untiling every texel it reads (Call of
+// Duty's interface draws from a tiled 1x1 white and tiled 8_8 textures).
+// `dfmt`: 10 (8_8_8_8), 16 (5_6_5), 3 (8_8) or 1 (8).
+id<MTLTexture> PM4MetalRenderer::microTiledTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch,
+                                                   unsigned dfmt, unsigned tiling) {
+    const unsigned bytesPer = dfmt == 10 ? 4 : dfmt == 16 || dfmt == 3 ? 2 : 1;
+    const std::uint64_t bytes = maxps4::gpu::gcnSurfaceBytes(tiling, unsigned(pitch), unsigned(height), bytesPer);
+    if (!bytes || bytes > (64ull << 20) || pitch < width) return nil;
+    const auto key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32 | std::uint64_t(tiling) << 40 | 1ull << 48, height);
+    const auto found = bc7Textures_.find(key);
+    if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
+    // Small surfaces are compared whole, large ones by 16 bytes of every 4 KiB,
+    // once a batch, to tell whether they changed since they were copied.
+    std::uint64_t mark = 1469598103934665603ull;
+    std::vector<std::uint8_t> tiled;
+    if (bytes <= (256ull << 10)) {
+        tiled.resize(bytes);
+        copyGuest(base, tiled.data(), bytes);
+        for (const std::uint8_t byte : tiled) mark = (mark ^ byte) * 1099511628211ull;
+    } else {
+        for (std::uint64_t at = 0; at < bytes; at += 4096) {
+            std::uint8_t sample[16] = {};
+            copyGuest(base + at, sample, std::min<std::uint64_t>(bytes - at, sizeof sample));
+            for (const std::uint8_t byte : sample) mark = (mark ^ byte) * 1099511628211ull;
+        }
+    }
+    if (found != bc7Textures_.end() && found->second.mark == mark) { found->second.batch = batchSerial_; return found->second.texture; }
+    if (tiled.empty()) { tiled.resize(bytes); copyGuest(base, tiled.data(), bytes); }
+    const std::uint64_t rowBytes = width * bytesPer;
+    std::vector<std::uint8_t> pixels(rowBytes * height);
+    for (std::uint64_t y = 0; y < height; ++y)
+        for (std::uint64_t x = 0; x < width; ++x)
+            std::memcpy(pixels.data() + y * rowBytes + x * bytesPer,
+                        tiled.data() + maxps4::gpu::gcnElementOffset(tiling, unsigned(x), unsigned(y), unsigned(pitch), bytesPer), bytesPer);
+    const MTLPixelFormat format = dfmt == 10 ? MTLPixelFormatRGBA8Unorm : dfmt == 16 ? MTLPixelFormatB5G6R5Unorm :
+                                  dfmt == 3 ? MTLPixelFormatRG8Unorm : MTLPixelFormatR8Unorm;
+    auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
+    if (!texture) return nil;
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
+    decodedBytes_ += rowBytes * height;
+    if (bc7Textures_.size() >= 512 || decodedBytes_ > (256ull << 20)) { bc7Textures_.clear(); decodedBytes_ = rowBytes * height; }
+    bc7Textures_[key] = {texture, mark, batchSerial_};
+    ++microTiledCopies;
+    return texture;
+}
+
 id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
                                                const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing) {
     // dfmt 8_8_8_8 or 5_6_5 (gcn_texel_at reads both as unorm whatever the nfmt), linear tiling.
@@ -823,6 +908,12 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
             ++targetReads;
             return texture;
         }
+    }
+    // 8_8_8_8, 5_6_5, 8_8 or 8 in 1D micro tiling: copied once, untiled.
+    if (const unsigned tiling = (t[3] >> 20) & 31; maxps4::gpu::gcnMicroTiled(tiling) &&
+        (dfmt == 10 || dfmt == 16 || ((dfmt == 3 || dfmt == 1) && ((t[1] >> 26) & 15) == 0))) {
+        id<MTLTexture> copied = microTiledTexture(base, width, height, pitch, dfmt, tiling);
+        return copied ? copied : miss(4, 0);
     }
     // 8_8_8_8, 5_6_5 or 8 (video planes): read, and filtered by Metal's sampler, through a view.
     if ((dfmt != 10 && dfmt != 16 && dfmt != 1) || (dfmt == 1 && ((t[1] >> 26) & 15) != 0) ||
