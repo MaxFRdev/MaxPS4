@@ -78,6 +78,7 @@ struct GameMetalState {
     id<MTLSharedEvent> displayEvent;
     std::atomic<uint64_t> displayEventValue{0};
     std::string error;
+    std::string drawRefusal;
     // Keep at most two render submissions ahead of the GPU. Metal preserves
     // queue order; upload buffers remain owned by their command buffers.
     std::deque<id<MTLCommandBuffer>> inflight;
@@ -142,7 +143,8 @@ struct GameMetalState {
             samples.c_str(), lastDraws.empty() ? " aucun" : lastDraws.c_str(), renderer.programListings.c_str(), (stats.lastSkipped + stats.depthReport() + renderer.depthReport()).c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
             encodeMs, gpuText(renderGpuMs), waitMs, copyMs, gpuText(copyGpuMs), native,
             // Why rendering stopped (the draw that failed is in no batch list).
-            error.empty() ? @"" : [NSString stringWithFormat:@"\nÉchec Metal : %s", error.c_str()]];
+            error.empty() ? (drawRefusal.empty() ? @"" : [NSString stringWithFormat:@"\nDernier dessin écarté : %s", drawRefusal.c_str()])
+                          : [NSString stringWithFormat:@"\nÉchec Metal : %s", error.c_str()]];
     }
     GameMetalState(id<MTLDevice> device, MaxPS4GameMemoryReader reader,
                    MaxPS4GameMemoryWriter writer, bool nativeTextures)
@@ -316,7 +318,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         s.enter(3);
         s.collector.execute(words, count, [&](const PM4Draw& draw) {
             ++s.phaseDraw; s.phasePS = draw.ps;
-            if (s.stats.failed != failed || barrierFailure) return;
+            if (barrierFailure) return;
             if (s.renderer.encode(draw, command)) { ++s.stats.rendered; segmentEncoded = true; if (timing) timeDraw(draw.ps); }
             else {
                 char where[96];
@@ -326,7 +328,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             }
         }, [&](const PM4Dispatch& dispatch) {
             // A dispatch that cannot run is skipped, as before compute support.
-            if (s.stats.failed != failed || barrierFailure) return;
+            if (barrierFailure) return;
             const unsigned encodedBefore = s.renderer.dispatchesEncoded;
             if (s.renderer.dispatch(dispatch, command)) {
                 ++s.computeRun;
@@ -351,7 +353,10 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             }
         }
         if (barrierFailure) return -EIO;
-        if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }
+        // A draw that cannot be collected or encoded is left out and the game
+        // keeps running (CoD's loading screens ended on one unreadable index
+        // buffer); the report keeps the latest reason.
+        if (s.stats.failed != failed) s.drawRefusal = s.stats.last;
         const double encoding = elapsedMs(encodingStarted);
         const bool hasRenderWork = segmentEncoded || s.stats.rendered != rendered;
         if (hasRenderWork) {

@@ -284,7 +284,7 @@ int main() {
     auto reject = [](const std::vector<std::uint32_t>& words, const char* error, unsigned reads = 0) {
         Fixture f;
         f.run(words);
-        assert(f.stats.failed == 1 && f.stats.error == error && f.draws.empty() && f.reads == reads);
+        assert(f.stats.failed == 1 && f.stats.error.rfind(error, 0) == 0 && f.draws.empty() && f.reads == reads);
     };
     reject({0xc0016900, 0x2a5, 1, 0xc0042700, 3, 0x10000, 0, 3, 0}, "primitive restart topology", 1);
     {

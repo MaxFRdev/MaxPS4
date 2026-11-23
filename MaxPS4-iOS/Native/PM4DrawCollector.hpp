@@ -43,7 +43,9 @@ struct PM4DrawStats {
         }
         return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
     }
-    void fail(const std::string& message) { ++failed; if (error.empty()) error = message; }
+    // error: the first failure; last: the latest (the host skips failed draws).
+    std::string last;
+    void fail(const std::string& message) { ++failed; if (error.empty()) error = message; last = message; }
 };
 struct PM4Draw {
     std::uint64_t vs = 0, ps = 0;                     // program addresses
@@ -302,7 +304,11 @@ private:
         d.indices.resize(count);
         if (indexed) {
             std::vector<std::uint8_t> bytes(std::size_t(count) * indexBytes_);
-            if (!memory_.read(indexAddress, bytes.data(), bytes.size())) { stats_.fail("unreadable index buffer"); return; }
+            if (!memory_.read(indexAddress, bytes.data(), bytes.size())) {
+                char where[96];
+                std::snprintf(where, sizeof where, " 0x%llx (%u index de %u octets)", (unsigned long long)indexAddress, count, indexBytes_);
+                stats_.fail(std::string("unreadable index buffer") + where); return;
+            }
             for (std::uint32_t k = 0; k < count; ++k) {
                 std::uint32_t value = 0;
                 std::memcpy(&value, bytes.data() + std::size_t(k) * indexBytes_, indexBytes_);
