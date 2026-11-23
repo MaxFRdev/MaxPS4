@@ -58,7 +58,7 @@ EXTRA = {
         # one can't be allocated later (CoD filled 16 MiB during its start).
         ('  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;',
          '''#if defined(__APPLE__) && TARGET_OS_IPHONE
-  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 128;
+  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 512;
 #else
   static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;
 #endif'''),
