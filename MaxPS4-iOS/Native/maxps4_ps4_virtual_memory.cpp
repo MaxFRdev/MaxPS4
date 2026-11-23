@@ -159,6 +159,7 @@ void PS4VirtualMemory::insert(Region region) {
     regions_.insert(at, std::move(region));
 }
 bool PS4VirtualMemory::query(uint64_t address, bool next, uint64_t& start, uint64_t& end, uint32_t& protection) const {
+    std::lock_guard<std::recursive_mutex> held(lock_);
     // The page holding `address` or, with `next`, the first mapped one after it.
     const Region* best = nullptr;
     size_t first = 0;
@@ -206,6 +207,7 @@ bool PS4VirtualMemory::host_protect(uint64_t address, uint64_t length, uint8_t p
 }
 Error PS4VirtualMemory::map(uint64_t hint, uint64_t length, uint32_t protection,
     uint32_t flags, int32_t descriptor, int64_t offset, uint64_t& result) {
+    std::lock_guard<std::recursive_mutex> held(lock_);
     // Anonymous PRIVATE only, never file mappings. General images (host
     // pages) also take an address hint and MAP_FIXED (0x10); bounded images
     // take neither: never pretend to implement them.
@@ -236,6 +238,7 @@ void PS4VirtualMemory::release(uint64_t address, uint64_t size) {
 }
 Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
     bool fixed, uint64_t& result) {
+    std::lock_guard<std::recursive_mutex> held(lock_);
     // Refusals are recorded too (result 0, the PS4 error): a game that runs
     // out of memory usually only says so in its own way (Mortal Kombat's
     // video decoder: VPX_CODEC_MEM_ERROR).
@@ -468,6 +471,7 @@ bool PS4VirtualMemory::pieces(uint64_t address, uint64_t size, std::vector<std::
     return true;
 }
 Error PS4VirtualMemory::unmap(uint64_t address, uint64_t length) {
+    std::lock_guard<std::recursive_mutex> held(lock_);
     uint64_t size;
     if (address % page_size || !rounded(length, size)) return inval;
     std::vector<std::pair<uint64_t, uint64_t>> spans;
@@ -513,6 +517,7 @@ Error PS4VirtualMemory::unmap_one(uint64_t address, uint64_t size) {
     return ok;
 }
 Error PS4VirtualMemory::protect(uint64_t address, uint64_t length, uint32_t protection) {
+    std::lock_guard<std::recursive_mutex> held(lock_);
     uint8_t permission;
     Error e = permissions(protection, permission);
     if (e) return e;
@@ -533,6 +538,7 @@ Error PS4VirtualMemory::protect_one(uint64_t address, uint64_t size, uint8_t per
     return ok;
 }
 void PS4VirtualMemory::reset() {
+    std::lock_guard<std::recursive_mutex> held(lock_);
     // Host pages go back to PROT_NONE (and zero) only while they still lie in
     // the current image's window; a cleared image already released them.
     for (const auto& region : regions_) {
@@ -542,6 +548,7 @@ void PS4VirtualMemory::reset() {
     regions_.clear(); used_ = 0;
 }
 size_t PS4VirtualMemory::contiguous(uint64_t address, size_t limit, uint32_t permissions) const {
+    std::lock_guard<std::recursive_mutex> held(lock_);
     if (!limit || !permissions || (permissions & ~7U)) return 0;
     size_t r = holding(address);
     if (r == SIZE_MAX) return 0;
@@ -573,6 +580,7 @@ size_t PS4VirtualMemory::contiguous(uint64_t address, size_t limit, uint32_t per
     return total;
 }
 const uint8_t* PS4VirtualMemory::translate(uint64_t address, size_t size, uint32_t permissions) const {
+    std::lock_guard<std::recursive_mutex> held(lock_);
     if (!size || contiguous(address, size, permissions) != size) return nullptr;
     const size_t r = holding(address);
     return r == SIZE_MAX ? nullptr : regions_[r].data + (address - regions_[r].address);

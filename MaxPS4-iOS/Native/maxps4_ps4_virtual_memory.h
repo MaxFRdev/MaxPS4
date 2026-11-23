@@ -91,6 +91,9 @@ private:
         bool outside = false;
     };
     const GuestELF& image_;
+    // Guest threads read guest memory (HLE services) while another maps it:
+    // an insert reallocates regions_, so every public call holds this.
+    mutable std::recursive_mutex lock_;
     std::vector<Region> regions_;
     size_t used_ = 0;
     uint64_t placement_end_ = 0;
