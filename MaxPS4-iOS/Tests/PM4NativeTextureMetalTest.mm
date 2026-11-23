@@ -422,8 +422,7 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                 std::memcpy(d.psUser, tiled, sizeof tiled);
                 id<MTLCommandBuffer> commands = [queue commandBuffer];
                 const bool encoded = renderer.encode(d, commands);
-                if (!encoded) std::printf("tiled T#: %s
-", renderer.error.c_str());
+                if (!encoded) std::printf("tiled T#: %s\n", renderer.error.c_str());
                 assert(encoded);
                 [commands commit]; [commands waitUntilCompleted];
                 assert(commands.status == MTLCommandBufferStatusCompleted && !commands.error);
@@ -440,8 +439,7 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
                 const unsigned difference = unsigned(std::abs(int(fast[k]) - int(slow[k])));
                 worst = std::max(worst, difference); far += difference > 2;
             }
-            std::printf("dfmt %u tile 13: worst difference with the shader's untiled read %u, %zu bytes over 2
-", dfmt, worst, far);
+            std::printf("dfmt %u tile 13: worst difference with the shader's untiled read %u, %zu bytes over 2\n", dfmt, worst, far);
             assert(worst <= 2 && fast != refused);
         }
         for (unsigned n = 0; n < imageW * imageH; ++n) arena.put(image + 4 * n, noise(n + 7));

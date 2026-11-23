@@ -944,9 +944,7 @@ int main() {
                                    std::uint32_t(constantValue),16u<<16,1,0x20077fac});
             stream.words.insert(stream.words.end(),{0xc0031500U,(count+63)/64,1,1,1});
             assert([barrier submit:stream.words.data() count:stream.words.size()] == 0);
-            if (![barrier.report containsString:@"remplissages 4 "]) std::printf("FAIL constant fill not recognised:
-%s
-", barrier.report.UTF8String);
+            if (![barrier.report containsString:@"remplissages 4 "]) std::printf("FAIL constant fill not recognised:\n%s\n", barrier.report.UTF8String);
             assert([barrier.report containsString:@"remplissages 4 "]);
             std::uint32_t edge[3]; assert(computeArena.memory.read(constantGuest,edge,4) && computeArena.memory.read(constantGuest+(count-1)*4,edge+1,8));
             assert(edge[0] == 0x3f800000 && edge[1] == 0x3f800000 && edge[2] == 0);
