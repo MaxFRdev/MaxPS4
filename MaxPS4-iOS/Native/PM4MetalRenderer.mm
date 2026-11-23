@@ -773,6 +773,43 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     return texture;
 }
 
+// An uncompressed T# in tile mode 13 (Thin_1dThin, non-displayable micro
+// tiles: 8x8 pixels, x0 y0 x1 y1 x2 y2 order) read into a linear texture.
+id<MTLTexture> PM4MetalRenderer::thinTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt) {
+    const std::uint64_t pixelBytes = dfmt == 3 ? 2 : 4;
+    const std::uint64_t tilesWide = (pitch + 7) / 8, tilesHigh = (height + 7) / 8;
+    const std::uint64_t bytes = tilesWide * tilesHigh * 64 * pixelBytes;
+    if (!bytes || bytes > (64ull << 20) || width > pitch) return nil;
+    const auto key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32, height);
+    const auto found = bc7Textures_.find(key);
+    if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
+    std::uint64_t mark = 1469598103934665603ull;
+    for (std::uint64_t at = 0; at < bytes; at += 4096) {
+        std::uint8_t sample[16] = {};
+        copyGuest(base + at, sample, std::min<std::uint64_t>(bytes - at, sizeof sample));
+        for (const std::uint8_t byte : sample) mark = (mark ^ byte) * 1099511628211ull;
+    }
+    if (found != bc7Textures_.end() && found->second.mark == mark) { found->second.batch = batchSerial_; return found->second.texture; }
+    std::vector<std::uint8_t> tiled(bytes);
+    copyGuest(base, tiled.data(), bytes);
+    const std::uint64_t rowBytes = width * pixelBytes;
+    std::vector<std::uint8_t> pixels(rowBytes * height);
+    for (std::uint64_t y = 0; y < height; ++y) for (std::uint64_t x = 0; x < width; ++x) {
+        const std::uint64_t morton = (x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3;
+        const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * pixelBytes;
+        std::memcpy(pixels.data() + y * rowBytes + x * pixelBytes, tiled.data() + at, pixelBytes);
+    }
+    auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:dfmt == 3 ? MTLPixelFormatRG8Unorm : MTLPixelFormatRGBA8Unorm
+                                                                          width:width height:height mipmapped:NO];
+    descriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
+    if (!texture) return nil;
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
+    if (bc7Textures_.size() >= 32) bc7Textures_.clear();
+    bc7Textures_[key] = {texture, mark, batchSerial_};
+    return texture;
+}
+
 id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8>& t, id<MTLBuffer> memory, id<MTLBuffer> const* slots,
                                                const std::uint64_t* ranges, unsigned rangeCount, id<MTLTexture> drawing) {
     // dfmt 8_8_8_8 or 5_6_5 (gcn_texel_at reads both as unorm whatever the nfmt), linear tiling.
@@ -791,6 +828,12 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     if (dfmt == 41 || dfmt == 35 || dfmt == 36 || dfmt == 37) {
         if (((t[3] >> 20) & 31) != 13 || ((t[1] >> 26) & 15) != 0) return miss(1, 0);
         id<MTLTexture> decoded = bc7Texture(base, width, height, pitch, dfmt);
+        return decoded ? decoded : miss(4, 0);
+    }
+    // 8_8 or 8_8_8_8 in tile mode 13: 8x8 pixel micro tiles, Morton order
+    // inside, decoded once (CoD's menu frames and gradients).
+    if ((dfmt == 3 || dfmt == 10) && ((t[3] >> 20) & 31) == 13 && ((t[1] >> 26) & 15) == 0) {
+        id<MTLTexture> decoded = thinTexture(base, width, height, pitch, dfmt);
         return decoded ? decoded : miss(4, 0);
     }
     // A colour target lives only in its Metal texture, never written back to
