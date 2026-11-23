@@ -319,7 +319,9 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         s.enter(3);
         s.collector.execute(words, count, [&](const PM4Draw& draw) {
             ++s.phaseDraw; s.phasePS = draw.ps;
-            if (barrierFailure || encodeFailure) return;
+            // After a refused draw the rest of this submission is left out too:
+            // its state may be misread, and the next one starts afresh.
+            if (s.stats.failed != failed || barrierFailure || encodeFailure) return;
             if (s.renderer.encode(draw, command)) { ++s.stats.rendered; segmentEncoded = true; if (timing) timeDraw(draw.ps); }
             else {
                 char where[96];
@@ -330,7 +332,9 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             }
         }, [&](const PM4Dispatch& dispatch) {
             // A dispatch that cannot run is skipped, as before compute support.
-            if (barrierFailure || encodeFailure) return;
+            // After a refused draw the rest of this submission is left out too:
+            // its state may be misread, and the next one starts afresh.
+            if (s.stats.failed != failed || barrierFailure || encodeFailure) return;
             const unsigned encodedBefore = s.renderer.dispatchesEncoded;
             if (s.renderer.dispatch(dispatch, command)) {
                 ++s.computeRun;
