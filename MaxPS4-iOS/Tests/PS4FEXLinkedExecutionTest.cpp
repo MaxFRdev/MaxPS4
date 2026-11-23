@@ -1137,9 +1137,12 @@ int main(int argc, char** argv) {
             // The entry itself is reached by a linked branch from the startup
             // stub after the image: State.rip stays at that stub (as for kinds
             // 0, 1, 3, 4), never at the block that failed.
-            if (kind==0) stub_rip=fault.rip;
+            // Kinds 0-4 fault inside the JIT, where the guest RIP is restored from
+            // the host PC (the entry block itself); kinds 5-7 fault in the
+            // dispatcher, where State.rip is still the startup stub's.
+            if (kind==5) stub_rip=fault.rip;
             if (kind>=5) CHECK(fault.signal==SIGILL && fault.code==0x4d50);
-            if (kind==5) CHECK(fault.address==code+6 && fault.rip==stub_rip && stub_rip>code+8);
+            if (kind==5) CHECK(fault.address==code+6 && stub_rip>code+8);
             // A direct JMP (6: inside the entry; 7: the stub's JMP to the entry)
             // leaves no call-ret entry. The target comes from the code-buffer
             // scan for the thunk ExitFunctionLink patched with HostCode 0.
