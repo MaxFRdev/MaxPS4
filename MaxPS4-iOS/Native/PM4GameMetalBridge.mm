@@ -262,6 +262,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         id<MTLCommandBuffer> command = [s.queue commandBuffer];
         if (!command) { s.error = "Metal command buffer allocation"; return -ENOMEM; }
         const unsigned failed = s.stats.failed;
+        bool encodeFailure = false;
         const unsigned rendered = s.stats.rendered;
         bool segmentEncoded = false;
         bool barrierFailure = false;
@@ -318,17 +319,18 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         s.enter(3);
         s.collector.execute(words, count, [&](const PM4Draw& draw) {
             ++s.phaseDraw; s.phasePS = draw.ps;
-            if (barrierFailure) return;
+            if (barrierFailure || encodeFailure) return;
             if (s.renderer.encode(draw, command)) { ++s.stats.rendered; segmentEncoded = true; if (timing) timeDraw(draw.ps); }
             else {
                 char where[96];
                 std::snprintf(where, sizeof where, " (VS 0x%llx, PS 0x%llx, cible 0x%llx)", (unsigned long long)draw.vs,
                               (unsigned long long)draw.ps, (unsigned long long)draw.target);
                 s.stats.fail(s.renderer.error + where);
+                encodeFailure = true;
             }
         }, [&](const PM4Dispatch& dispatch) {
             // A dispatch that cannot run is skipped, as before compute support.
-            if (barrierFailure) return;
+            if (barrierFailure || encodeFailure) return;
             const unsigned encodedBefore = s.renderer.dispatchesEncoded;
             if (s.renderer.dispatch(dispatch, command)) {
                 ++s.computeRun;
@@ -356,6 +358,9 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         // A draw that cannot be collected or encoded is left out and the game
         // keeps running (CoD's loading screens ended on one unreadable index
         // buffer); the report keeps the latest reason.
+        // A failed encode can leave the Metal encoder half built: that stays
+        // fatal, as before; only draws refused before encoding are left out.
+        if (encodeFailure) { s.error = s.stats.last; return -ENOTSUP; }
         if (s.stats.failed != failed) s.drawRefusal = s.stats.last;
         const double encoding = elapsedMs(encodingStarted);
         const bool hasRenderWork = segmentEncoded || s.stats.rendered != rendered;
