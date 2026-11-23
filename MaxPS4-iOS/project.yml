@@ -33,6 +33,7 @@ targets:
       - path: Native/PS4PKGBridge.cpp
       - path: Native/OrbisAnalysisBridge.cpp
       - path: Native/OrbisLinkerBridge.cpp
+      - path: Native/MaxPS4CrashLog.mm
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.enermaxfr.maxps4

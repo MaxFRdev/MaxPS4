@@ -310,6 +310,43 @@ enum MaxPS4Reports {
     static func live(for game: URL) -> URL {
         folder.appendingPathComponent("\(MaxPS4Saves.gameID(for: game))-en-cours.txt")
     }
+    // The report of the last run if the app closed during it, made at the
+    // next launch from the live report it left (and the crash records of
+    // MaxPS4CrashLog.mm / the FEX fault guard): "<ID>-fermeture-<date>.txt".
+    static private(set) var lastClosure: URL?
+    static func recoverClosures() {
+        let manager = FileManager.default
+        let documents = manager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let crashLog = documents.appendingPathComponent("maxps4-fermeture.txt")
+        let faultLog = documents.appendingPathComponent("maxps4-fatal-fault.txt")
+        let crash = (try? String(contentsOf: crashLog, encoding: .utf8)) ?? ""
+        let lives = ((try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+            .filter { $0.lastPathComponent.hasSuffix("-en-cours.txt") }
+        for live in lives {
+            let text = (try? String(contentsOf: live, encoding: .utf8)) ?? ""
+            let ended = (try? live.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+            var faults = ""
+            if let date = (try? faultLog.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+               date > ended.addingTimeInterval(-120), let all = try? String(contentsOf: faultLog, encoding: .utf8) {
+                faults = String(all.suffix(8_192))
+            }
+            let id = String(live.lastPathComponent.dropLast("-en-cours.txt".count))
+            let stamp = DateFormatter(); stamp.dateFormat = "yyyyMMdd-HHmmss"; stamp.locale = Locale(identifier: "en_US_POSIX")
+            let file = folder.appendingPathComponent("\(id)-fermeture-\(stamp.string(from: ended)).txt")
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+            let revision = (Bundle.main.object(forInfoDictionaryKey: "MaxPS4SourceRevision") as? String).map { " (" + $0.prefix(7) + ")" } ?? ""
+            let cause = crash.isEmpty && faults.isEmpty
+                ? "Aucune trace de plantage enregistrée : iOS a probablement fermé l'app (mémoire, chaleur) ou le plantage n'a pas pu être intercepté."
+                : crash + (faults.isEmpty ? "" : "\nJournal FEXCore (maxps4-fatal-fault.txt) :\n" + faults)
+            let report = "MaxPS4 build \(version)\(revision) · rapport de fermeture · dernier état écrit le \(ended)\n\n"
+                + "Cause :\n" + cause + "\n\nDernier état du jeu avant la fermeture :\n\n" + text
+            if (try? report.write(to: file, atomically: true, encoding: .utf8)) != nil {
+                try? manager.removeItem(at: live)
+                lastClosure = file
+            }
+        }
+        if !lives.isEmpty || !crash.isEmpty { try? manager.removeItem(at: crashLog) }
+    }
     static func write(_ text: String, to file: URL) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try? text.write(to: file, atomically: true, encoding: .utf8)

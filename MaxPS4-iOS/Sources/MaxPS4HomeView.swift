@@ -124,6 +124,11 @@ struct MaxPS4HomeView: View {
         .confirmationDialog("Vider la bibliothèque ?", isPresented: $confirmingClear, titleVisibility: .visible) {
             Button("Supprimer les fichiers importés", role: .destructive) { emulator.removeAll() }
         } message: { Text("Les copies importées dans MaxPS4 seront supprimées.") }
+        .onAppear {
+            if let closed = MaxPS4Reports.lastClosure, message == nil {
+                message = "L'app s'est fermée pendant le dernier lancement. Rapport de fermeture : Fichiers › MaxPS4 › Rapports › \(closed.lastPathComponent)"
+            }
+        }
         .alert("MaxPS4", isPresented: Binding(
             get: { message != nil }, set: { if !$0 { message = nil } }
         )) { Button("Fermer", role: .cancel) { message = nil } } message: { Text(message ?? "") }

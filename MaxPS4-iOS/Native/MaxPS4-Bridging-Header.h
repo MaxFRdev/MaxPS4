@@ -3,6 +3,7 @@
 #include "PM4MetalDrawBridge.h"
 #include "PM4GameMetalBridge.h"
 #include "PS4PKGBridge.h"
+#include "MaxPS4CrashLog.h"
 
 // Existing passive sysctl probe; debugger presence is not JIT permission.
 int32_t maxps4_native_debugger_attached(void)
