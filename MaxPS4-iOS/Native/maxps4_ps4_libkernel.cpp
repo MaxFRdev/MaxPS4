@@ -3133,7 +3133,7 @@ int64_t PS4Libkernel::memory_service_unrecorded(PS4KernelService service, const 
                 static_cast<unsigned long long>(c.r8),
                 static_cast<unsigned long long>(owner->first),
                 static_cast<unsigned long long>(owner->second),
-                static_cast<unsigned long long>(offset),
+                static_cast<unsigned long long>(c.r8 - owner->first),
                 static_cast<unsigned long long>(std::max<uint64_t>(c.r9, page)),
                 protection, static_cast<unsigned long long>(c.rcx),
                 (c.rcx & 0x10) != 0);

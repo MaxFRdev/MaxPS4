@@ -346,12 +346,6 @@ GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u,
             : blocks
             ? (ulong((height + 3u) / 4u - 1u) * ((pitch + 3u) / 4u) + (width + 3u) / 4u) * ulong(blockBytes)
             : ((ulong(height) - 1ul) * pitch + width) * bytes;
-        // Micro-tiled: whole 8x8 tiles of elements (blocks for BC formats).
-        if (tiling == 13u) {
-            uint rows = block ? (height + 3u) / 4u : height, columns = block ? (pitch + 3u) / 4u : pitch;
-            footprint = ulong((rows + 7u) / 8u) * ((columns + 7u) / 8u) * 64ul *
-                        (block ? ((dfmt == 35u || dfmt == 38u) ? 8ul : 16ul) : ulong(bytes));
-        }
         resolved = gcn_locate(M, base, footprint, offset);
         if (!resolved) offset = 0ul;
     }
