@@ -1245,7 +1245,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         batchDraws += text;
         listProgram("VS", d.vs, d.vsUser, d.vsUserCount);
         if (d.vsUserCount >= 2) listProgram("Fetch", std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32, d.vsUser, 0);
-        listProgram("PS", d.ps, d.psUser, d.psUserCount);
+        listProgram("PS", d.ps, d.psUser, d.psUserCount, listed_.size() < 20); // every pixel program of the batch (menus)
         if (native_) {
             unsigned shown = 0;
             // A pixel lane that stopped before its image instructions names no texture: say why.
