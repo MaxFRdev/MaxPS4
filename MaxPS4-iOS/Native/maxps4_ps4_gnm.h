@@ -87,7 +87,7 @@ public:
         p.add(0x76,{0x215,0x170},compute);
         p.add(0x58,{0x28000000U,0,0,0,0,10});
         p.nop(words_limit-p.used-1);
-        return store(output,p) ? -1 : int64_t(words_limit);
+        return store(output,p) ? 0 : int64_t(words_limit);
     }
     // DrawInitToDefaultContextState (0x20 dwords) / 400 (0x100): the context
     // defaults are not written yet (like init_default_state350): only NOPs of
@@ -95,7 +95,7 @@ public:
     int64_t init_context_state(uint64_t output, uint32_t size, uint32_t expected) {
         if (size != expected) return 0;
         Packet p; p.nop(expected-1);
-        return store(output,p) ? -1 : int64_t(expected);
+        return store(output,p) ? 0 : int64_t(expected);
     }
     // IA_MULTI_VGT_PARAM back to its default.
     int64_t reset_vgt(uint64_t output, uint32_t size) {
@@ -245,7 +245,7 @@ public:
         for (auto value : {0xc0012800U,0x80000000U,0x80000000U,0xc0001200U,0U,0xc0055800U,
                            0x2ec47fc0U,0xffffffffU,0U,0U,0U,10U}) p.words[p.used++]=value;
         p.nop(words_limit-p.used-1);
-        return store(output,p) ? -1 : int64_t(words_limit);
+        return store(output,p) ? 0 : int64_t(words_limit);
     }
 private:
     static constexpr uint32_t compute=2;
@@ -272,6 +272,10 @@ private:
         for (size_t i=0;i<N;++i) values[i]=uint32_t(ps4::get_le(bytes.data()+4*i,4));
         return true;
     }
+    // The default-state functions return the dwords they wrote, which games
+    // add to their command pointer as an unsigned count: a failed store
+    // returns 0 (nothing written), never -1 (Call of Duty moved its pointer
+    // 0xffffffff dwords on and wrote into unmapped memory).
     int64_t store(uint64_t address, const Packet& packet) {
         if (!address || (address & 3)) return -1;
         std::array<uint8_t,words_limit*4> wire{};

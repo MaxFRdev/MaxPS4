@@ -1,3 +1,7 @@
+// The one translation unit with minimp3's decoder (PS4Ajm).
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_FLOAT_OUTPUT
+#include "minimp3.h"
 #include "maxps4_ps4_libkernel.h"
 #include "maxps4_fex_runtime.h"
 #include "maxps4_ps4_kernel_path.h"
@@ -445,6 +449,7 @@ constexpr Binding bindings[] = {
      false, false, 0, nullptr, 0, "libSceLibcInternal"},
     {"sceSystemServiceParamGetInt", "fZo48un7LK4", PS4KernelService::system_param_int, "libSceSystemService"},
     {"sceSystemServiceGetStatus", "rPo6tV8D9bM", PS4KernelService::system_status, "libSceSystemService"},
+    {"sceSystemServiceLoadExec", "JoBqSQt1yyA", PS4KernelService::load_exec, "libSceSystemService"},
     {"sceSystemServiceReceiveEvent", "656LMQSrg6U", PS4KernelService::system_event, "libSceSystemService"},
     {"sceSystemServiceHideSplashScreen", "Vo5V8KAwCmk", PS4KernelService::succeed, "libSceSystemService"},
     // Save data (shadPS4 libraries/save_data): one directory at a time.
@@ -464,6 +469,9 @@ constexpr Binding bindings[] = {
     {"sceSaveDataSetupSaveDataMemory", "v7AAAMo0Lz4", PS4KernelService::save_memory_setup, "libSceSaveData"},
     {"sceSaveDataGetSaveDataMemory", "7Bt5pBC-Aco", PS4KernelService::save_memory_get, "libSceSaveData"},
     {"sceSaveDataSetSaveDataMemory", "h3YURzXGSVQ", PS4KernelService::save_memory_set, "libSceSaveData"},
+    {"sceSaveDataSetupSaveDataMemory2", "oQySEUfgXRA", PS4KernelService::save_memory_setup2, "libSceSaveData"},
+    {"sceSaveDataGetSaveDataMemory2", "QwOO7vegnV8", PS4KernelService::save_memory_get2, "libSceSaveData"},
+    {"sceSaveDataSetSaveDataMemory2", "cduy9v4YmT4", PS4KernelService::save_memory_set2, "libSceSaveData"},
     {"sceSaveDataInitialize", "ZkZhskCPXFw", PS4KernelService::save_init, "libSceSaveData"},
     {"sceSaveDataInitialize2", "l1NmDeDpNGU", PS4KernelService::save_init, "libSceSaveData"},
     {"sceSaveDataGetEventResult", "j8xKtiFj0SY", PS4KernelService::save_event, "libSceSaveData"},
@@ -496,6 +504,8 @@ constexpr Binding bindings[] = {
     {"sceAppContentAppParamGetInt", "99b82IKXpH4", PS4KernelService::app_param_int, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
     {"sceAppContentTemporaryDataMount2", "buYbeLOGWmA", PS4KernelService::app_temp_mount, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
     {"sceAppContentTemporaryDataUnmount", "bcolXMmp6qQ", PS4KernelService::succeed, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
+    {"sceAppContentDownloadDataGetAvailableSpaceKb", "Gl6w5i0JokY", PS4KernelService::app_space_kb, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
+    {"sceAppContentTemporaryDataGetAvailableSpaceKb", "SaKib2Ug0yI", PS4KernelService::app_space_kb, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
     // Real-time clock: ticks are microseconds since 0001-01-01 00:00 UTC.
     {"sceRtcGetCurrentTick", "18B2NS1y9UU", PS4KernelService::rtc_current_tick, "libSceRtc"},
     {"sceRtcGetCurrentNetworkTick", "zO9UL3qIINQ", PS4KernelService::rtc_current_tick, "libSceRtc"},
@@ -557,6 +567,8 @@ constexpr Binding bindings[] = {
     {"scePlayGoGetEta", "v6EZ-YWRdMs", PS4KernelService::playgo_eta, "libScePlayGo"},
     {"scePlayGoGetInstallSpeed", "rvBSfTimejE", PS4KernelService::playgo_speed, "libScePlayGo"},
     {"scePlayGoSetInstallSpeed", "4AAcTU9R3XM", PS4KernelService::succeed, "libScePlayGo"},
+    // Everything is installed: nothing to prefetch (shadPS4 returns OK too).
+    {"scePlayGoPrefetch", "-Q1-u1a7p0g", PS4KernelService::succeed, "libScePlayGo"},
     {"scePlayGoGetLanguageMask", "3OMbYZBaa50", PS4KernelService::playgo_language, "libScePlayGo"},
     {"scePlayGoSetLanguageMask", "LosLlHOpNqQ", PS4KernelService::succeed, "libScePlayGo"},
     {"scePlayGoGetChunkId", "73fF1MFU8hA", PS4KernelService::playgo_chunks, "libScePlayGo"},
@@ -584,8 +596,10 @@ constexpr Binding bindings[] = {
     {"sceKernelFtruncate", "VW3TVZiM4-E", PS4KernelService::ftruncate},
     {"sceKernelTruncate", "WlyEA-sLDf0", PS4KernelService::truncate},
     {"sceKernelMkdir", "1-LFLmRFxxM", PS4KernelService::mkdir},
+    {"mkdir", "JGMio+21L4c", PS4KernelService::mkdir, "libkernel", true},
     {"sceKernelRmdir", "naInUjYt3so", PS4KernelService::rmdir},
     {"sceKernelRename", "52NcYU9+lEo", PS4KernelService::rename},
+    {"rename", "NN01qLRhiqU", PS4KernelService::rename, "libkernel", true},
     {"sceKernelUnlink", "AUXVxWeJU-A", PS4KernelService::unlink},
     {"sceKernelGetdirentries", "taRWhTJFTgE", PS4KernelService::getdirentries},
     // Thread names are not kept: an empty one (Unreal Engine 4 logs them).
@@ -708,6 +722,7 @@ constexpr Binding bindings[] = {
     {"sem_init", "pDuPEf3m4fI", PS4KernelService::sem_init, "libkernel", true},
     {"sem_destroy", "cDW233RAwWo", PS4KernelService::sem_destroy, "libkernel", true},
     {"sem_wait", "YCV5dGGBcCo", PS4KernelService::sem_wait, "libkernel", true},
+    {"sem_timedwait", "w5IHyvahg-o", PS4KernelService::sem_timedwait, "libkernel", true},
     {"sem_post", "IKP8typ0QUk", PS4KernelService::sem_post, "libkernel", true},
     {"recvmsg", "hI7oVeOluPM", PS4KernelService::net_unavailable, "libkernel", true},
     {"sendmsg", "aNeavPDNKzA", PS4KernelService::net_unavailable, "libkernel", true},
@@ -736,6 +751,23 @@ constexpr Binding bindings[] = {
     {"sceNetResolverGetError", "J5i3hiLJMPk", PS4KernelService::succeed, "libSceNet"},
     {"sceNetErrnoLoc", "HQOwnfMGipQ", PS4KernelService::errno_location, "libSceNet"},
     {"sceNetInetNtop", "9vA2aW+CHuA", PS4KernelService::net_ntop, "libSceNet"},
+    {"sceAjmInitialize", "dl+4eHSzUu4", PS4KernelService::ajm_initialize, "libSceAjm"},
+    {"sceAjmFinalize", "MHur6qCsUus", PS4KernelService::ajm_finalize, "libSceAjm"},
+    {"sceAjmModuleRegister", "Q3dyFuwGn64", PS4KernelService::ajm_module_register, "libSceAjm"},
+    {"sceAjmModuleUnregister", "Wi7DtlLV+KI", PS4KernelService::ajm_module_unregister, "libSceAjm"},
+    {"sceAjmInstanceCreate", "AxoDrINp4J8", PS4KernelService::ajm_instance_create, "libSceAjm"},
+    {"sceAjmInstanceDestroy", "RbLbuKv8zho", PS4KernelService::ajm_instance_destroy, "libSceAjm"},
+    {"sceAjmInstanceCodecType", "diXjQNiMu-s", PS4KernelService::ajm_instance_codec, "libSceAjm"},
+    {"sceAjmBatchJobControlBufferRa", "dmDybN--Fn8", PS4KernelService::ajm_job_control, "libSceAjm"},
+    {"sceAjmBatchJobRunBufferRa", "ElslOCpOIns", PS4KernelService::ajm_job_run, "libSceAjm"},
+    {"sceAjmBatchJobRunSplitBufferRa", "7jdAXK+2fMo", PS4KernelService::ajm_job_run_split, "libSceAjm"},
+    {"sceAjmBatchJobInlineBuffer", "stlghnic3Jc", PS4KernelService::ajm_job_inline, "libSceAjm"},
+    {"sceAjmBatchStartBuffer", "fFFkk0xfGWs", PS4KernelService::ajm_batch_start, "libSceAjm"},
+    {"sceAjmBatchWait", "-qLsfDAywIY", PS4KernelService::ajm_batch_wait, "libSceAjm"},
+    {"sceAjmBatchCancel", "NVDXiUesSbA", PS4KernelService::ajm_batch_cancel, "libSceAjm"},
+    {"sceAjmMemoryRegister", "bkRHEYG6lEM", PS4KernelService::ajm_memory_register, "libSceAjm"},
+    {"sceAjmMemoryUnregister", "pIpGiaYkHkM", PS4KernelService::ajm_memory_unregister, "libSceAjm"},
+    {"sceAjmDecMp3ParseFrame", "eDFeTyi+G3Y", PS4KernelService::ajm_mp3_parse, "libSceAjm"},
     {"sceNetInetPton", "8Kcp5d-q1Uo", PS4KernelService::net_pton, "libSceNet"},
     // HTTP, HTTP/2 and Web API contexts open; every request fails (offline).
     {"sceHttpInit", "A9cVMUtEp4Y", PS4KernelService::net_pool, "libSceHttp"},
@@ -870,7 +902,7 @@ constexpr Binding bindings[] = {
     {"sceGnmGetResourceUserData", "UoBuWAhKk7U", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
     {"sceGnmGetShaderProgramBaseAddress", "nEyFbYUloIM", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
     {"sceGnmGetPhysicalCounterFromVirtualized", "dewXw5roLs0", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
-    {"sceGnmGetTheTessellationFactorRingBufferBaseAddress", "ln33zjBrfjk", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
+    {"sceGnmGetTheTessellationFactorRingBufferBaseAddress", "ln33zjBrfjk", PS4KernelService::gnm_tessellation_ring, "libSceGnmDriver"},
     {"sceGnmLogicalCuIndexToPhysicalCuIndex", "26PM5Mzl8zc", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
     {"sceGnmLogicalCuMaskToPhysicalCuMask", "RU74kek-N0c", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
     {"sceGnmLogicalTcaUnitToPhysical", "Kl0Z3LH07QI", PS4KernelService::gnm_unsupported, "libSceGnmDriver"},
@@ -915,7 +947,7 @@ PS4KernelService resolve_libkernel(std::string_view symbol, std::string_view lib
     return PS4KernelService::unresolved;
 }
 PS4Libkernel::PS4Libkernel(PS4GuestMemory& memory, PS4VirtualMemory* dynamic)
-    : memory_(memory), dynamic_(dynamic), threads_(memory), videoout_(memory, threads_), user_service_(memory), pad_(memory), audio_(memory, threads_), gnm_(memory), graphics_(memory), started_us_(monotonic_us()) {}
+    : memory_(memory), dynamic_(dynamic), threads_(memory), videoout_(memory, threads_), user_service_(memory), pad_(memory), audio_(memory, threads_), ajm_(memory), gnm_(memory), graphics_(memory), started_us_(monotonic_us()) {}
 PS4Libkernel::~PS4Libkernel() {
     reset();
 }
@@ -1734,17 +1766,36 @@ int64_t PS4Libkernel::close(int32_t fd) {
 int64_t PS4Libkernel::read(const PS4KernelCall& c) {
     File* f = file(signed32(c.rdi));
     if (!f || !f->readable) return kernel_error(badf);
-    if (c.rdx > transfer_limit) return kernel_error(inval);
+    if (c.rdx > uint64_t(INT64_MAX)) return kernel_error(inval);
     const size_t count = size_t(c.rdx);
-    if (count && !writable(c.rsi, count)) return kernel_error(fault);
+    if (count && !writable(c.rsi, count)) return kernel_error(fault); // Before the offset moves.
     if (f->directory) return kernel_error(isdir);
     if (!count) return 0;
-    std::vector<uint8_t> buffer(count); // Allocate before advancing file offset.
-    ssize_t got;
-    do { got = ::read(f->fd, buffer.data(), count); } while (got < 0 && errno == EINTR);
-    if (got < 0) return kernel_error(host_error(errno));
-    if (got && !memory_.write(c.rsi, buffer.data(), size_t(got))) return kernel_error(fault);
-    return got;
+    return transfer(f->fd, c.rsi, count, -1, true);
+}
+// Moves `count` bytes between a host file and guest memory by pieces of
+// transfer_limit, at the file's position (offset < 0) or at `offset`. There
+// is no size limit: a read over 1 MiB used to fail with EINVAL, and Call of
+// Duty's fastfile reads then left stale data in its zone buffers.
+int64_t PS4Libkernel::transfer(int fd, uint64_t guest, size_t count, int64_t offset, bool reading) {
+    std::vector<uint8_t> buffer(std::min(count, transfer_limit));
+    size_t done = 0;
+    while (done < count) {
+        const size_t piece = std::min(count - done, buffer.size());
+        if (!reading && !memory_.read(guest + done, buffer.data(), piece)) return done ? int64_t(done) : kernel_error(fault);
+        ssize_t moved;
+        do {
+            const off_t at = off_t(offset + int64_t(done));
+            moved = reading ? (offset < 0 ? ::read(fd, buffer.data(), piece) : ::pread(fd, buffer.data(), piece, at))
+                            : (offset < 0 ? ::write(fd, buffer.data(), piece) : ::pwrite(fd, buffer.data(), piece, at));
+        } while (moved < 0 && errno == EINTR);
+        if (moved < 0) return done ? int64_t(done) : kernel_error(host_error(errno));
+        if (reading && moved && !memory_.write(guest + done, buffer.data(), size_t(moved)))
+            return done ? int64_t(done) : kernel_error(fault);
+        done += size_t(moved);
+        if (size_t(moved) < piece) break; // End of file, or a short write.
+    }
+    return int64_t(done);
 }
 int64_t PS4Libkernel::lseek(const PS4KernelCall& c) {
     File* f = file(signed32(c.rdi));
@@ -1819,13 +1870,14 @@ int64_t PS4Libkernel::file_service(PS4KernelService service, const PS4KernelCall
     // write(fd, buffer, count) and pwrite(fd, buffer, count, offset). The
     // game's stdout and stderr (1, 2) go to the engine's standard error.
     case S::write: case S::pwrite: {
-        if (c.rdx > transfer_limit) return kernel_error(inval);
+        if (c.rdx > uint64_t(INT64_MAX)) return kernel_error(inval);
         if (service == S::pwrite && signed64(c.rcx) < 0) return kernel_error(inval);
         const size_t count = size_t(c.rdx);
-        std::vector<uint8_t> buffer(count);
-        if (count && !memory_.read(c.rsi, buffer.data(), count)) return kernel_error(fault);
         const int32_t fd = signed32(c.rdi);
         if ((fd == 1 || fd == 2) && service == S::write) {
+            if (count > transfer_limit) return kernel_error(inval);
+            std::vector<uint8_t> buffer(count);
+            if (count && !memory_.read(c.rsi, buffer.data(), count)) return kernel_error(fault);
             if (count) std::fwrite(buffer.data(), 1, count, stderr);
             // The last bytes, for the session report: a game's own message
             // usually says why it stops.
@@ -1836,27 +1888,18 @@ int64_t PS4Libkernel::file_service(PS4KernelService service, const PS4KernelCall
         File* f = file(fd);
         if (!f || !f->writable) return kernel_error(badf);
         if (f->directory) return kernel_error(isdir);
-        ssize_t put;
-        do {
-            put = service == S::write ? ::write(f->fd, buffer.data(), count) :
-                ::pwrite(f->fd, buffer.data(), count, off_t(signed64(c.rcx)));
-        } while (put < 0 && errno == EINTR);
-        return put < 0 ? kernel_error(host_error(errno)) : int64_t(put);
+        if (count && !memory_.permitted(c.rsi, count, 4)) return kernel_error(fault);
+        return count ? transfer(f->fd, c.rsi, count, service == S::write ? -1 : signed64(c.rcx), false) : 0;
     }
     // pread(fd, buffer, count, offset).
     case S::pread: {
         File* f = file(signed32(c.rdi));
         if (!f || !f->readable) return kernel_error(badf);
-        if (c.rdx > transfer_limit || signed64(c.rcx) < 0) return kernel_error(inval);
+        if (c.rdx > uint64_t(INT64_MAX) || signed64(c.rcx) < 0) return kernel_error(inval);
         const size_t count = size_t(c.rdx);
         if (count && !writable(c.rsi, count)) return kernel_error(fault);
         if (f->directory) return kernel_error(isdir);
-        std::vector<uint8_t> buffer(count);
-        ssize_t got;
-        do { got = ::pread(f->fd, buffer.data(), count, off_t(signed64(c.rcx))); } while (got < 0 && errno == EINTR);
-        if (got < 0) return kernel_error(host_error(errno));
-        if (got && !memory_.write(c.rsi, buffer.data(), size_t(got))) return kernel_error(fault);
-        return got;
+        return count ? transfer(f->fd, c.rsi, count, signed64(c.rcx), true) : 0;
     }
     case S::fsync: {
         File* f = file(signed32(c.rdi));
@@ -2031,7 +2074,48 @@ int64_t PS4Libkernel::invoke(PS4KernelService service, const PS4KernelCall& c, u
     bool handled = false;
     int64_t result = extended(service, c, thread, handled);
     if (!handled) result = invoke_service(service, c, thread);
+    if (const uint64_t watched = watched_mutex_.load(std::memory_order_relaxed); watched && !result) {
+        using S = PS4KernelService;
+        const bool lock = (service == S::mutex_lock || service == S::mutex_trylock || service == S::mutex_reltimedlock) && c.rdi == watched;
+        const bool wait = (service == S::cond_wait || service == S::cond_timedwait) && c.rsi == watched;
+        const bool unlock = service == S::mutex_unlock && c.rdi == watched;
+        if (lock || wait || unlock) {
+            uint8_t back[8] = {};
+            const uint64_t caller = c.rsp && memory_.read(c.rsp, back, 8) ? get_le(back, 8) : 0;
+            mutex_watch_(thread, caller, unlock, c);
+        }
+    }
+    record_save_call(service, c, result);
     return posix ? posix_result(result, thread) : result;
+}
+void PS4Libkernel::record_save_call(PS4KernelService service, const PS4KernelCall& c, int64_t result) {
+    using S = PS4KernelService;
+    const auto at = [](S s) { return uint32_t(s); };
+    const bool save = (at(service) >= at(S::save_init) && at(service) <= at(S::save_memory_set2)) ||
+                      (at(service) >= at(S::save_dialog_init) && at(service) <= at(S::save_dialog_term));
+    const bool by_path = service == S::open || service == S::stat || service == S::mkdir || service == S::rmdir ||
+                         service == S::unlink || service == S::rename || service == S::truncate;
+    const bool by_fd = service == S::read || service == S::write || service == S::pread || service == S::pwrite ||
+                       service == S::close || service == S::fsync || service == S::ftruncate || service == S::fstat ||
+                       service == S::lseek || service == S::getdirentries;
+    // The dialog status is polled every frame: it would push everything else out.
+    if ((!save && !by_path && !by_fd) || service == S::save_dialog_update) return;
+    SaveCall entry{service, c, result, {}};
+    if (by_path) {
+        if (!memory_.read_cstring(c.rdi, entry.path, sizeof(entry.path)) || std::strncmp(entry.path, "/savedata", 9)) return;
+    }
+    std::lock_guard<std::mutex> guard(save_call_lock_);
+    if (by_fd) {
+        const auto it = std::find(save_fds_.begin(), save_fds_.end(), int64_t(int32_t(c.rdi)));
+        if (it == save_fds_.end()) return;
+        // Reads and writes that went through are counted, not listed.
+        if ((service == S::read || service == S::write || service == S::pread || service == S::pwrite ||
+             service == S::lseek || service == S::fstat) && result >= 0) return;
+        if (service == S::close) save_fds_.erase(it);
+    }
+    if (service == S::open && result >= 0 && save_fds_.size() < 64) save_fds_.push_back(result);
+    if (save) { std::lock_guard<std::mutex> state(lock_); save_root_seen_ = save_root_; }
+    save_calls_[save_calls_total_++ % save_call_limit] = entry;
 }
 int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c, uint64_t thread, bool& handled) {
     handled = true;
@@ -2059,7 +2143,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         const int64_t result = graphics_.submit(uint32_t(c.rdi),c.rsi,c.rdx,c.rcx,c.r8,&interrupts,
                                                 flip ? &prepared : nullptr);
         if (result) return result;
-        if (interrupts) threads_.graphics_interrupt();
+        threads_.graphics_interrupt(interrupts);
         if (!flip) return 0;
         // The host backend presents the GPU-rendered target: no CPU copy.
         const int64_t shown = videoout_.submit(c.r9, signed32(get_le(stack, 4)), signed32(get_le(stack + 8, 4)),
@@ -2068,7 +2152,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         // pending. Skip this image rather than fail: the game ignores the error
         // and spins forever on the prepareFlip label (Sonic Mania after its
         // first flip on the iPhone).
-        if (shown == PS4VideoOut::error(0x12)) videoout_.count_dropped();
+        if (shown == PS4VideoOut::error(0x12)) videoout_.count_dropped(get_le(stack + 16, 8));
         else if (shown) return shown;
         // The work is already retired: what prepareFlip asks for happens at
         // the flip's vblank.
@@ -2162,10 +2246,18 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (next >= q.offset) span(q.offset, next);
         else { span(q.offset, q.size); span(0, next); }
         q.offset = next == q.size ? 0 : next;
-        if (interrupts) threads_.graphics_interrupt();
+        threads_.graphics_interrupt(uint32_t(std::min<int64_t>(interrupts, 1 << 20)));
         return write(q.read_pointer, next, 4) ? 0 : kernel_error(fault);
     }
     case S::gnm_tessellation_offchip: return 0x800000;
+    // The ring's address, where the game maps it (MAP_FIXED): the top of the
+    // mmap window, since iOS refuses the PS4's own 0xff0000000.
+    case S::gnm_tessellation_ring: {
+        uint64_t window = 0, bytes = 0;
+        if (dynamic_ && dynamic_->window(window, bytes) && bytes >= 0x200000)
+            return int64_t((window + bytes - 0x100000) & ~uint64_t{0xffff});
+        return 0xff0000000;
+    }
     case S::gnm_ls: return gnm_.ls(c.rdi,uint32_t(c.rsi),c.rdx,uint32_t(c.rcx));
     case S::gnm_hs: case S::gnm_hs_update: return gnm_.hs(c.rdi,uint32_t(c.rsi),c.rdx,uint32_t(c.rcx),service == S::gnm_hs_update);
     case S::gnm_es: return gnm_.es(c.rdi,uint32_t(c.rsi),c.rdx,uint32_t(c.rcx));
@@ -2200,12 +2292,24 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (c.rsi) return kernel_error(notsup); // Shared between processes.
         if (c.rdx > uint64_t(INT32_MAX)) return kernel_error(inval);
         return kernel_error(threads_.sema_create(c.rdi, 0, signed32(c.rdx), INT32_MAX));
-    case S::sem_destroy: case S::sem_wait: case S::sem_post: {
+    case S::sem_destroy: case S::sem_wait: case S::sem_timedwait: case S::sem_post: {
         uint8_t cell[8];
         if (!c.rdi || !memory_.read(c.rdi, cell, sizeof(cell))) return kernel_error(inval);
         const uint64_t handle = get_le(cell, 8);
         if (service == S::sem_destroy) return kernel_error(threads_.sema_delete(handle));
         if (service == S::sem_post) return kernel_error(threads_.sema_signal(handle, 1));
+        if (service == S::sem_timedwait) {
+            // An absolute CLOCK_REALTIME deadline, at most a year away.
+            uint8_t wire[16];
+            if (!c.rsi || !memory_.read(c.rsi, wire, sizeof(wire))) return kernel_error(inval);
+            const int64_t seconds = int64_t(get_le(wire, 8)), nanoseconds = int64_t(get_le(wire + 8, 8));
+            if (nanoseconds < 0 || nanoseconds >= 1000000000) return kernel_error(inval);
+            timespec now{};
+            ::clock_gettime(CLOCK_REALTIME, &now);
+            const int64_t whole = std::min<int64_t>(seconds - int64_t(now.tv_sec), 31536000);
+            const uint64_t left = uint64_t(std::max<int64_t>(whole * 1000000 + (nanoseconds - int64_t(now.tv_nsec)) / 1000, 0));
+            return kernel_error(threads_.sema_wait(handle, 1, 0, false, &left));
+        }
         return kernel_error(threads_.sema_wait(handle, 1, 0, false));
     }
     // sceKernelUuidCreate(SceKernelUuid*): a random version 4 UUID.
@@ -2276,6 +2380,31 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         return audio_.open(signed32(c.rdi), signed32(c.rsi), signed32(c.rdx), uint32_t(c.rcx), uint32_t(c.r8), uint32_t(c.r9));
     case S::audio_close: return audio_.close(signed32(c.rdi));
     case S::audio_output: return audio_.output(signed32(c.rdi), c.rsi);
+    case S::ajm_initialize: return ajm_.initialize(c.rdi, c.rsi);
+    case S::ajm_finalize: case S::ajm_memory_register: case S::ajm_memory_unregister: return 0;
+    case S::ajm_module_register: return ajm_.module_register(uint32_t(c.rdi), uint32_t(c.rsi), c.rdx);
+    case S::ajm_module_unregister: return ajm_.module_unregister(uint32_t(c.rdi), uint32_t(c.rsi));
+    case S::ajm_instance_create: return ajm_.instance_create(uint32_t(c.rdi), uint32_t(c.rsi), c.rdx, c.rcx);
+    case S::ajm_instance_destroy: return ajm_.instance_destroy(uint32_t(c.rdi), uint32_t(c.rsi));
+    case S::ajm_instance_codec: return PS4Ajm::codec_type(uint32_t(c.rdi));
+    case S::ajm_job_inline: return int64_t(ajm_.job_inline(c.rdi, c.rsi, c.rdx, c.rcx));
+    case S::ajm_job_control: case S::ajm_job_run: case S::ajm_job_run_split: {
+        // Arguments after R9 on the stack: two for a control job, four for a run.
+        uint8_t stack[32]{};
+        const size_t words = service == S::ajm_job_control ? 2 : 4;
+        if (!c.rsp || c.rsp > UINT64_MAX - 40 || !memory_.read(c.rsp + 8, stack, words * 8)) return 0;
+        const uint64_t s0 = get_le(stack, 8), s1 = get_le(stack + 8, 8), s2 = get_le(stack + 16, 8), s3 = get_le(stack + 24, 8);
+        if (service == S::ajm_job_control)
+            return int64_t(ajm_.job_control(c.rdi, uint32_t(c.rsi), c.rdx, c.rcx, c.r8, c.r9, s0, s1));
+        if (service == S::ajm_job_run)
+            return int64_t(ajm_.job_run(c.rdi, uint32_t(c.rsi), c.rdx, c.rcx, c.r8, c.r9, s0, s1, s2, s3));
+        return int64_t(ajm_.job_run_split(c.rdi, uint32_t(c.rsi), c.rdx, c.rcx, c.r8, c.r9, s0, s1, s2, s3));
+    }
+    case S::ajm_batch_start:
+        return ajm_.start(uint32_t(c.rdi), c.rsi, uint32_t(c.rdx), signed32(c.rcx), c.r8, c.r9);
+    case S::ajm_batch_wait: return ajm_.wait(uint32_t(c.rdi), uint32_t(c.rsi), uint32_t(c.rdx), c.rcx);
+    case S::ajm_batch_cancel: return ajm_.cancel(uint32_t(c.rdi), uint32_t(c.rsi));
+    case S::ajm_mp3_parse: return ajm_.parse_mp3_frame(c.rdi, uint32_t(c.rsi), signed32(c.rdx), c.rcx);
     case S::user_terminate: return user_service_.terminate();
     case S::user_initial: return user_service_.initial_user(c.rdi);
     // Local multiplayer: users 2..4 exist once their controller was reported.
@@ -2333,6 +2462,13 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (c.rdi > 4 || !c.rsi) return signed32(0x80D90002U);
         return write(c.rsi, c.rdi == 0 ? 3 : 0, 4) ? 0 : signed32(0x80D90002U);
     case S::app_temp_mount: return temp_mount(c.rsi);
+    // Download/TemporaryDataGetAvailableSpaceKb(mount point, u64* kb): 1 GiB
+    // free, so a game does not turn its saving or caching off for lack of space.
+    case S::app_space_kb: {
+        if (!c.rsi) return int64_t(int32_t(0x80d90002U));
+        uint8_t wire[8]; put_le(wire, 0, uint64_t(1024) * 1024, 8);
+        return memory_.write(c.rsi, wire, 8) ? 0 : int64_t(int32_t(0x80d90002U));
+    }
     case S::rtc_current_tick: case S::rtc_current_clock: case S::rtc_current_local:
     case S::rtc_get_tick: case S::rtc_set_tick: case S::rtc_resolution: case S::rtc_utc_to_local: case S::rtc_time_t:
         return rtc(service, c);
@@ -2368,6 +2504,34 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
     case S::save_save_icon: case S::save_load_icon: case S::save_delete: case S::save_mount_info: case S::save_event:
     case S::save_progress: case S::save_memory_setup: case S::save_memory_get: case S::save_memory_set:
         return save_service(service, c);
+    // Version 2 of save data memory takes structures (layouts from shadPS4
+    // savedata.h) and goes to the version 1 services, one data block at a time:
+    // Setup2 {u32 option; s32 user; u64 size; u64 icon size; param*; icon*; u32 slot}
+    // -> result {u64 existed}; Set2 {s32 user; data*; param*; icon*; u32 count}
+    // and Get2 {s32 user; data*; param*; icon*}, data {void* buf; u64 size; s64 offset; 40 bytes}.
+    case S::save_memory_setup2: {
+        uint8_t setup[48];
+        if (!c.rdi || !memory_.read(c.rdi, setup, sizeof(setup))) return save_error(save_parameter);
+        return save_service(S::save_memory_setup, {get_le(setup + 4, 4), get_le(setup + 8, 8), c.rsi, 0, 0, 0, c.rsp});
+    }
+    case S::save_memory_set2: case S::save_memory_get2: {
+        uint8_t request[40];
+        if (!c.rdi || !memory_.read(c.rdi, request, sizeof(request))) return save_error(save_parameter);
+        const uint64_t data = get_le(request + 8, 8);
+        // dataNum counts only from SDK 5.00 on: below 2 (Call of Duty leaves
+        // 0) it is one block, as libSceSaveData and shadPS4 read it.
+        const uint64_t count = service == S::save_memory_set2 ? std::max<uint64_t>(get_le(request + 32, 4), 1) : 1;
+        if (!data) return 0; // Only the parameters or the icon: kept nowhere.
+        if (count > 64) return save_error(save_parameter);
+        for (uint64_t k = 0; k < count; ++k) {
+            uint8_t block[24];
+            if (!memory_.read(data + k * 64, block, sizeof(block))) return save_error(save_parameter);
+            const int64_t result = save_service(service == S::save_memory_set2 ? S::save_memory_set : S::save_memory_get,
+                {get_le(request, 4), get_le(block, 8), get_le(block + 8, 8), get_le(block + 16, 8), 0, 0, c.rsp});
+            if (result) return result;
+        }
+        return 0;
+    }
     case S::save_term: save_umount(0); return 0;
     case S::save_mount2: return save_mount(c.rdi, c.rsi);
     case S::save_umount: return save_umount(c.rdi);
@@ -2615,7 +2779,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
             const uint64_t protection = e[24];
             switch (signed32(uint32_t(get_le(e + 28, 4)))) {
             case 0: result = memory_service(S::direct_map, {entry, length, protection, flags, offset, 0}); break;
-            case 1: result = memory_service(S::flexible_release, {start, length}); break;
+            case 1: result = kernel_error(dynamic_->unmap(start, length)); break; // Unmap.
             case 2: case 4: result = memory_service(S::mtype_protect, {start, length, e[25], protection}); break;
             case 3: result = memory_service(S::flexible_map_unnamed, {entry, length, protection, flags}); break;
             default: result = kernel_error(inval); break;
@@ -2664,12 +2828,59 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         return memory_.write(c.rdi, status, sizeof(status)) ? 0 : kernel_error(fault);
     }
     case S::system_event: return int32_t(0x80A10004); // No event.
+    // sceSystemServiceLoadExec(path, argv): the process is not replaced. What it
+    // asked for goes to the report: the path, then argv[0], which Call of Duty
+    // encodes as base64 (- and _, ~ for =): its text and the raw argument.
+    case S::load_exec: {
+        char path[256], argument[2400];
+        if (!c.rdi || !memory_.read_cstring(c.rdi, path, sizeof(path))) return int32_t(0x80A10003);
+        std::string text = path;
+        uint8_t cell[8];
+        if (c.rsi && memory_.read(c.rsi, cell, sizeof(cell)) && get_le(cell, 8) &&
+            memory_.read_cstring(get_le(cell, 8), argument, sizeof(argument))) {
+            static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            std::string decoded, run;
+            uint32_t bits = 0;
+            int count = 0;
+            for (const char* p = argument; *p; ++p) {
+                const char* at = std::strchr(alphabet, *p);
+                if (!at) break;
+                bits = (bits << 6) | uint32_t(at - alphabet);
+                count += 6;
+                if (count >= 8) { count -= 8; decoded.push_back(char(bits >> count)); }
+            }
+            text += " (" + std::to_string(decoded.size()) + " octets) :";
+            decoded.push_back('\0');
+            for (const char ch : decoded) {
+                if (ch >= 32 && ch < 127) { run.push_back(ch); continue; }
+                if (run.size() >= 4) text += " " + run;
+                run.clear();
+            }
+            text += " · brut " + std::string(argument).substr(0, 1500);
+        }
+        std::lock_guard<std::mutex> guard(load_exec_lock_);
+        load_exec_ = std::move(text);
+        return 0;
+    }
     case S::module_info_from_addr: return kernel_error(srch);
     case S::succeed: return 0;
     default: handled = false; return 0;
     }
 }
 int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCall& c) {
+    const int64_t result = memory_service_unrecorded(service, c);
+    if (result < 0) {
+        using S = PS4KernelService;
+        uint64_t hint = 0;
+        uint8_t wire[8];
+        if ((service == S::direct_map || service == S::flexible_map || service == S::flexible_map_unnamed ||
+             service == S::reserve_range) && c.rdi && memory_.read(c.rdi, wire, 8)) hint = get_le(wire, 8);
+        std::lock_guard<std::mutex> guard(memory_failure_lock_);
+        memory_failures_[memory_failures_total_++ % memory_failure_limit] = {service, c, hint, result};
+    }
+    return result;
+}
+int64_t PS4Libkernel::memory_service_unrecorded(PS4KernelService service, const PS4KernelCall& c) {
     using S = PS4KernelService;
     // The PS4's direct memory: 5056 MiB of physical address space.
     constexpr uint64_t direct_total = uint64_t(5056) * 1024 * 1024, page = PS4VirtualMemory::page_size;
@@ -2770,7 +2981,27 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
         if (e) return kernel_error(e);
         return write_pointer(c.rdi, mapped) ? 0 : (dynamic_->unmap(mapped, c.rsi), kernel_error(fault));
     }
-    case S::flexible_release: return kernel_error(dynamic_->unmap(c.rdi, c.rsi));
+    // ReleaseFlexibleMemory(address, length) gives the pages' memory back but
+    // keeps them mapped: they read as zero afterwards (shadPS4: madvise
+    // DONTNEED). It used to unmap, and failed (ENOMEM) on Call of Duty's
+    // ranges, whose later structures then started from stale data.
+    case S::flexible_release: {
+        constexpr uint64_t page = PS4VirtualMemory::page_size;
+        if (!c.rdi || !c.rsi || ((c.rdi | c.rsi) & (page - 1)) || c.rdi > UINT64_MAX - c.rsi) return kernel_error(inval);
+        static const std::vector<uint8_t> zeros(1 << 20, 0);
+        for (uint64_t at = c.rdi, end = c.rdi + c.rsi; at < end;) {
+            uint64_t start = 0, stop = 0;
+            uint32_t protection = 0;
+            if (!dynamic_->query(at, false, start, stop, protection)) return kernel_error(inval);
+            stop = std::min(stop, end);
+            // Writable pages are zeroed; read-only or reserved ones hold nothing to keep.
+            if (memory_.permitted(at, size_t(stop - at), 2))
+                for (uint64_t p = at; p < stop; p += zeros.size())
+                    if (!memory_.write(p, zeros.data(), size_t(std::min<uint64_t>(zeros.size(), stop - p)))) return kernel_error(fault);
+            at = stop;
+        }
+        return 0;
+    }
     // VirtualQuery(address, flags, info*, size): flags 1 finds the next
     // mapping. OrbisVirtualQueryInfo: start, end, offset (u64), protection,
     // memory type (s32), flag bits (flexible 1, direct 2, stack 4, pooled 8,
@@ -2853,11 +3084,20 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
     }
     // sceKernelReleaseDirectMemory(start, length): whole allocations in the range.
     case S::direct_release: {
-        if (!aligned(c.rdi) || !c.rsi || !aligned(c.rsi)) return kernel_error(inval);
+        if (!aligned(c.rdi) || !c.rsi || !aligned(c.rsi) || c.rsi > UINT64_MAX - c.rdi) return kernel_error(inval);
+        // Only the range: what an allocation keeps on either side stays allocated.
+        const uint64_t end = c.rdi + c.rsi;
         bool released = false;
-        for (auto it = direct_.lower_bound(c.rdi); it != direct_.end() && it->first < c.rdi + c.rsi;) {
-            it = direct_.erase(it);
+        auto it = direct_.upper_bound(c.rdi);
+        if (it != direct_.begin()) --it;
+        while (it != direct_.end() && it->first < end) {
+            const uint64_t at = it->first, past = at + it->second;
+            if (past <= c.rdi) { ++it; continue; }
+            direct_.erase(it);
+            if (at < c.rdi) direct_[at] = c.rdi - at;
+            if (past > end) direct_[end] = past - end;
             released = true;
+            it = direct_.lower_bound(std::min(past, end));
         }
         return released ? 0 : kernel_error(noent);
     }
@@ -2871,9 +3111,13 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
         auto owner = direct_.upper_bound(c.r8);
         if (owner == direct_.begin()) return kernel_error(inval);
         --owner;
-        const uint64_t offset = c.r8 - owner->first;
-        if (offset >= owner->second || c.rsi > owner->second - offset)
-            return kernel_error(inval);
+        // Adjacent allocations form one range: Call of Duty pools them and
+        // maps runs of pages across their boundaries.
+        uint64_t reach = owner->first + owner->second;
+        if (c.r8 >= reach) return kernel_error(inval);
+        for (auto next = std::next(owner); next != direct_.end() && next->first == reach && c.rsi > reach - c.r8; ++next)
+            reach += next->second;
+        if (c.rsi > reach - c.r8) return kernel_error(inval);
         uint64_t mapped = 0;
         const Error e = dynamic_->place(hint, c.rsi, std::max<uint64_t>(c.r9, page), protection, (c.rcx & 0x10) != 0, mapped);
         if (e) {
@@ -2946,6 +3190,14 @@ bool PS4Libkernel::initialize_data(PS4KernelService service, uint64_t address, u
     default: return false;
     }
 }
+int64_t PS4Libkernel::note_mutex(PS4KernelService service, uint64_t slot, uint64_t thread, int64_t result) {
+    if (!result) return 0;
+    std::lock_guard<std::mutex> guard(memory_failure_lock_);
+    auto& f = mutex_failures_;
+    ++(service == PS4KernelService::mutex_lock ? f.lock : service == PS4KernelService::mutex_trylock ? f.trylock : f.unlock);
+    f.last_slot = slot; f.last_thread = thread; f.last_result = result; f.last_service = service;
+    return result;
+}
 int64_t PS4Libkernel::invoke_service(PS4KernelService service, const PS4KernelCall& c, uint64_t thread) {
     // Thread services use only PS4Threads (its own lock): a thread blocked in
     // a lock or a wait must not hold up the thread that would release it.
@@ -2953,9 +3205,12 @@ int64_t PS4Libkernel::invoke_service(PS4KernelService service, const PS4KernelCa
     case PS4KernelService::thread_self: return threads_.known(thread) ? int64_t(thread) : kernel_error(inval);
     case PS4KernelService::mutex_init:
         return threads_.known(thread) ? kernel_error(threads_.init(c.rdi, c.rsi, c.rdx)) : kernel_error(inval);
-    case PS4KernelService::mutex_trylock: return kernel_error(threads_.trylock(c.rdi, thread));
-    case PS4KernelService::mutex_lock: return kernel_error(threads_.lock(c.rdi, thread));
-    case PS4KernelService::mutex_unlock: return kernel_error(threads_.unlock(c.rdi, thread));
+    case PS4KernelService::mutex_trylock: {
+        const Error error = threads_.trylock(c.rdi, thread);
+        return error == busy ? kernel_error(error) : note_mutex(service, c.rdi, thread, kernel_error(error));
+    }
+    case PS4KernelService::mutex_lock: return note_mutex(service, c.rdi, thread, kernel_error(threads_.lock(c.rdi, thread)));
+    case PS4KernelService::mutex_unlock: return note_mutex(service, c.rdi, thread, kernel_error(threads_.unlock(c.rdi, thread)));
     case PS4KernelService::mutex_destroy:
         return threads_.known(thread) ? kernel_error(threads_.destroy(c.rdi)) : kernel_error(inval);
     case PS4KernelService::cond_init:

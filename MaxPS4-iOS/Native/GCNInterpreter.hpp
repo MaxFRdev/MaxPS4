@@ -154,6 +154,13 @@ public:
     std::array<std::uint32_t, 4> imageSampler{};
     // Resource scans only: a tiled image reads as zeros instead of ending the run.
     bool tiledReadsZero = false;
+    // Resource discovery normally executes only lane 0. If an explicit lane
+    // exchange reaches another slot, resume with full storage and the current
+    // EXEC mask. Unobserved lanes start at zero, as in the representative scan.
+    bool expandResourceLanes = false;
+    // Hardware allocation from *_PGM_RSRC1. Relative source reads outside it
+    // return VGPR0 on Southern Islands.
+    unsigned vgprCount = 256;
     // Called as `resource` for the resources a store instruction writes.
     std::function<void(std::uint64_t base, std::uint64_t bytes)> stored;
     // Called with every V# access: its extent, stride and the address the
@@ -171,6 +178,8 @@ public:
     void reset() {
         s.fill(0); scc = false; exports.clear(); error.clear();
         std::fill(v_.begin(), v_.end(), 0);
+        lds_.clear(); // retain capacity; initialize only if this wave uses LDS
+        expandResourceLanes = false; vgprCount = 256; missingLane_ = false;
         attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false; scalarLoad = {};
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
@@ -183,7 +192,19 @@ public:
             if (!fetch(pc, i)) return false;
             std::uint64_t next = pc + 4ull * i.size;
             bool ended = false;
+            missingLane_ = false;
             if (!execute(i, pc, next, ended)) {
+                if(missingLane_ && expandResourceLanes && lanes_==1) {
+                    // Resume at the failed instruction, preserving SGPRs, LDS,
+                    // callbacks and earlier resource discoveries; do not replay loads.
+                    auto narrow=std::move(v_);
+                    lanes_=64; v_.assign(256*64,0);
+                    for(unsigned reg=0;reg<256;++reg) v_[64*reg]=narrow[reg];
+                    const bool result=run(pc,maxInstructions-steps);
+                    for(unsigned reg=0;reg<256;++reg) narrow[reg]=v_[64*reg];
+                    v_=std::move(narrow); lanes_=1;
+                    return result;
+                }
                 if (error.empty()) error = "unsupported " + gcnMnemonic(i);
                 char at[32]; std::snprintf(at, sizeof at, " at 0x%llx", (unsigned long long)pc);
                 error += at;
@@ -199,6 +220,8 @@ public:
 private:
     const GCNMemory& memory_;
     unsigned lanes_;
+    bool missingLane_ = false;
+    std::vector<std::uint8_t> lds_; // one interpreted wave; allocated only when used
     GCNCodeCache* cache_;
     std::vector<std::uint32_t> v_;
 
@@ -256,7 +279,7 @@ private:
         case GCNEncoding::vop2: case GCNEncoding::vop1: case GCNEncoding::vopc: case GCNEncoding::vop3: return vector(i);
         case GCNEncoding::vintrp: return vintrp(i);
         case GCNEncoding::ds: return ds(i);
-        case GCNEncoding::mubuf: return mubuf(i);
+        case GCNEncoding::mubuf: case GCNEncoding::mtbuf: return mubuf(i);
         case GCNEncoding::mimg: return mimg(i);
         case GCNEncoding::exp: return exportOp(i);
         default: return false;
@@ -453,6 +476,25 @@ private:
             else { abs = (w >> 8) & 7; clamp = (w >> 11) & 1; }
             if (op < 256) sdst = dst;
             break;
+        }
+        if (op == 257 || op == 258) {
+            if (!vop3) src[1] -= 256; // lane select is a scalar operand, including inline constants
+            if (abs || neg || omod || clamp || src[1] >= 256 ||
+                (op == 257 ? src[0] < 256 || dst >= 128 : src[0] >= 256)) return false;
+            const unsigned lane = scalar(src[1], i) & 63;
+            if (lane >= lanes_) { missingLane_=true; return false; }
+            // These two instructions ignore EXEC, even when every lane is disabled.
+            if (op == 257) setScalar(dst, v(src[0] - 256, lane));
+            else v(dst, lane) = scalar(src[0], i);
+            return true;
+        }
+        if (op == 451) { // v_movrels_b32: VGPR[dst] = VGPR[src0 + M0]
+            if (src[0] < 256 || abs || neg || omod || clamp) return false;
+            std::uint64_t reg = std::uint64_t(src[0] - 256) + s[m0];
+            if (reg >= std::min(vgprCount,256u)) reg = 0;
+            for (unsigned lane = 0; lane < lanes_; ++lane)
+                if (active(lane)) v(dst, lane) = v(unsigned(reg), lane);
+            return true;
         }
         const std::string name = gcnMnemonic(i);
         if (name.empty()) return false;
@@ -658,7 +700,21 @@ private:
         return true;
     }
     bool ds(const GCNInstruction& i) {
-        if (i.opcode != 53) return false; // only ds_swizzle_b32 (no LDS is modelled)
+        if(i.opcode==13 || i.opcode==54) {
+            if(i.word0&0x30000) return fail("GDS/reserved DS flags unsupported");
+            if(lds_.empty()) lds_.resize(65536);
+            const unsigned addr=i.word1&255, data=(i.word1>>8)&255, dst=i.word1>>24;
+            const std::uint64_t limit=std::min<std::uint32_t>(s[124],65536u);
+            for(unsigned lane=0;lane<lanes_;++lane) {
+                if(!active(lane)) continue;
+                const std::uint64_t at=std::uint64_t(v(addr,lane))+(i.word0&0xffff);
+                if((at&3) || at>limit || limit-at<4) return fail("LDS dword range/alignment");
+                if(i.opcode==13) { const auto value=v(data,lane); std::memcpy(lds_.data()+at,&value,4); }
+                else std::memcpy(&v(dst,lane),lds_.data()+at,4);
+            }
+            return true;
+        }
+        if (i.opcode != 53) return false; // other LDS operations remain unsupported
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
         const unsigned offset = i.word0 & 0xffff;
         std::array<std::uint32_t, 64> r{};
@@ -706,7 +762,11 @@ private:
         const std::uint32_t stride = (d[1] >> 16) & 0x3fff, records = d[2];
         const std::uint32_t soffset = scalar(w1 >> 24, i), instOffset = w & 0xfff;
         const unsigned dst_sel[4] = {d[3] & 7, (d[3] >> 3) & 7, (d[3] >> 6) & 7, (d[3] >> 9) & 7};
-        const unsigned nfmt = (d[3] >> 12) & 7, dfmt = (d[3] >> 15) & 15;
+        const bool typed = i.encoding == GCNEncoding::mtbuf;
+        if (typed && i.opcode > 3) return fail("typed buffer stores unsupported");
+        if (typed && (w1 & 0x800000)) return fail("typed buffer fault-status return unsupported");
+        const unsigned nfmt = typed ? (w >> 23) & 7 : (d[3] >> 12) & 7;
+        const unsigned dfmt = typed ? (w >> 19) & 15 : (d[3] >> 15) & 15;
         const unsigned op = i.opcode;
         const bool format = op <= 7, store = (op >= 4 && op <= 7) || (op >= 24 && op <= 31);
         unsigned count;
@@ -893,6 +953,35 @@ private:
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
         if (rsrc > s.size() - 8) return fail("image resource register range");
         const std::uint32_t* d = &s[rsrc];
+        if (i.opcode == 96) {
+            if (samp > s.size()-4 || (dmask & ~3u)) return fail("image_get_lod operand range");
+            std::array<float,64> u{}, vv{};
+            for (unsigned lane=0;lane<lanes_;++lane) {
+                u[lane]=gcn_detail::f32(v(vaddr,lane)); vv[lane]=gcn_detail::f32(v(vaddr+1,lane));
+            }
+            const unsigned base=(d[3]>>12)&15, last=(d[3]>>16)&15;
+            const float width=float(std::max(1u,((d[2]&0x3fff)+1)>>base));
+            const float height=float(std::max(1u,(((d[2]>>14)&0x3fff)+1)>>base));
+            int bias=int(s[samp+2]&0x3fff); if (bias>=8192) bias-=16384;
+            for (unsigned lane=0;lane<lanes_;++lane) {
+                if (!active(lane)) continue;
+                float ux=0,vx=0,uy=0,vy=0;
+                const unsigned quad=lane&~3u, row=lane&~1u, col=quad+(lane&1u);
+                // The resource scanner uses one lane: a constant-coordinate
+                // footprint lets it continue collecting later shader resources.
+                if (quad+3<lanes_) {
+                    ux=u[row+1]-u[row]; vx=vv[row+1]-vv[row];
+                    uy=u[col+2]-u[col]; vy=vv[col+2]-vv[col];
+                }
+                if (!(w&0x1000)) { ux*=width; uy*=width; vx*=height; vy*=height; }
+                const float raw=0.5f*std::log2(std::fmax(ux*ux+vx*vx,uy*uy+vy*vy))+float(bias)/256;
+                float clamp=std::fmin(std::fmax(raw,float(s[samp+1]&0xfff)/256),float((s[samp+1]>>12)&0xfff)/256);
+                clamp=std::fmin(std::fmax(clamp,0.0f),float(last>=base ? last-base : 0));
+                const float result[2]={clamp,raw};
+                for (unsigned n=0,out=0;n<2;++n) if ((dmask>>n)&1) v(vdata+out++,lane)=gcn_detail::u32(result[n]);
+            }
+            return true;
+        }
         if (i.opcode == 14) {
             // image_get_resinfo: width, height, depth (3D) or slices, and mip
             // levels at the lane's mip level, as integers; any image type.
@@ -956,12 +1045,46 @@ private:
             std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);
         }
         const unsigned op = i.opcode;
-        // Address layout: [offset][bias][compare] coordinates [lod/clamp].
-        unsigned first = 0;
-        if (op == 37 || op == 38 || op == 53 || op == 54) first = 1;      // bias variants
-        if (op >= 48 && op < 64) first += 1;                              // _o: offsets first
-        if ((op >= 40 && op < 48) || (op >= 56 && op < 64)) return fail("depth-compare sampling");
+        // Address layout: [offset][bias][compare][derivatives (2D)] coordinates [lod/clamp].
+        if (op==71 || op==87) {
+            if (!dmask || (dmask&(dmask-1)) || samp>s.size()-4) return fail("image_gather4 operand range");
+            unsigned component=0; while (!((dmask>>component)&1)) ++component;
+            const unsigned coord=vaddr+(op==87 ? 1 : 0);
+            const bool un=(w&0x1000) || (s[samp]&0x8000);
+            for (unsigned lane=0;lane<lanes_;++lane) {
+                if (!active(lane)) continue;
+                const unsigned packed=op==87 ? v(vaddr,lane) : 0;
+                int ox=int(packed&63), oy=int((packed>>8)&63);
+                if (ox>=32) ox-=64;
+                if (oy>=32) oy-=64;
+                const float x=gcn_detail::f32(v(coord,lane))*(un ? 1.0f : float(t.width));
+                const float y=gcn_detail::f32(v(coord+1,lane))*(un ? 1.0f : float(t.height));
+                const int ix=int(std::floor(x-0.5f))+ox, iy=int(std::floor(y-0.5f))+oy;
+                float result[4];
+                for (unsigned n=0;n<4;++n) {
+                    bool bx,by;
+                    const int ax=address(ix+int(n==1 || n==2),int(t.width),s[samp]&7,bx);
+                    const int ay=address(iy+int(n<2),int(t.height),(s[samp]>>3)&7,by);
+                    float c[4]={0,0,0,0};
+                    if (bx || by) {
+                        const unsigned border=s[samp+3]>>30;
+                        if (border==1) c[3]=1;
+                        else if (border==2) for (auto& value:c) value=1;
+                    } else if (!texel(t,ax,ay,c)) return false;
+                    result[n]=c[component];
+                }
+                for (unsigned n=0;n<4;++n) v(vdata+n,lane)=gcn_detail::u32(result[n]);
+            }
+            return true;
+        }
         const bool sampleOp = op >= 32 && op < 64, load = op == 0 || op == 1, store = op == 8;
+        const bool bias = sampleOp && ((op & 7) == 5 || (op & 7) == 6);         // _b, _b_cl
+        const bool compare = (op >= 40 && op < 48) || (op >= 56 && op < 64);    // _c: depth compare
+        const bool derivatives = sampleOp && ((op & 7) == 2 || (op & 7) == 3);  // _d, _d_cl
+        unsigned first = unsigned(op >= 48 && op < 64) + unsigned(bias);        // _o: offsets first
+        const unsigned reference = first;
+        if (compare) first += 1;
+        if (derivatives) first += 4;
         if (!sampleOp && !load && !store) return false;
         for (unsigned lane = 0; lane < lanes_; ++lane) {
             if (!active(lane)) continue;
@@ -969,6 +1092,16 @@ private:
             if (sampleOp) {
                 if (!sample(t, &s[samp], (w >> 12) & 1, gcn_detail::f32(v(vaddr + first, lane)),
                             gcn_detail::f32(v(vaddr + first + 1, lane)), c)) return false;
+                if (compare) {
+                    // The comparison with the S#'s function: 1 or 0 in every component.
+                    const float reference_value = gcn_detail::f32(v(vaddr + reference, lane));
+                    const unsigned func = (s[samp] >> 12) & 7;
+                    const float depth = c[0];
+                    const bool pass = func == 1 ? reference_value < depth : func == 2 ? reference_value == depth :
+                        func == 3 ? reference_value <= depth : func == 4 ? reference_value > depth :
+                        func == 5 ? reference_value != depth : func == 6 ? reference_value >= depth : func == 7;
+                    for (float& component : c) component = pass ? 1.0f : 0.0f;
+                }
             } else {
                 const std::uint32_t x = v(vaddr, lane), y = v(vaddr + 1, lane);
                 if (op == 1 && v(vaddr + 2, lane)) return fail("image mip level above 0");

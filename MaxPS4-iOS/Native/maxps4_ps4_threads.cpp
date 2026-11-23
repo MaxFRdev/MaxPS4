@@ -1,6 +1,7 @@
 #include "maxps4_ps4_threads.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 
 namespace maxps4 {
 using namespace ps4;
@@ -65,6 +66,7 @@ PS4Threads::Mutex* PS4Threads::acquire(uint64_t slot, Error& error) {
         if (!fresh) { error = again; return nullptr; }
         if (!write_token(slot, fresh)) { error = fault; return nullptr; }
         mutex = {fresh, 0, slot, token == adaptive_initializer ? adaptive : error_check, 0};
+        note_mutex_peak();
         return &mutex;
     }
     error = again;
@@ -231,15 +233,39 @@ Error PS4Threads::init(uint64_t slot, uint64_t attributes, uint64_t name) {
         char text[1024];
         if (!memory_.read_cstring(name, text, sizeof(text))) return fault;
     }
-    for (const auto& mutex : mutexes_) if (mutex.token && mutex.slot == slot) return busy;
+    // For the report: an init over a mutex that still exists, held or not.
+    if (const Mutex* live = lookup(slot)) {
+        ++reinit_live_;
+        if (live->owner) { ++reinit_held_; reinit_held_slot_ = slot; }
+    }
+    // Every init makes a new mutex, as libkernel does: a pthread_mutex_t is a
+    // pointer, and the slot it was initialized in says nothing about which
+    // mutex a later call means. Call of Duty initializes its mutexes in one
+    // stack variable and copies the result into each global, so tying a
+    // record to its slot (EBUSY, or replacing the record) gave two globals the
+    // same mutex, or destroyed the first one's.
     for (auto& mutex : mutexes_) if (!mutex.token) {
         const uint64_t fresh = next_token();
         if (!fresh) return again;
         if (!write_token(slot, fresh)) return fault;
         mutex = {fresh, 0, slot, type, 0};
+        note_mutex_peak();
         return ok;
     }
     return again;
+}
+void PS4Threads::note_mutex_peak() {
+    const auto used = size_t(std::count_if(mutexes_.begin(), mutexes_.end(), [](const Mutex& m) { return m.token != 0; }));
+    mutex_peak_ = std::max(mutex_peak_, used);
+}
+void PS4Threads::mutex_reinits(uint64_t& live, uint64_t& held, uint64_t& held_slot) const {
+    std::lock_guard<std::mutex> lock(guard_);
+    live = reinit_live_; held = reinit_held_; held_slot = reinit_held_slot_;
+}
+void PS4Threads::mutex_usage(size_t& used, size_t& peak) const {
+    std::lock_guard<std::mutex> lock(guard_);
+    used = size_t(std::count_if(mutexes_.begin(), mutexes_.end(), [](const Mutex& m) { return m.token != 0; }));
+    peak = mutex_peak_;
 }
 Error PS4Threads::trylock(uint64_t slot, uint64_t thread) {
     std::lock_guard<std::mutex> lock(guard_);
@@ -283,6 +309,11 @@ Error PS4Threads::lock(uint64_t slot, uint64_t thread) {
     mutex->owner = thread;
     mutex->count = 1;
     return ok;
+}
+uint64_t PS4Threads::mutex_owner(uint64_t slot) {
+    std::lock_guard<std::mutex> lock(guard_);
+    const Mutex* mutex = slot ? lookup(slot) : nullptr;
+    return mutex ? mutex->owner : 0;
 }
 Error PS4Threads::unlock(uint64_t slot, uint64_t thread) {
     {
@@ -336,7 +367,7 @@ Error PS4Threads::cond_init(uint64_t slot, uint64_t, uint64_t name) {
         char text[1024];
         if (!memory_.read_cstring(name, text, sizeof(text))) return fault;
     }
-    for (const auto& cond : conds_) if (cond.token && cond.slot == slot) return busy;
+    // A new condition every time, whatever the slot held (see init()).
     for (auto& cond : conds_) if (!cond.token) {
         const uint64_t fresh = next_token();
         if (!fresh) return again;
@@ -433,7 +464,7 @@ PS4Threads::RwLock* PS4Threads::acquire_rwlock(uint64_t slot, Error& error) {
 Error PS4Threads::rwlock_init(uint64_t slot) {
     std::lock_guard<std::mutex> lock(guard_);
     if (!writable(slot)) return fault;
-    for (const auto& existing : rwlocks_) if (existing.token && existing.slot == slot) return busy;
+    // A new rwlock every time, whatever the slot held (see init()).
     if (!write_token(slot, static_initializer)) return fault;
     Error error = ok;
     return acquire_rwlock(slot, error) ? ok : error;
@@ -645,12 +676,42 @@ Error PS4Threads::graphics_event_complete(uint64_t ticket) {
     changed_.notify_all();
     return ok;
 }
-void PS4Threads::graphics_interrupt() {
+std::string PS4Threads::sema_state(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(guard_);
+    for (const auto& sema : semas_) if (sema.token && sema.token == handle) {
+        char text[96];
+        std::snprintf(text, sizeof text, "compte %d/%d, %u en attente", sema.count, sema.max, sema.waiters);
+        return text;
+    }
+    return "inconnu";
+}
+std::string PS4Threads::equeue_state(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(guard_);
+    auto* queue = find_equeue(handle);
+    if (!queue) return "inconnue";
+    std::string out;
+    for (const auto& event : queue->events) if (event.used) {
+        char text[96];
+        std::snprintf(text, sizeof text, "%sfiltre %d id 0x%llx%s%s", out.empty() ? "" : ", ", int(event.filter),
+                      (unsigned long long)event.id, event.triggered ? " prêt" : "", event.pending > 1 ? " (+)" : "");
+        out += text;
+    }
+    return out.empty() ? "aucun événement" : out;
+}
+void PS4Threads::graphics_interrupt(uint32_t count) {
+    if (!count) return;
+    graphics_interrupts_ += count;
     {
         std::lock_guard<std::mutex> lock(guard_);
         for (auto& queue : equeues_) if (queue.token)
             for (auto& event : queue.events)
-                if (event.used && event.filter == -14 && event.id == 0x40) { event.data = event.id; event.triggered = true; }
+                if (event.used && event.filter == -14 && event.id == 0x40) {
+                    // Work retires at submission here, so two submissions can
+                    // interrupt before the handler wakes: count them, as a GPU
+                    // finishing them apart would deliver one each.
+                    event.data = event.id; event.triggered = true;
+                    event.pending = std::min<uint32_t>(event.pending + count, 1u << 20);
+                }
     }
     changed_.notify_all();
 }
@@ -737,6 +798,8 @@ Error PS4Threads::equeue_wait(uint64_t handle, uint64_t events, int32_t count,
     size_t consumed = 0;
     for (auto& event : queue->events) if (event.used && event.triggered && consumed < returned) {
         ++consumed;
+        if (event.filter == -14 && event.pending > 1) { --event.pending; continue; }
+        event.pending = 0;
         if (event.edge) event.triggered = false;
     }
     return ok;
@@ -804,7 +867,7 @@ Error PS4Threads::sema_delete(uint64_t handle) {
     changed_.notify_all();
     return ok;
 }
-Error PS4Threads::sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll) {
+Error PS4Threads::sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll, const uint64_t* left) {
     std::unique_lock<std::mutex> lock(guard_);
     auto found = std::find_if(semas_.begin(), semas_.end(), [&](const Sema& s) { return s.token && s.token == handle; });
     if (found == semas_.end()) return srch;
@@ -817,7 +880,8 @@ Error PS4Threads::sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bo
     const uint64_t generation = sema.generation;
     ++sema.waiters;
     auto ready = [&] { return interrupted_ || sema.token != handle || sema.generation != generation || sema.count >= count; };
-    const bool timed_out = wait_timeout(lock, timeout, get_le(wire, 4), ready);
+    const bool timed_out = left ? !changed_.wait_for(lock, std::chrono::microseconds(*left), ready)
+                                : wait_timeout(lock, timeout, get_le(wire, 4), ready);
     if (sema.token == handle) --sema.waiters;
     if (interrupted_) return intr;
     if (sema.token != handle || sema.generation != generation) return canceled;

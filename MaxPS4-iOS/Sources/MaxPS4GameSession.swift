@@ -76,9 +76,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var engine: OpaquePointer?
     private var bridge: MaxPS4GameMetalBridge?
     private var stopped = false
+    private var stopReason: String?
+    private var stopWasFailure = false
     private var ready = false
     private var port: UInt64 = 1
-    private var missingSince: Date?
     private var lockWait: TimeInterval = 0 // Last snapshot's wait for `lock`.
     private var pad = MaxPS4PadState()
     // Local multiplayer: player 2's controller (nil: none). Under inputLock.
@@ -96,12 +97,12 @@ final class MaxPS4GameSource: @unchecked Sendable {
         guard lock.try() else { return current + " (verrou de session pris)" }
         defer { lock.unlock() }
         guard let engine else { return current }
-        var activity = [CChar](repeating: 0, count: 4096)
+        var activity = [CChar](repeating: 0, count: 16384)
         _ = maxps4_fex_engine_thread_activity(engine, &activity, activity.count)
         return current + "\n" + String(cString: activity)
     }
     // What the last run left for the player, set before run() returns.
-    struct Outcome { var missing: [String] = []; var crashed = false; var report: URL? }
+    struct Outcome { var missing: [String] = []; var crashed = false; var report: URL?; var failure: String? }
     private(set) var outcome = Outcome()
     private var inputEngine: OpaquePointer?
     private var displayed = 0
@@ -164,12 +165,12 @@ final class MaxPS4GameSource: @unchecked Sendable {
         guard let started, let engine else { return nil }
         let now = ProcessInfo.processInfo.systemUptime
         let seconds = Int(now - started)
-        var activity = [CChar](repeating: 0, count: 4096)
+        var activity = [CChar](repeating: 0, count: 16384)
         _ = maxps4_fex_engine_thread_activity(engine, &activity, activity.count)
         inputLock.lock(); let sent = vblanksSent; inputLock.unlock()
         let missing = missingImports(engine)
         let compatibility = missing.called.isEmpty ? "" : "Fonctions PS4 manquantes appelées : \(missing.called.count) sur \(missing.total) absentes · "
-            + missing.called.prefix(5).joined(separator: " · ") + "\n"
+            + missing.called.joined(separator: " · ") + "\n"
         let text = compatibility + inputDelays(engine) + padPlayers(engine) + "Depuis le démarrage du JIT : \(seconds) s · dernier ticket VideoOut \(lastTicket) · images affichées \(displayed) · sautées \(maxps4_fex_engine_videoout_dropped(engine)) · VBlank envoyés \(sent)\n" + rates(engine, now: now) + audioStatus(engine) + "\n" + String(cString: activity) + profile(engine) + mainThreadSample(engine)
         lastBeat = text
         if let liveReport {
@@ -198,7 +199,13 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let zone = areaSize == 0 ? "zone PS4 0x1000000000 refusée par iOS (code \(status))"
             : "zone PS4 0x\(String(area, radix: 16)) (\(gib(areaSize)) Gio)"
         let spare = maxps4_fex_engine_spare_address_space(engine) >> 20
-        return "Mémoire : \(zone) · fenêtre 0x\(String(window, radix: 16)) (\(gib(windowSize)) Gio) · encore libre après elle : \(spare) Mio"
+        return "Mémoire : \(zone) · fenêtre 0x\(String(window, radix: 16)) (\(gib(windowSize)) Gio) · encore libre après elle : \(spare) Mio\n\(memoryLimit())"
+    }
+    // The sum of use and what iOS still allows is the limit, which the increased
+    // memory limit entitlement raises when the signature keeps it.
+    private func memoryLimit() -> String {
+        guard let memory = MaxPS4Entitlements.memory() else { return "RAM : inconnue" }
+        return "RAM : \(memory.used) Mio utilisés · limite iOS \(memory.limit) Mio"
     }
     // What the game printed last (its own error messages), invalid UTF-8 replaced.
     private func console(_ engine: OpaquePointer) -> String {
@@ -420,26 +427,27 @@ final class MaxPS4GameSource: @unchecked Sendable {
         let timing = String(format: "Préparation : verrou session %.1f ms · cible %.1f ms · copie %.1f ms",
                             lockWait * 1000, (located - started - lockWait) * 1000,
                             (ProcessInfo.processInfo.systemUptime - located) * 1000)
+        // A flip the GPU never drew (a game clearing its first frames on the
+        // CPU, or before any submission) is still handed back, or the game
+        // waits for it forever: the screen keeps its last image. The report
+        // counts these flips ("sans cible Metal").
         guard let texture = copied else {
-            if missingSince == nil { missingSince = Date() }
-            if Date().timeIntervalSince(missingSince!) > 5 {
-                throw failure("Aucune texture Metal pour le buffer retourné", -EIO)
-            }
+            complete(ticket: info.ticket, presented: true, shown: false)
             return nil
         }
-        missingSince = nil
         return Frame(info: info, texture: texture, event: displayEvent, eventValue: displayEventValue,
                      report: bridge.report + "\n" + timing)
     }
-    @discardableResult func complete(ticket: UInt64, presented: Bool) -> Bool {
+    // `shown`: false for a flip handed back without an image to show.
+    @discardableResult func complete(ticket: UInt64, presented: Bool, shown: Bool = true) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard let engine else { return false }
         let confirmed = presented && !stopped
         let result = maxps4_fex_engine_videoout_complete(engine, ticket, confirmed ? 1 : 0)
-        if result == 0 && confirmed { displayed += 1 }
+        if result == 0 && confirmed && shown { displayed += 1 }
         return result == 0 && confirmed
     }
-    func stop() {
+    func stop(reason: String = "Session arrêtée.", isFailure: Bool = false) {
         // Silence at once: a stop interrupts AudioOut's pacing, so until the
         // run ends the game's audio thread would queue its last buffers in a
         // tight loop and the speaker would stutter them. close() repeats this.
@@ -449,6 +457,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
         if let inputEngine { maxps4_fex_engine_videoout_pause(inputEngine, 0) }
         inputEngine = nil; inputLock.unlock()
         lock.lock()
+        if !stopped || (isFailure && !stopWasFailure) {
+            stopReason = reason; stopWasFailure = isFailure
+        }
         stopped = true; ready = false
         vblankTimer?.cancel(); vblankTimer = nil
         if let engine { _ = maxps4_fex_engine_request_stop(engine) }
@@ -549,6 +560,10 @@ final class MaxPS4GameSource: @unchecked Sendable {
             bridge = metal; ready = !stopped
             started = ProcessInfo.processInfo.systemUptime
             liveReport = MaxPS4Reports.live(for: url)
+            // A new run: the previous run's note is gone, this one's goes there.
+            let crashNote = MaxPS4Reports.hostCrash(for: url)
+            try? FileManager.default.removeItem(at: crashNote)
+            crashNote.path.withCString { maxps4_fex_set_host_crash_note($0) }
             folderListing = listing
             self.relocation = relocation
             let cancelled = stopped
@@ -575,40 +590,51 @@ final class MaxPS4GameSource: @unchecked Sendable {
             setStage("jeu en cours")
             let ran = maxps4_fex_engine_run_orbis(opened, &value, &backend, &entry)
             setStage("jeu arrêté, rapport de fin")
-            lock.lock(); let wasStopped = stopped; let frames = displayed; lock.unlock()
+            lock.lock()
+            let wasStopped = stopped, frames = displayed
+            let stopCause = stopReason, stoppedOnFailure = stopWasFailure
+            lock.unlock()
             var fault = maxps4_fex_guest_fault()
             _ = maxps4_fex_engine_last_guest_fault(opened, &fault)
             let relativeRIP = fault.rip >= relocation ? fault.rip - relocation : fault.rip
             let missing = missingImports(opened)
-            let crashed = !wasStopped && (ran != 0 || fault.signal != 0)
+            let crashed = stoppedOnFailure || (!wasStopped && (ran != 0 || fault.signal != 0))
             // The last live report, not a new one: reading the engine now would
             // sample the main guest thread, which is this very thread.
             lock.lock(); let live = lastBeat; lock.unlock()
             let metalReport = metal.report + (frameTiming ? "\n" + metal.frameTimingReport : "")
+            // The fault itself: the live report above was taken before it.
+            var detail = [CChar](repeating: 0, count: 8192)
+            _ = maxps4_fex_engine_fault_detail(opened, &detail, detail.count)
+            let faultDetail = String(cString: detail)
             defer {
-                let text = [result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP),
+                let text = [result(of: ran, backend: backend, wasStopped: wasStopped, stopCause: stopCause, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP),
+                            faultDetail,
                             "Fonctions PS4 manquantes appelées (\(missing.called.count) sur \(missing.total) absentes) :",
                             missing.called.isEmpty ? "aucune" : missing.called.joined(separator: "\n"), "",
                             "Derniers appels PS4 en échec :", failedCalls(opened), "",
                             "Fichiers ouverts par le jeu :", openedFiles(opened), "",
                             "Derniers appels PS4 :", recentCalls(opened), "",
                             "Sortie du jeu :", console(opened), "", memoryLayout(opened), movedMappings(opened), "", live, "", folderListing].joined(separator: "\n")
-                outcome = Outcome(missing: missing.called, crashed: crashed, report: MaxPS4Reports.save(text, for: url))
+                outcome = Outcome(missing: missing.called, crashed: crashed, report: MaxPS4Reports.save(text, for: url), failure: stoppedOnFailure ? stopCause : nil)
                 // The run ended normally: its final report replaces the live one.
                 lock.lock(); let liveFile = liveReport; liveReport = nil; lock.unlock()
                 if let liveFile { try? FileManager.default.removeItem(at: liveFile) }
             }
-            return result(of: ran, backend: backend, wasStopped: wasStopped, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP)
+            // On screen too: the fault line is what a pasted end screen needs.
+            let summary = result(of: ran, backend: backend, wasStopped: wasStopped, stopCause: stopCause, frames: frames, metal: metalReport, fault: fault, relative: relativeRIP)
+            return faultDetail.isEmpty ? summary : summary + "\n" + faultDetail
         } catch {
             let text = String(localized: "Échec : \(error.localizedDescription)", bundle: .maxps4)
             outcome = Outcome(missing: [], crashed: true, report: MaxPS4Reports.save(text, for: url))
             return text
         }
     }
-    private func result(of ran: Int32, backend: UInt32, wasStopped: Bool, frames: Int, metal: String, fault: maxps4_fex_guest_fault, relative relativeRIP: UInt64) -> String {
+    private func result(of ran: Int32, backend: UInt32, wasStopped: Bool, stopCause: String?, frames: Int, metal: String, fault: maxps4_fex_guest_fault, relative relativeRIP: UInt64) -> String {
             // A stop interrupts the main thread: where it was shows what a stalled game waits on.
             if wasStopped {
-                return "Arrêté après \(frames) images présentées. \(metal)\nThread principal interrompu à RIP 0x\(String(fault.rip, radix: 16)) (relatif 0x\(String(relativeRIP, radix: 16)), relocation 0x\(String(relocation, radix: 16)))."
+                let cause = stopCause.map { "Motif de l’arrêt : \($0)\n" } ?? ""
+                return cause + "Arrêté après \(frames) images présentées. \(metal)\nThread principal interrompu à RIP 0x\(String(fault.rip, radix: 16)) (relatif 0x\(String(relativeRIP, radix: 16)), relocation 0x\(String(relocation, radix: 16)))."
             }
             // 0x4d50 (maxps4_dispatch_fault.h): FEX could not compile the guest block at RIP.
             let uncompilable = fault.code == 0x4d50
@@ -638,7 +664,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
     private var launched = false
     private var diagnosticSessionStart: Date?
     func start(url: URL, update: URL? = nil, addons: [MaxPS4GameFolders.Addon] = [], device: MTLDevice, nativeTextures: Bool = false, tso: Bool = true, outputHeight: Int = 1080, profiling: Bool = false, frameTiming: Bool = false) {
-        stop()
+        stop(reason: "Remplacement par une nouvelle session.")
         let source = MaxPS4GameSource(), id = UUID()
         generation = id; self.source = source; worker = source; running = true
         hasPresented = false; heartbeat = ""; outcome = .init()
@@ -694,16 +720,21 @@ final class MaxPS4GameSource: @unchecked Sendable {
     func noteTouch(player: Int) { worker?.noteTouch(player: player) }
     func touchArrived(_ seconds: TimeInterval) { worker?.touchArrived(seconds) }
     func presented(_ text: String) { if running { hasPresented = true; report = text } }
-    func failed(_ text: String) { stop(); stopping = nil; report = text }
+    func failed(_ text: String) {
+        guard running else { return }
+        // Preserve both the immediate error and the final compatibility report.
+        stop(reason: text, isFailure: true)
+        outcome.crashed = true; outcome.failure = text
+    }
     // The game menu's pause: no vblank and no audio read, so a game paced on
     // them (Sonic Mania) waits where it is.
     func setPaused(_ paused: Bool) { worker?.setPaused(paused) }
-    func stop() {
+    func stop(reason: String = "Arrêt demandé.", isFailure: Bool = false) {
         stopping = worker == nil ? nil : generation
         if let worker { Self.draining = worker }
-        generation = UUID(); worker?.stop(); worker = nil; source = nil; running = false
+        generation = UUID(); worker?.stop(reason: reason, isFailure: isFailure); worker = nil; source = nil; running = false
         heartbeatTimer?.invalidate(); heartbeatTimer = nil
-        report = String(localized: "Arrêt demandé.", bundle: .maxps4)
+        report = reason
     }
     // Include the native fatal-fault log when exporting diagnostics. The Metal
     // heartbeat is only a snapshot and does not contain FEX's link-rip/bytes.
@@ -720,7 +751,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         text += "\n\nJournal FEXCore (maxps4-fatal-fault.txt) :\n" + String(contents.suffix(16_384))
         return text
     }
-    deinit { worker?.stop() }
+    deinit { worker?.stop(reason: "Destruction de la session.") }
 }
 #endif
 

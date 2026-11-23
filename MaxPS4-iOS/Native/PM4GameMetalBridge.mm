@@ -122,6 +122,8 @@ struct GameMetalState {
             @"\nTextures natives : %u dessins, %u textures (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
             renderer.nativeDraws, renderer.nativeViews, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
+        if (nativeTextures && !renderer.nativeLastPlane.empty())
+            native = [native stringByAppendingFormat:@"\nDernier plan vidéo vu par Metal : %s", renderer.nativeLastPlane.c_str()];
         const std::string refusal = renderer.pipelineError();
         const std::string pending = renderer.pipelineStatus();
         native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés · lectures directes %u sur %u%s%s%s%@",
@@ -350,8 +352,12 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                 s.programCosts += text;
             }
         }
-        if (barrierFailure) return -EIO;
-        if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }
+        if (barrierFailure) { self.lastReport = s.report(); return -EIO; }
+        if (s.stats.failed != failed) {
+            s.error = s.stats.error;
+            self.lastReport = s.report(); // Preserve the failing shader, not the previous successful batch.
+            return -ENOTSUP;
+        }
         const double encoding = elapsedMs(encodingStarted);
         const bool hasRenderWork = segmentEncoded || s.stats.rendered != rendered;
         if (hasRenderWork) {

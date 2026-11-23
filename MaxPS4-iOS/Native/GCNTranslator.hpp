@@ -11,8 +11,8 @@
 // Execution model (see GCNShaderRuntime.hpp): one lane per invocation with
 // local scalar registers; lane masks keep this lane's bit in bit 0; branches
 // on VCC/EXEC, WQM and SCC of 64-bit mask operations are decided per 2x2
-// quad. Not translated, reported as errors: LDS (other than ds_swizzle in
-// quad mode), memory stores outside compute programs, lane counts of masks,
+// quad. Not translated, reported as errors: general LDS (except proved
+// lane-private scratch and quad swizzles), memory stores outside compute programs, lane counts of masks,
 // s_getpc. A compute program runs one lane per thread: user SGPRs, then the
 // enabled thread group ids, in L.user; thread ids in v0-v2.
 #include "GCNDecoder.hpp"
@@ -31,6 +31,9 @@ struct GCNTranslateOptions {
     unsigned userCount = 0;
     std::size_t maxInstructions = 16384;
     std::string name = "gcn_program";
+    // Number of VGPRs allocated by SPI_SHADER_PGM_RSRC1. Required only by
+    // relative VGPR source instructions; zero means the bound is unavailable.
+    unsigned vgprCount = 0;
     bool dispatcher = false;     // keep the switch in a loop where blocks could run in order
     // Each draw gets a complete table of scalar values (PM4ResourceScanner::scalarTable):
     // loads whose address is proved the same on every path read it without a check.
@@ -42,8 +45,8 @@ struct GCNTranslation {
     std::uint32_t params = 0;    // vertex: parameters exported (bit N)
     std::uint32_t attributes = 0, flat = 0; // pixel: attributes read, of which flat
     std::uint8_t colors = 0;     // pixel: MRTs exported
-    bool position = false, quad = false, mayKill = false;
-    bool stores = false;         // compute: writes guest memory
+    bool position = false, quad = false, mayKill = false, depth = false;
+    bool stores = false, laneIndex = false; // requires a native SIMD lane index
     // pixel: the scalar loads, each with `2 + count` words at `offset` of the
     // draw's table of scalar values (address, then words: gcn_site_hit).
     std::vector<GCNScalarSite> sites;
@@ -70,6 +73,8 @@ public:
                       (i.encoding==GCNEncoding::sopp && i.opcode==0))) break;
                 pc+=4*i.size;
             }
+            preparePrivateLDS(entry);
+            prepareScalarSpills();
             emit(entry);
             out_.mayKill=execMayKill_ || (restoresEntryExec_ &&
                 (scalarWrites_[savedEntryExec_]!=1 || scalarWrites_[savedEntryExec_+1]!=1));
@@ -98,6 +103,201 @@ private:
     std::map<std::uint64_t, Known> incoming_;
     std::map<std::array<std::uint32_t, 6>, std::uint32_t> loads_; // Same load, same site.
     bool inOrder_ = false;
+    unsigned privateLDSSlots_ = 0;
+    std::map<std::uint64_t,unsigned> scalarSpills_;
+    // Only scalar spills into constant lane slots are lowered. This does not
+    // implement a general wave64 shuffle using a native SIMD32 group.
+    static bool laneInstruction(const GCNInstruction& i, unsigned& op, unsigned& dst,
+                                unsigned& value, unsigned& select) {
+        if(i.encoding==GCNEncoding::vop2 && (i.opcode==1 || i.opcode==2)) {
+            op=i.opcode; dst=(i.word0>>17)&255; value=i.word0&511; select=(i.word0>>9)&255;
+            return true;
+        }
+        if(i.encoding==GCNEncoding::vop3 && (i.opcode==257 || i.opcode==258)) {
+            op=i.opcode-256; dst=i.word0&255; value=i.word1&511; select=(i.word1>>9)&511;
+            return !(i.word0&0xf00) && !(i.word1&0xf8000000u);
+        }
+        return false;
+    }
+    static bool readsVGPR(const GCNInstruction& i, unsigned reg) {
+        const auto name=gcnMnemonic(i);
+        const unsigned width=name.find("64")!=std::string::npos ? 2u : 1u;
+        const auto vector=[&](unsigned code,unsigned count) { return code>=256 && reg>=code-256 && reg-(code-256)<count; };
+        switch(i.encoding) {
+        case GCNEncoding::sop1: case GCNEncoding::sop2: case GCNEncoding::sopk:
+        case GCNEncoding::sopc: case GCNEncoding::sopp: case GCNEncoding::smrd: return false;
+        case GCNEncoding::vop1: return vector(i.word0&511,width);
+        case GCNEncoding::vop2:
+            return vector(i.word0&511,width) || vector(256+((i.word0>>9)&255),width) ||
+                (name.find("mac")!=std::string::npos && ((i.word0>>17)&255)==reg);
+        case GCNEncoding::vopc: return vector(i.word0&511,width) || vector(256+((i.word0>>9)&255),width);
+        case GCNEncoding::vop3:
+            return vector(i.word1&511,width) || vector((i.word1>>9)&511,width) ||
+                vector((i.word1>>18)&511,width) || (name.find("mac")!=std::string::npos && (i.word0&255)==reg);
+        case GCNEncoding::vintrp:
+            return (i.word0&255)==reg || (i.opcode==1 && ((i.word0>>18)&255)==reg);
+        case GCNEncoding::mimg:
+            // Plain SAMPLE needs at most four coordinates (including arrays).
+            // Conservatively bound the larger packed argument lists of other image ops.
+            return vector(256+(i.word1&255),i.opcode==32 ? 4 : 16);
+        case GCNEncoding::mubuf: case GCNEncoding::mtbuf:
+            return vector(256+(i.word1&255),2) || vector(256+((i.word1>>8)&255),4);
+        case GCNEncoding::ds:
+            return vector(256+(i.word1&255),1) || vector(256+((i.word1>>8)&255),2) || vector(256+((i.word1>>16)&255),2);
+        case GCNEncoding::exp:
+            for(unsigned c=0;c<4;++c) if((i.word0&(1u<<c)) && ((i.word1>>(8*c))&255)==reg) return true;
+            return false;
+        default: return true;
+        }
+    }
+    void prepareScalarSpills() {
+        scalarSpills_.clear();
+        std::set<unsigned> banks;
+        for(const auto& item:code_) {
+            unsigned op,dst,value,select;
+            if(laneInstruction(item.second.i,op,dst,value,select)) banks.insert(op==2 ? dst : value-256);
+        }
+        for(const unsigned bank:banks) {
+            bool dirty=false,started=false;
+            std::uint64_t block=0;
+            std::set<unsigned> initialized;
+            std::map<std::uint64_t,unsigned> proved;
+            auto last=code_.end();
+            for(auto it=code_.begin();it!=code_.end();++it) {
+                unsigned op,dst,value,select;
+                const auto& i=it->second.i;
+                if((laneInstruction(i,op,dst,value,select) && (op==2 ? dst : value-256)==bank) ||
+                   readsVGPR(i,bank) || writesVGPR(i,bank)) last=it;
+            }
+            for(auto it=code_.begin();it!=code_.end();++it) {
+                const auto pc=it->first; const auto& i=it->second.i;
+                const auto current=*std::prev(leaders_.upper_bound(pc));
+                if(started && current!=block) { proved.clear(); break; }
+                unsigned op,dst,value,select;
+                if(laneInstruction(i,op,dst,value,select) && (op==2 ? dst : value-256)==bank) {
+                    const bool scalarValue=value<104 || value==124 || (value>=128 && value<=208) || (value>=240 && value<=248) || value==255;
+                    if(select<128 || select>191 || (op==2 ? !scalarValue : value<256 || dst>=104)) { proved.clear(); break; }
+                    const unsigned slot=select-128, key=64*bank+slot;
+                    if(op==2) { initialized.insert(slot); dirty=true; started=true; block=current; }
+                    else if(!initialized.count(slot)) { proved.clear(); break; }
+                    proved[pc]=key;
+                } else if(started) {
+                    // Changing EXEC could expose an unwritten physical lane later.
+                    const auto name=gcnMnemonic(i);
+                    const bool execWrite=((i.encoding==GCNEncoding::sop1 || i.encoding==GCNEncoding::sop2 || i.encoding==GCNEncoding::sopk) &&
+                        (((i.word0>>16)&127)>=126 || (((i.word0>>16)&127)==125 && name.find("64")!=std::string::npos) ||
+                         name.find("saveexec")!=std::string::npos)) || name.find("cmpx")!=std::string::npos;
+                    if(execWrite || name.find("movrel")!=std::string::npos || (dirty && readsVGPR(i,bank))) { proved.clear(); break; }
+                    if(writesVGPR(i,bank)) {
+                        // Broad def tracking includes possible multi-result writes.
+                        // Only a definite vector destination may discard the spill.
+                        const bool overwrite=(i.encoding==GCNEncoding::vop1 && i.opcode!=0 && i.opcode!=2 && i.opcode!=65 && ((i.word0>>17)&255)==bank) ||
+                            (i.encoding==GCNEncoding::vop2 && i.opcode>2 && ((i.word0>>17)&255)==bank) ||
+                            (i.encoding==GCNEncoding::vop3 && i.opcode>258 && i.opcode!=384 && i.opcode!=386 && i.opcode!=449 && (i.word0&255)==bank) ||
+                            (i.encoding==GCNEncoding::vintrp && ((i.word0>>18)&255)==bank);
+                        if(!overwrite) { proved.clear(); break; }
+                        dirty=false; initialized.clear();
+                    }
+                }
+                if(it==last) break;
+            }
+            scalarSpills_.insert(proved.begin(),proved.end());
+        }
+    }
+    // Conservative VGPR def tracking for the lane-address proof. Unknown or
+    // multi-result operations may invalidate a candidate, never prove one.
+    static bool writesVGPR(const GCNInstruction& i, unsigned reg) {
+        const auto range=[reg](unsigned first,unsigned count) { return reg>=first && reg-first<count; };
+        const auto name=gcnMnemonic(i);
+        if(name.find("movrel")!=std::string::npos) return true;
+        const unsigned width=name.empty() || name.find("64")!=std::string::npos ? 2u : 1u;
+        switch(i.encoding) {
+        case GCNEncoding::sop1: case GCNEncoding::sop2: case GCNEncoding::sopk:
+        case GCNEncoding::sopc: case GCNEncoding::sopp: case GCNEncoding::smrd:
+        case GCNEncoding::vopc: case GCNEncoding::exp: return false;
+        case GCNEncoding::vop1: return i.opcode!=2 && range((i.word0>>17)&255,width);
+        case GCNEncoding::vop2: return i.opcode!=1 && range((i.word0>>17)&255,width);
+        case GCNEncoding::vop3: return i.opcode>=256 && i.opcode!=386 && range(i.word0&255,width);
+        case GCNEncoding::vintrp: return range((i.word0>>18)&255,1);
+        case GCNEncoding::mubuf: case GCNEncoding::mtbuf:
+            return i.opcode<=15 && !(i.opcode>=4 && i.opcode<=7) && range((i.word1>>8)&255,4);
+        case GCNEncoding::mimg: return !(i.opcode>=8 && i.opcode<=11) && range((i.word1>>8)&255,4);
+        case GCNEncoding::ds:
+            return i.opcode!=13 && range(i.word1>>24,(i.opcode==53 || i.opcode==54) ? 1 : 4);
+        default: return true;
+        }
+    }
+    bool laneByteAddress(std::uint64_t pc,unsigned reg) const {
+        auto upper=leaders_.upper_bound(pc);
+        if (upper==leaders_.begin()) return false;
+        const auto start=*--upper;
+        unsigned step=0;
+        auto it=code_.lower_bound(pc);
+        while(it!=code_.begin()) {
+            --it;
+            if(it->first<start) break;
+            const auto& i=it->second.i;
+            // No change to EXEC may revive an address that this lane did not set.
+            if ((i.encoding==GCNEncoding::sop1 || i.encoding==GCNEncoding::sop2 || i.encoding==GCNEncoding::sopk) &&
+                ((i.word0>>16)&127)>=126) return false;
+            if ((i.encoding==GCNEncoding::vopc || (i.encoding==GCNEncoding::vop3 && i.opcode<256)) &&
+                ((i.opcode>>4)&1)) return false;
+            if (!writesVGPR(i,reg)) continue;
+            if (step==0 && i.encoding==GCNEncoding::vop2 &&
+                i.word0==(0x34000000u|(reg<<17)|(reg<<9)|130u)) { ++step; continue; }
+            if (step==1 && i.encoding==GCNEncoding::vop2 &&
+                i.word0==(0x46000000u|(reg<<17)|(reg<<9)|193u)) { ++step; continue; }
+            return step==2 && i.word0==(0xd2480000u|reg) && i.word1==0x000100c1u;
+        }
+        return false;
+    }
+    bool fullLDSLimit(std::uint64_t pc) const {
+        auto upper=leaders_.upper_bound(pc);
+        if(upper==leaders_.begin()) return false;
+        const auto start=*--upper;
+        auto it=code_.lower_bound(pc);
+        while(it!=code_.begin()) {
+            --it; if(it->first<start) break;
+            const auto& i=it->second.i;
+            const auto name=gcnMnemonic(i);
+            if(name.find("movrel")!=std::string::npos) return false;
+            unsigned dst=128,count=1;
+            if(i.encoding==GCNEncoding::sop1 || i.encoding==GCNEncoding::sop2 || i.encoding==GCNEncoding::sopk) {
+                dst=(i.word0>>16)&127; count=name.find("64")!=std::string::npos ? 2 : 1;
+            } else if(i.encoding==GCNEncoding::smrd) {
+                dst=(i.word0>>15)&127; count=16; // conservative for all scalar load widths
+            } else if((i.encoding==GCNEncoding::vop1 && i.opcode==2) ||
+                      (i.encoding==GCNEncoding::vop2 && i.opcode==1)) dst=(i.word0>>17)&127;
+            else if(i.encoding==GCNEncoding::vop3 && i.opcode==386) dst=i.word0&127;
+            else if(i.encoding==GCNEncoding::vop3 && i.opcode<256) { dst=(i.word0>>8)&127; count=2; }
+            if(dst<=124 && 124-dst<count)
+                return i.word0==0xbefc03ffu && i.literal==65536u;
+        }
+        return false;
+    }
+    void preparePrivateLDS(std::uint64_t entry) {
+        privateLDSSlots_=0;
+        unsigned storedOnEntry=0,used=0;
+        std::array<std::uint64_t,8> lastStoreBlock;
+        lastStoreBlock.fill(~std::uint64_t(0));
+        for (const auto& item:code_) {
+            const auto pc=item.first; const auto& i=item.second.i;
+            if(i.encoding!=GCNEncoding::ds || (i.opcode==53 && (i.word0&0x8000))) continue;
+            const unsigned offset=i.word0&0xffff;
+            if(options_.stage!=GCNStage::pixel || (i.opcode!=13 && i.opcode!=54) || (i.word0&0x30000) ||
+                (offset&255) || offset>=8*256 || !laneByteAddress(pc,i.word1&255) || !fullLDSLimit(pc)) return;
+            const unsigned slot=offset/256, bit=1u<<slot;
+            const auto block=*std::prev(leaders_.upper_bound(pc));
+            if(i.opcode==13) {
+                if(block==entry) storedOnEntry|=bit;
+                lastStoreBlock[slot]=block;
+            } else if(!(storedOnEntry&bit) && lastStoreBlock[slot]!=block) return;
+            // Entry stores dominate the whole program. A store earlier in the
+            // same basic block dominates that read even after a branch/join.
+            used|=bit;
+        }
+        privateLDSSlots_=used;
+    }
     void flowTo(std::uint64_t target) {
         const auto found = incoming_.find(target);
         if (found == incoming_.end()) { incoming_[target] = known_; return; }
@@ -232,7 +432,14 @@ private:
                 bool ended = false;
                 if (!instruction(found->second, pc, ended)) {
                     if (out_.error.empty()) fail("unsupported " + found->second.name);
-                    char at[32]; std::snprintf(at, sizeof at, " at 0x%llx", (unsigned long long)pc);
+                    // Unknown opcodes have no mnemonic. Preserve the encoded
+                    // instruction so a device-only shader failure is actionable.
+                    const auto& failed = found->second.i;
+                    char at[160];
+                    std::snprintf(at, sizeof at,
+                        " at 0x%llx [encoding %u opcode %u words %08x %08x size %u]",
+                        (unsigned long long)pc, unsigned(failed.encoding), unsigned(failed.opcode),
+                        unsigned(failed.word0), unsigned(failed.word1), unsigned(failed.size));
                     out_.error += at;
                     return;
                 }
@@ -254,6 +461,11 @@ private:
         }
         for (const auto n : vregs_)
             head += "    uint v" + std::to_string(n) + " = " + (n < 24 ? "L.vinit[" + std::to_string(n) + "]" : std::string("0u")) + ";\n";
+        for(unsigned slot=0;slot<8;++slot) if(privateLDSSlots_&(1u<<slot))
+            head += "    uint privateLDS"+std::to_string(slot)+" = 0u;\n";
+        std::set<unsigned> spillSlots;
+        for(const auto& spill:scalarSpills_) spillSlots.insert(spill.second);
+        for(const unsigned slot:spillSlots) head += "    uint scalarSpill"+std::to_string(slot)+" = 0u;\n";
         // Blocks are numbered by address: a fetch shader below the program
         // comes first, so execution starts at the entry's own block.
         head += "    bool scc = false; uint pc = " + std::to_string(index(entry)) + "u; bool running = true;\n"
@@ -271,10 +483,10 @@ private:
         case GCNEncoding::sopc: return sopc(in);
         case GCNEncoding::sopp: return sopp(in, pc, ended);
         case GCNEncoding::smrd: return smrd(in);
-        case GCNEncoding::vop1: case GCNEncoding::vop2: case GCNEncoding::vopc: case GCNEncoding::vop3: return vector(in);
+        case GCNEncoding::vop1: case GCNEncoding::vop2: case GCNEncoding::vopc: case GCNEncoding::vop3: return vector(in,pc);
         case GCNEncoding::vintrp: return vintrp(in);
-        case GCNEncoding::ds: return ds(in);
-        case GCNEncoding::mubuf: return mubuf(in);
+        case GCNEncoding::ds: return ds(in,pc);
+        case GCNEncoding::mubuf: case GCNEncoding::mtbuf: return mubuf(in);
         case GCNEncoding::mimg: return mimg(in);
         case GCNEncoding::exp: return exportOp(in);
         default: return false;
@@ -500,8 +712,17 @@ private:
     }
 
     // Vector ALU, normalized to VOP3 opcode numbers as in the interpreter.
-    bool vector(const Inst& in) {
+    bool vector(const Inst& in, std::uint64_t pc) {
         const GCNInstruction& i = in.i;
+        unsigned laneOp,laneDst,laneValue,laneSelect;
+        if(laneInstruction(i,laneOp,laneDst,laneValue,laneSelect)) {
+            const auto spill=scalarSpills_.find(pc);
+            if(spill==scalarSpills_.end()) return fail("lane exchange outside proved scalar spill");
+            const std::string slot="scalarSpill"+std::to_string(spill->second);
+            if(laneOp==2) body_ += slot+" = "+scalar(laneValue,i)+";";
+            else setScalar(laneDst,slot);
+            return true; // READLANE/WRITELANE ignore EXEC.
+        }
         unsigned op, dst, src[3] = {0, 0, 0};
         unsigned abs = 0, neg = 0, omod = 0, sdst = 106;
         bool clamp = false, vop3 = false;
@@ -521,6 +742,19 @@ private:
         }
         const std::string& name = in.name;
         if (name.empty()) return false;
+        if(op==451) { // v_movrels_b32: source VGPR is indexed by unsigned M0
+            if(src[0]<256 || abs || neg || omod || clamp)
+                return fail("unsupported relative VGPR modifiers");
+            const unsigned base=src[0]-256;
+            if(options_.vgprCount<4 || options_.vgprCount>256 || (options_.vgprCount&3) || base>=options_.vgprCount)
+                return fail("relative VGPR allocation unavailable");
+            body_ += "{ uint relativeValue = "+v(0)+"; switch ("+s(124)+") { ";
+            for(unsigned reg=base;reg<options_.vgprCount;++reg)
+                body_ += "case "+std::to_string(reg-base)+"u: relativeValue = "+v(reg)+"; break; ";
+            body_ += "default: break; } if ("+std::string(ex())+") "+v(dst)+" = relativeValue; }";
+            sregs_.insert(126);
+            return true;
+        }
         const bool floatIn = gcn_detail::endsWith(name, "_f32");
         const bool floatOut = (floatIn && name.compare(0, 5, "v_cmp") != 0 && name != "v_cvt_u32_f32" &&
                                name != "v_cvt_i32_f32" && name != "v_cvt_pkrtz_f16_f32" && name != "v_cvt_flr_i32_f32" &&
@@ -589,6 +823,11 @@ private:
         case 288: expr = "gu(fa * gf(" + hex(i.literal) + ") + fb)"; break;
         case 289: expr = "gu(fa * fb + gf(" + hex(i.literal) + "))"; break;
         case 290: expr = "gcn_popcount(a) + b"; break;
+        case 291: case 292:
+            if (options_.stage == GCNStage::vertex) return fail("masked bit count in vertex program unsupported");
+            out_.laneIndex = true;
+            expr = "gcn_mbcnt(a, b, L.simdLane, " + std::string(op == 292 ? "true" : "false") + ")";
+            break;
         case 293: carry = "ulong t = ulong(a) + ulong(b); r = uint(t); co = uint(t >> 32);"; break;
         case 294: carry = "r = a - b; co = b > a ? 1u : 0u;"; break;
         case 295: carry = "r = b - a; co = a > b ? 1u : 0u;"; break;
@@ -687,10 +926,18 @@ private:
         sregs_.insert(126);
         return true;
     }
-    bool ds(const Inst& in) {
+    bool ds(const Inst& in, std::uint64_t pc) {
         const GCNInstruction& i = in.i;
         const unsigned offset = i.word0 & 0xffff;
-        if (i.opcode != 53 || !(offset & 0x8000)) return fail("LDS access other than a quad swizzle");
+        if(privateLDSSlots_ && (i.opcode==13 || i.opcode==54) && laneByteAddress(pc,i.word1&255)) {
+            const std::string slot="privateLDS"+std::to_string(offset/256);
+            body_ += std::string("if (")+ex()+") ";
+            if(i.opcode==13) body_ += slot+" = "+v((i.word1>>8)&255)+";";
+            else body_ += v(i.word1>>24)+" = "+slot+";";
+            sregs_.insert(126);
+            return true;
+        }
+        if (i.opcode != 53 || !(offset & 0x8000)) return fail("LDS access outside proved lane-private scratch or quad swizzle");
         if (options_.stage != GCNStage::pixel) return fail("quad swizzle outside a pixel program");
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
         // Every lane takes part (inactive ones contribute 0), so quads stay converged.
@@ -707,6 +954,9 @@ private:
         const bool offen = (w >> 12) & 1, idxen = (w >> 13) & 1;
         if ((w >> 15) & 1) return fail("addr64 buffer access");
         const unsigned op = i.opcode;
+        const bool typed = i.encoding == GCNEncoding::mtbuf;
+        if (typed && op > 3) return fail("typed buffer stores unsupported");
+        if (typed && (w1 & 0x800000)) return fail("typed buffer fault-status return unsupported");
         unsigned count;
         const bool store = (op >= 4 && op <= 7) || op == 24 || op == 26 || (op >= 28 && op <= 31);
         if (op <= 3) count = op + 1;
@@ -715,7 +965,13 @@ private:
         else if (op == 13 || op == 29) count = 2; else if (op == 14 || op == 30) count = 4; else if (op == 15 || op == 31) count = 3;
         else return fail("unsupported buffer access");
         if (store && options_.stage != GCNStage::compute) return fail("buffer store outside a compute program");
-        const std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + s(rsrc + 3) + "}}; ";
+        std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + s(rsrc + 3) + "}}; ";
+        if (typed) {
+            const unsigned dfmt=(w>>19)&15, nfmt=(w>>23)&7;
+            if (!(dfmt==1 || dfmt==2 || dfmt==3 || dfmt==4 || dfmt==5 || (dfmt>=10 && dfmt<=14)))
+                return fail("typed buffer data format " + std::to_string(dfmt));
+            res += "r.d[3] = (r.d[3] & ~0x7f000u) | " + std::to_string((dfmt<<15)|(nfmt<<12)) + "u; ";
+        }
         const std::string index = idxen ? v(vaddr) : "0u", voffset = offen ? v(vaddr + (idxen ? 1 : 0)) : "0u";
         const std::string args = index + ", " + voffset + ", " + scalar(w1 >> 24, i) + ", " + std::to_string(w & 0xfff) + "u, " +
                                  (idxen ? "true" : "false") + ", " + (offen ? "true" : "false");
@@ -753,14 +1009,51 @@ private:
         const unsigned vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff;
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
         const unsigned op = i.opcode;
-        unsigned first = 0;
-        if (op == 37 || op == 38 || op == 53 || op == 54) first = 1;
-        if (op >= 48 && op < 64) first += 1;
-        if ((op >= 40 && op < 48) || (op >= 56 && op < 64)) return fail("depth-compare sampling");
+        // Address layout: [offset][bias][compare][derivatives (2D)] coordinates [lod/clamp].
+        const bool sampling = op >= 32 && op < 64;
+        const bool bias = sampling && ((op & 7) == 5 || (op & 7) == 6);
+        const bool compare = (op >= 40 && op < 48) || (op >= 56 && op < 64);
+        const bool derivatives = sampling && ((op & 7) == 2 || (op & 7) == 3);
+        unsigned first = unsigned(op >= 48 && op < 64) + unsigned(bias);
+        const unsigned reference = first;
+        if (compare) first += 1;
+        if (derivatives) first += 4;
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
         std::string call;
-        if (op >= 32 && op < 64) {
+        if (op == 71 || op == 87) {
+            if (!dmask || (dmask & (dmask-1))) return fail("image_gather4 requires one component");
+            const unsigned coord=vaddr+(op==87 ? 1 : 0);
+            unsigned component=0; while (!((dmask>>component)&1)) ++component;
+            res += "GCNRes4 sm = {{" + s(samp) + ", " + s(samp+1) + ", " + s(samp+2) + ", " + s(samp+3) + "}}; ";
+            body_ += "if (" + std::string(ex()) + ") { " + res + "float4 gathered = gcn_gather_lz(M, t, sm, " +
+                std::string((w&0x1000) ? "true" : "false") + ", gf(" + v(coord) + "), gf(" + v(coord+1) + "), " +
+                (op==87 ? v(vaddr) : std::string("0u")) + ", " + std::to_string(component) + "u); ";
+            for (unsigned n=0;n<4;++n) body_ += v(vdata+n)+" = gu(gathered["+std::to_string(n)+"]); ";
+            body_ += "}"; sregs_.insert(126);
+            return out_.error.empty();
+        } else if (op == 96) {
+            if (options_.stage != GCNStage::pixel) return fail("image_get_lod outside a pixel program");
+            if (dmask & ~3u) return fail("image_get_lod result mask outside xy");
+            out_.quad = true;
+            res += "GCNRes4 sm = {{" + s(samp) + ", " + s(samp + 1) + ", " + s(samp + 2) + ", " + s(samp + 3) + "}}; ";
+            // Every quad lane participates, including helper lanes. Capture all
+            // coordinates before writing vdata, which may alias vaddr.
+            body_ += "{ " + res;
+            for (unsigned c = 0; c < 2; ++c)
+                for (unsigned lane = 0; lane < 4; ++lane)
+                    body_ += "float q" + std::to_string(c) + std::to_string(lane) +
+                        " = gf(gcn_quad_shuffle(Q, L, " + v(vaddr + c) + ", " + std::to_string(lane) + "u)); ";
+            body_ += "float4 lod = gcn_image_lod_2d(t, sm, " + std::string((w & 0x1000) ? "true" : "false") +
+                ", (L.quadLane & 2u) != 0u ? q03-q02 : q01-q00, (L.quadLane & 2u) != 0u ? q13-q12 : q11-q10, "
+                "(L.quadLane & 1u) != 0u ? q03-q01 : q02-q00, (L.quadLane & 1u) != 0u ? q13-q11 : q12-q10); ";
+            body_ += "if (" + std::string(ex()) + ") { ";
+            for (unsigned n = 0, out = 0; n < 2; ++n)
+                if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(lod[" + std::to_string(n) + "]); ";
+            body_ += "} }";
+            sregs_.insert(126);
+            return out_.error.empty();
+        } else if (op >= 32 && op < 64) {
             res += "GCNRes4 sm = {{" + s(samp) + ", " + s(samp + 1) + ", " + s(samp + 2) + ", " + s(samp + 3) + "}}; ";
             call = "gcn_sample(M, t, sm, " + std::string(((w >> 12) & 1) ? "true" : "false") + ", gf(" + v(vaddr + first) + "), gf(" +
                    v(vaddr + first + 1) + "))";
@@ -786,6 +1079,10 @@ private:
             return out_.error.empty();
         } else return fail("unsupported image access " + in.name);
         body_ += "if (" + std::string(ex()) + ") { " + res + "float4 c = " + call + "; ";
+        if (compare) {
+            body_ += "{ float p = gcn_depth_pass(sm.d[0] >> 12, gf(" + v(vaddr + reference) +
+                     "), c[0]) ? 1.0f : 0.0f; c = float4(p, p, p, p); } ";
+        }
         for (unsigned n = 0, out = 0; n < 4; ++n)
             if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(c[" + std::to_string(n) + "]); ";
         body_ += "}";
@@ -813,6 +1110,12 @@ private:
             body_ += "if (" + E + ") { L.color[" + std::to_string(target) + "] = " + value + "; L.colorWritten |= " +
                      std::to_string(1u << target) + "u; }";
             if (done) body_ += " else L.killed = true;";
+        } else if (target == 8) {
+            if (options_.stage != GCNStage::pixel || compressed || enable != 1)
+                return fail("unsupported depth/stencil export mask");
+            out_.depth = true;
+            body_ += "if (" + E + ") L.depth = gf(" + r[0] + ");";
+            if (done) body_ += " else L.killed = true;";
         } else if (target == 9) {
             if (done) body_ += "if (!" + E + ") L.killed = true;";
         } else if (target == 12) { out_.position = true; body_ += "L.pos = " + value + ";"; }
@@ -836,7 +1139,7 @@ inline GCNTranslation translateGCN(const GCNMemory& memory, std::uint64_t entry,
 // which follow the user SGPRs, and the thread id components beyond x.
 inline std::string gcnMetalComputeEntry(const std::string& name) {
     return "struct GCNDispatchState { ulong base; ulong size; uint user[16]; uint userCount; uint rsrc2; uint rangeCount; uint pad; ulong ranges[48]; };\n"
-           "kernel void gcn_compute(uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]],\n"
+           "kernel void gcn_compute(uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]], uint simdLane [[thread_index_in_simdgroup]],\n"
            "    device uchar* mem [[buffer(0)]], constant GCNDispatchState& D [[buffer(1)]]) {\n"
            "    GCNLane L; gcn_lane_init(L);\n"
            "    uint n = min(D.userCount, 16u);\n"
@@ -844,7 +1147,7 @@ inline std::string gcnMetalComputeEntry(const std::string& name) {
            "    if ((D.rsrc2 & 0x80u) != 0u && n < 20u) L.user[n++] = group.x;\n"
            "    if ((D.rsrc2 & 0x100u) != 0u && n < 20u) L.user[n++] = group.y;\n"
            "    if ((D.rsrc2 & 0x200u) != 0u && n < 20u) L.user[n++] = group.z;\n"
-           "    L.vinit[0] = local.x; L.vinit[1] = local.y; L.vinit[2] = local.z;\n"
+           "    L.simdLane = simdLane; L.vinit[0] = local.x; L.vinit[1] = local.y; L.vinit[2] = local.z;\n"
            "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u };\n"
            "    " + name + "(L, M, Q);\n}\n";
 }
@@ -866,6 +1169,20 @@ using namespace metal;
 #define GCN_FN inline
 struct GCNRes8 { uint d[8]; };
 struct GCNRes4 { uint d[4]; };
+// Depth-compare sampling (image_sample_c*): S# DEPTH_COMPARE_FUNC (word 0 bits
+// 12-14) between the reference the program passes and the sampled depth.
+GCN_FN bool gcn_depth_pass(uint func, float reference, float depth) {
+    switch (func & 7u) {
+    case 1u: return reference < depth;
+    case 2u: return reference == depth;
+    case 3u: return reference <= depth;
+    case 4u: return reference > depth;
+    case 5u: return reference != depth;
+    case 6u: return reference >= depth;
+    case 7u: return true;
+    default: return false;
+    }
+}
 #if GCN_NATIVE_TEXTURES
 // Up to four of a draw's T#s viewed as Metal textures (a video's Y, U and V
 // planes); bit k of `enabled` marks texture k valid, bit 4 + k its Metal
@@ -917,9 +1234,9 @@ GCN_FN device const uchar* gcn_at(GCNMemory M, ulong o) {
 }
 struct GCNQuad { uint unused; };
 struct GCNLane {
-    uint user[20]; uint vinit[24]; bool exec; uint quadLane;
+    uint user[20]; uint vinit[24]; bool exec; uint quadLane; uint simdLane;
     float4 attr[GCN_ATTRS];
-    float4 pos; float4 param[GCN_PARAMS]; float4 color[GCN_COLORS]; uint colorWritten; bool killed;
+    float4 pos; float4 param[GCN_PARAMS]; float4 color[GCN_COLORS]; uint colorWritten; bool killed; float depth;
 };
 GCN_FN void gcn_clear(thread GCNLane& L) {
     for (uint k = 0u; k < 20u; ++k) L.user[k] = 0u;
@@ -927,7 +1244,7 @@ GCN_FN void gcn_clear(thread GCNLane& L) {
     for (uint k = 0u; k < GCN_ATTRS; ++k) L.attr[k] = float4(0.0f);
     for (uint k = 0u; k < GCN_PARAMS; ++k) L.param[k] = float4(0.0f);
     for (uint k = 0u; k < GCN_COLORS; ++k) L.color[k] = float4(0.0f);
-    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false;
+    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.simdLane = 0u; L.colorWritten = 0u; L.killed = false; L.depth = 0.0f;
 }
 // gcn_clear without attr/param/color: zeroing those arrays for every pixel
 // was most of a full-screen draw's GPU time (GCNShaderCostMetalTest). Entry
@@ -935,7 +1252,7 @@ GCN_FN void gcn_clear(thread GCNLane& L) {
 GCN_FN void gcn_lane_init(thread GCNLane& L) {
     for (uint k = 0u; k < 20u; ++k) L.user[k] = 0u;
     for (uint k = 0u; k < 24u; ++k) L.vinit[k] = 0u;
-    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.colorWritten = 0u; L.killed = false;
+    L.pos = float4(0.0f); L.exec = true; L.quadLane = 0u; L.simdLane = 0u; L.colorWritten = 0u; L.killed = false; L.depth = 0.0f;
 }
 // Per-draw state at buffer(1): guest memory at buffer(0) is either one window
 // starting at guest address `base` (rangeCount 0) or rangeCount copied ranges
@@ -1017,7 +1334,7 @@ GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locat
 // Which of the draw's Metal textures (0 to 3) views T# `t`, or -1.
 GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
     const uint dfmt = (t.d[1] >> 20) & 63u;
-    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u && dfmt != 41u)) return -1;
+    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u && dfmt != 41u && (dfmt < 35u || dfmt > 37u))) return -1;
     const uint4 low = uint4(t.d[0],t.d[1],t.d[2],t.d[3]), high = uint4(t.d[4],t.d[5],t.d[6],t.d[7]);
     const uint enabled = M.native->enabled;
     if ((enabled & 1u) && all(M.native->low == low) && all(M.native->high == high)) return 0;
@@ -1162,16 +1479,25 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         if ((vs.params >> p) & 1) s += "        o.p" + std::to_string(p) + " = got[1].p" + std::to_string(p) + " + got[2].p" + std::to_string(p) + " - got[0].p" + std::to_string(p) + ";\n";
     s += "    }\n"
          "    if ((D.flags & GCN_DRAW_FLIP_Y) != 0u) o.position.y = -o.position.y;\n"
-         "    return o;\n}\n"
-         "struct GCNFragment { float4 color [[color(0)]]; uint coverage [[sample_mask]]; };\n";
+         "    return o;\n}\n";
+    const bool structured = ps.mayKill || ps.depth;
+    const bool fragmentColor = !ps.depth || (ps.colors & 1);
+    s += "struct GCNFragment { ";
+    if (fragmentColor) s += "float4 color [[color(0)]]; ";
+    if (ps.mayKill) s += "uint coverage [[sample_mask]]; ";
+    if (ps.depth) s += "float depth [[depth(any)]]; ";
+    s += "};\n";
     if (mrt) {
         s += "struct GCNFragmentMRT {";
         for (unsigned c = 0; c < 8; ++c)
             if ((colorTargets >> c) & 1) s += " float4 c" + std::to_string(c) + " [[color(" + std::to_string(c) + ")]];";
-        s += ps.mayKill ? " uint coverage [[sample_mask]]; };\n" : " };\n";
+        if (ps.mayKill) s += " uint coverage [[sample_mask]];";
+        if (ps.depth) s += " float depth [[depth(any)]];";
+        s += " };\n";
     }
-    s += std::string("fragment ")+(mrt ? "GCNFragmentMRT" : ps.mayKill ? "GCNFragment" : "float4")+
+    s += std::string("fragment ")+(mrt ? "GCNFragmentMRT" : structured ? "GCNFragment" : "float4")+
          " gcn_fragment(GCNVaryings in [[stage_in]], uint sampleCoverage [[sample_mask]],\n"
+         + std::string(ps.laneIndex ? "    uint simdLane [[thread_index_in_simdgroup]],\n" : "") +
          "    " + std::string(ps.sites.empty() ? "" : "constant uint* U [[buffer(4)]], ") +
          "device const uchar* mem [[buffer(0)]], constant GCNDrawState& D [[buffer(1)]] GCN_SLOT_PARAMS) {\n"
          // Incoming raster coverage is independent of later fragment kills.
@@ -1180,8 +1506,10 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     for (unsigned c = 0; c < 8; ++c)
         if (c == 0 || ((ps.colors >> c) & 1)) s += "    L.color[" + std::to_string(c) + "] = float4(0.0f);\n";
     s += "    for (uint k = 0u; k < 17u; ++k) L.user[k] = D.psUser[k];\n"
+         "    L.depth = in.position.z;\n"
          "    L.exec = covered;\n"
          "    L.quadLane = (uint(in.position.x) & 1u) | ((uint(in.position.y) & 1u) << 1);\n";
+    if (ps.laneIndex) s += "    L.simdLane = simdLane;\n";
     for (unsigned a = 0; a < 32; ++a) {
         if (!((ps.attributes >> a) & 1)) continue;
         const std::uint32_t cntl = inputCntl[a];
@@ -1219,10 +1547,15 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
             s += "    out.c" + std::to_string(c) + " = " + (exported ? "L.color[" + std::to_string(c) + "]" : std::string("float4(0.0f)")) + ";\n";
         }
         if (ps.mayKill) s += "    out.coverage = L.killed ? 0u : 0xffffffffu;\n";
+        if (ps.depth) s += "    out.depth = L.depth;\n";
         s += "    return out;\n}\n";
-    } else
-    s += ps.mayKill ? "    return { L.color[0], L.killed ? 0u : 0xffffffffu };\n}\n"
-                    : "    return L.color[0];\n}\n";
+    } else if (structured) {
+        s += "    return { ";
+        if (fragmentColor) s += "L.color[0], ";
+        if (ps.mayKill) s += "L.killed ? 0u : 0xffffffffu, ";
+        if (ps.depth) s += "L.depth, ";
+        s += "};\n}\n";
+    } else s += "    return L.color[0];\n}\n";
     if (nativeTextures) {
         auto replace = [&](const std::string& from, const std::string& to) {
             for (std::size_t at = 0; (at = s.find(from, at)) != std::string::npos; at += to.size()) s.replace(at, from.size(), to);

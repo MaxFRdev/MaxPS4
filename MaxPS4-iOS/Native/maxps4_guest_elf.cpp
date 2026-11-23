@@ -1,3 +1,4 @@
+#include "OrbisFixedLayout.hpp"
 #include "maxps4_guest_elf.h"
 #include "maxps4_guest_range.h"
 #include "maxps4_ps4_guest_memory.h"
@@ -82,6 +83,7 @@ void GuestELF::clear() {
     identity = false;
     stack_address = stack_bytes = heap_address = heap_bytes = entry_params_address = heap_window = 0;
     threads_address = thread_slot_bytes = thread_return_address = 0;
+    program_named = true;
     tls_image.clear();
     thunks.clear();
     hle_data.clear();
@@ -442,6 +444,12 @@ int GuestELF::prepare_linked(const OrbisLinker::Image& linked, const std::string
                 bytes[entry_at + 6 + b] = uint8_t(params >> (8 * b));
                 bytes[entry_at + 21 + b] = uint8_t(exit_function >> (8 * b));
             }
+            for (auto& module : copy.modules) for (auto& segment : module.image.segments)
+                if ((segment.header.flags & 5) == 5 && !segment.header.address) {
+                    orbisRelocateFixedLayout(segment.bytes.data(), size_t(segment.header.fileSize), heap_low, heap_window);
+                    if (module.path == root)
+                        orbisUseLiteralSaveStrings(segment.bytes.data(), size_t(segment.header.fileSize));
+                }
         }
         // Local-exec read through FS must stay inside the blocks or the TCB.
         auto tls_readable = [&](int64_t displacement, uint64_t bytes) {
@@ -793,7 +801,7 @@ uint64_t GuestELF::write_entry_params() {
     const uint64_t words[4] = {1, entry_params_address + 32, 0, 0};
     std::memset(params, 0, entryParamsBytes);
     std::memcpy(params, words, sizeof(words));
-    std::memcpy(params + 32, program, sizeof(program));
+    if (program_named) std::memcpy(params + 32, program, sizeof(program));
     return entry_params_address;
 }
 bool GuestELF::prepare_thread(size_t slot, uint64_t& stack_top, uint64_t& tp) {

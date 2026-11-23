@@ -6,19 +6,27 @@
 #include "maxps4_ps4_user_service.h"
 #include "maxps4_ps4_pad.h"
 #include "maxps4_ps4_audio_out.h"
+#include "maxps4_ps4_ajm.h"
 #include "maxps4_ps4_gnm.h"
 #include "maxps4_ps4_gnm_queue.h"
+#include <algorithm>
 #include <array>
 #include <map>
 #include <string>
 #include <vector>
+#include <functional>
+#include <atomic>
 #include <mutex>
 #include <string_view>
 
 namespace maxps4 {
 // Entry snapshot for PS4 x86-64 System V calls. Host function addresses must
 // never be installed directly into guest GOT/PLT slots on ARM64.
-struct PS4KernelCall { uint64_t rdi = 0, rsi = 0, rdx = 0, rcx = 0, r8 = 0, r9 = 0, rsp = 0; };
+struct PS4KernelCall {
+    uint64_t rdi = 0, rsi = 0, rdx = 0, rcx = 0, r8 = 0, r9 = 0, rsp = 0;
+    // Callee-saved registers at the call, for diagnostics only (0 when not given).
+    uint64_t r14 = 0, r15 = 0, r12 = 0, rbp = 0;
+};
 enum class PS4KernelService : uint32_t {
     unresolved, open, read, close, lseek, stat, fstat,
     mmap, munmap, mprotect, clock_gettime, clock_getres, gettimeofday, process_time,
@@ -76,6 +84,7 @@ enum class PS4KernelService : uint32_t {
     save_init, save_term, save_mount2, save_umount,
     save_mount1, save_umount2, save_search, save_set_param, save_get_param, save_save_icon, save_load_icon,
     save_delete, save_mount_info, save_event, save_progress, save_memory_setup, save_memory_get, save_memory_set,
+    save_memory_setup2, save_memory_get2, save_memory_set2,
     sema_create, sema_delete, sema_wait, sema_poll, sema_signal, sema_cancel,
     flag_create, flag_delete, flag_set, flag_clear, flag_wait, flag_poll, flag_cancel,
     process_counter, counter_frequency, kernel_sleep,
@@ -107,7 +116,7 @@ enum class PS4KernelService : uint32_t {
     heap_trace_info,
     // libSceSystemService (shadPS4 system_service.cpp): settings of an
     // English console, a foreground application status, no system events.
-    system_param_int, system_status, system_event,
+    system_param_int, system_status, system_event, load_exec,
     // libSceAudioOut (PS4AudioOut). Output blocks for one buffer's duration.
     audio_init, audio_open, audio_close, audio_output,
     // Append new services to preserve existing trampoline service IDs.
@@ -117,13 +126,18 @@ enum class PS4KernelService : uint32_t {
     sched_priority_max, sched_priority_min, sched_param_get, net_unavailable,
     discmap_no_bitmap, discmap_flags, video_capability,
     gnm_workload_stream, gnm_workload_begin, gnm_workload_end, gnm_submit_workload, gnm_submit_flip_workload,
-    gnm_map_compute, gnm_unmap_compute, gnm_ding_dong, gnm_tessellation_offchip,
+    gnm_map_compute, gnm_unmap_compute, gnm_ding_dong, gnm_tessellation_offchip, gnm_tessellation_ring,
     gnm_ls, gnm_hs, gnm_hs_update, gnm_es, gnm_gs, gnm_push_color_marker, gnm_set_color_marker,
     gnm_ding_dong_marker, gnm_embedded_ps, gnm_compute_wait_address, gnm_compute_wait_semaphore,
     gnm_dispatch_indirect_mec, thread_getname,
     trophy_game_info, trophy_group_info, trophy_unlock_state, rtc_time_t,
-    attr_getschedparam, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_post, uuid_create,
-    net_pton, net_ntop
+    attr_getschedparam, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_timedwait, sem_post, uuid_create,
+    net_pton, net_ntop,
+    // libSceAjm (PS4Ajm).
+    ajm_initialize, ajm_finalize, ajm_module_register, ajm_module_unregister, ajm_instance_create,
+    ajm_instance_destroy, ajm_instance_codec, ajm_job_control, ajm_job_run, ajm_job_run_split, ajm_job_inline,
+    ajm_batch_start, ajm_batch_wait, ajm_batch_cancel, ajm_memory_register, ajm_memory_unregister, ajm_mp3_parse,
+    app_space_kb
 };
 // Token bit of a trampoline whose function follows the POSIX convention: -1
 // with the error in the calling thread's errno (__Error) instead of an Orbis
@@ -174,7 +188,9 @@ PS4KernelService resolve_libkernel(std::string_view symbol,
 class PS4Libkernel final {
 public:
     static constexpr size_t descriptor_limit = 256;
+    // Host buffer for one piece of a file transfer (transfer() has no size limit).
     static constexpr size_t transfer_limit = 1024 * 1024;
+    int64_t transfer(int fd, uint64_t guest, size_t count, int64_t offset, bool reading);
     static constexpr size_t stat_size = 120;
     explicit PS4Libkernel(PS4GuestMemory& memory, PS4VirtualMemory* dynamic = nullptr);
     ~PS4Libkernel();
@@ -221,19 +237,73 @@ public:
     PS4VideoOut& videoout() { return videoout_; }
     PS4Pad& pad() { return pad_; }
     PS4AudioOut& audio() { return audio_; }
+    PS4Ajm& ajm() { return ajm_; }
     PS4GnmQueue& graphics() { return graphics_; }
     // The last console_limit bytes the game wrote to its stdout and stderr.
+    // What the game last passed to sceSystemServiceLoadExec; empty if nothing.
+    std::string load_exec() { std::lock_guard<std::mutex> guard(load_exec_lock_); return load_exec_; }
     std::string console() { std::lock_guard<std::mutex> guard(lock_); return std::string(console_.begin(), console_.end()); }
     static constexpr size_t console_limit = 4096;
     static constexpr int32_t abort_status = 134; // As a process killed by SIGABRT.
+    // Memory services that returned an error, BatchMap entries included:
+    // `hint` is what *rdi held for the calls that take a void** address.
+    // Failed mutex lock/trylock/unlock calls (trylock's busy is not a failure):
+    // a game that ignores the result runs its critical section unprotected.
+    struct MutexFailures { uint64_t lock = 0, trylock = 0, unlock = 0, last_slot = 0, last_thread = 0; int64_t last_result = 0; PS4KernelService last_service{}; };
+    // Diagnostic watch on one mutex, set before the game runs: called after each
+    // successful lock (also trylock, timed lock and a condition wait's return)
+    // and unlock of that slot, with the thread and the guest caller ([rsp]).
+    using MutexWatch = std::function<void(uint64_t thread, uint64_t caller, bool unlock, const PS4KernelCall& call)>;
+    void watch_mutex(uint64_t slot, MutexWatch watch) { mutex_watch_ = std::move(watch); watched_mutex_.store(slot); }
+    MutexFailures mutex_failures() const { std::lock_guard<std::mutex> guard(memory_failure_lock_); return mutex_failures_; }
+    void mutex_usage(size_t& used, size_t& peak) const { threads_.mutex_usage(used, peak); }
+    void mutex_reinits(uint64_t& live, uint64_t& held, uint64_t& slot) const { threads_.mutex_reinits(live, held, slot); }
+    struct MemoryFailure { PS4KernelService service{}; PS4KernelCall call{}; uint64_t hint = 0; int64_t result = 0; };
+    static constexpr size_t memory_failure_limit = 16;
+    // The last failures, newest first; returns how many there were in all.
+    size_t memory_failures(std::array<MemoryFailure, memory_failure_limit>& out, size_t& count) const {
+        std::lock_guard<std::mutex> guard(memory_failure_lock_);
+        count = std::min(memory_failures_total_, memory_failure_limit);
+        for (size_t i = 0; i < count; ++i)
+            out[i] = memory_failures_[(memory_failures_total_ - 1 - i) % memory_failure_limit];
+        return memory_failures_total_;
+    }
+    // Save data calls and file calls on /savedata paths or descriptors,
+    // newest first, with what the game passed and got.
+    struct SaveCall { PS4KernelService service{}; PS4KernelCall call{}; int64_t result = 0; char path[56] = {}; };
+    static constexpr size_t save_call_limit = 24;
+    size_t save_calls(std::array<SaveCall, save_call_limit>& out, size_t& count, std::string& root) const {
+        std::lock_guard<std::mutex> guard(save_call_lock_);
+        count = std::min(save_calls_total_, save_call_limit);
+        for (size_t i = 0; i < count; ++i) out[i] = save_calls_[(save_calls_total_ - 1 - i) % save_call_limit];
+        root = save_root_seen_;
+        return save_calls_total_;
+    }
 private:
+    mutable std::mutex save_call_lock_;
+    std::array<SaveCall, save_call_limit> save_calls_ {};
+    size_t save_calls_total_ = 0;
+    std::string save_root_seen_;
+    std::vector<int64_t> save_fds_;
+    void record_save_call(PS4KernelService service, const PS4KernelCall& call, int64_t result);
+    mutable std::mutex memory_failure_lock_;
+    std::array<MemoryFailure, memory_failure_limit> memory_failures_ {};
+    size_t memory_failures_total_ = 0;
+    MutexFailures mutex_failures_ {};
+    std::atomic<uint64_t> watched_mutex_ {0};
+    MutexWatch mutex_watch_;
+    int64_t note_mutex(PS4KernelService service, uint64_t slot, uint64_t thread, int64_t result);
+    int64_t memory_service_unrecorded(PS4KernelService service, const PS4KernelCall& call);
     PS4GuestMemory& memory_;
     PS4VirtualMemory* dynamic_;
+    std::mutex load_exec_lock_;
+    std::string load_exec_;
     PS4Threads threads_;
     PS4VideoOut videoout_;
     PS4UserService user_service_;
     PS4Pad pad_;
     PS4AudioOut audio_;
+    PS4Ajm ajm_;
     PS4Gnm gnm_;
     PS4GnmQueue graphics_;
     uint64_t errno_table_ = 0, errno_table_size_ = 0, process_param_ = 0;

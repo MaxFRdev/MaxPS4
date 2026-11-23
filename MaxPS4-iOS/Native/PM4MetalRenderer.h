@@ -149,14 +149,17 @@ public:
     // ranges, alignment, Metal view refused; and the last refused T#.
     unsigned nativeMisses[5] = {};
     std::string nativeLastMiss;
+    // The last 8-bit (video plane) view: non-zero bytes Metal sees, out of 64.
+    std::string nativeLastPlane;
     // A Metal sampler with S# `s`'s address modes and filters, for an argument
     // buffer; nil for modes Metal has no match for (border, mirror once) or
     // depth compare, which keep GCN's filtering.
     static MTLSamplerDescriptor* nativeSamplerDescriptor(const std::array<std::uint32_t, 4>& s);
 
 private:
-    // Programs, fetch SGPRs, PS inputs, colour format, blend, mask, depth format.
-    using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned, unsigned>;
+    // Programs, their VGPR allocations, fetch SGPRs, PS inputs, colour
+    // format, blend, mask and depth format.
+    using PipelineKey = std::tuple<std::uint64_t, std::uint64_t, unsigned, unsigned, std::uint32_t, std::uint32_t, std::uint32_t, std::string, unsigned, std::uint32_t, unsigned, unsigned>;
     // `format`: CB FORMAT (also its T# data format) of a colour target.
     struct Target { id<MTLTexture> texture; bool fresh; unsigned format = 0xa; };
     std::map<std::uint64_t, Target> depthTargets_;
@@ -215,7 +218,7 @@ private:
     struct PendingGuestWrite { std::uint64_t address, size, offset; id<MTLBuffer> buffer; };
     std::vector<PendingGuestWrite> pendingGuestWrites_;
     static MTLCompileOptions* compileOptions();
-    std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
+    std::map<std::tuple<std::uint64_t, std::uint32_t, unsigned>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
     bool fillProgram(std::uint64_t address);
     bool fillDispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
@@ -254,7 +257,8 @@ private:
     struct Decoded { id<MTLTexture> texture; std::uint64_t mark, batch; };
     std::uint64_t batchSerial_ = 0;
     std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, Decoded> bc7Textures_;
-    id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch);
+    id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt);
+    std::uint64_t decodedBytes_ = 0;
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
     std::map<std::uint64_t, bool> fillPrograms_;
     std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.

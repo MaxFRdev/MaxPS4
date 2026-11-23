@@ -310,6 +310,11 @@ enum MaxPS4Reports {
     static func live(for game: URL) -> URL {
         folder.appendingPathComponent("\(MaxPS4Saves.gameID(for: game))-en-cours.txt")
     }
+    // Written by the engine when a host fault ends the app (see maxps4_fex_set_host_crash_note).
+    static func hostCrash(for game: URL) -> URL {
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder.appendingPathComponent("\(MaxPS4Saves.gameID(for: game))-plantage-app.txt")
+    }
     static func write(_ text: String, to file: URL) {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try? text.write(to: file, atomically: true, encoding: .utf8)

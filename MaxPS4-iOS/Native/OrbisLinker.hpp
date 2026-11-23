@@ -154,7 +154,7 @@ private:
         std::string out; do { out.insert(out.begin(), alphabet[id & 63]); id >>= 6; } while (id); return out;
     }
     struct Descriptor { std::string name; uint16_t version; };
-    struct Symbol { Identity identity; uint64_t value = 0, size = 0; uint8_t type = 0; bool defined = false, local = false; };
+    struct Symbol { Identity identity; uint64_t value = 0, size = 0; uint8_t type = 0; bool defined = false, local = false, offsetTable = false; };
     struct Rela { uint64_t offset, info, addend; };
     struct Dynamic {
         std::vector<Symbol> symbols; std::vector<Rela> relas;
@@ -267,9 +267,10 @@ private:
             s.value = read(p + 8, 8); s.size = read(p + 16, 8); s.defined = section != 0; s.local = bind == 0; s.type = type;
             if (!i) { require(read(p, 8) == 0 && s.value == 0 && s.size == 0, "invalid null symbol"); out.symbols.push_back(s); continue; }
             // Local STT_SECTION symbols (ordinary ELF bookkeeping) are kept as locals.
-            // Defined symbols may be hidden or protected (system PRX); imports are default.
+            // Symbols may be hidden or protected (system PRX), imports too: Call of Duty's
+            // default.elf imports _Unwind_Resume as protected.
             require(bind <= 2 && (type == 0 || type == 1 || type == 2 || type == 6 || (type == 3 && bind == 0)) &&
-                    (p[5] & ~3) == 0 && (!p[5] || section != 0) && section < 0xff00,
+                    (p[5] & ~3) == 0 && section < 0xff00,
                     "unsupported symbol binding/type/visibility/section: " + name + " bind=" + std::to_string(bind) +
                     " type=" + std::to_string(type) + " visibility=" + std::to_string(p[5]) +
                     " section=" + std::to_string(section));
@@ -301,7 +302,8 @@ private:
             }
             if (!s.local && name.find('#') == std::string::npos) {
                 const bool bound = name.rfind("__start_", 0) == 0 || name.rfind("__stop_", 0) == 0;
-                require(s.defined || bind == 2 || bound, "undefined non-NID symbol: " + name);
+                s.offsetTable = !s.defined && name == "_GLOBAL_OFFSET_TABLE_";
+                require(s.defined || bind == 2 || bound || s.offsetTable, "undefined non-NID symbol: " + name);
                 s.local = true;
             }
             if (!s.local) {
@@ -701,8 +703,9 @@ private:
                 // An undefined local STT_SECTION symbol in a TLS relocation names this
                 // module's TLS block (local-dynamic model), like symbol 0.
                 const auto& referenced = dynamic[i].symbols[symbol];
+                require(type == 8 || !referenced.offsetTable, "relocation against _GLOBAL_OFFSET_TABLE_");
                 const bool sectionTLS = symbol && tlsRelocation && referenced.local && referenced.type == 3 && !referenced.defined;
-                const bool tlsSymbol = symbol && (referenced.type == 6 || sectionTLS);
+                const bool tlsSymbol = type != 8 && symbol && (referenced.type == 6 || sectionTLS);
                 require(tlsRelocation ? (!symbol || tlsSymbol) : !tlsSymbol, "TLS symbol/relocation kind mismatch: relocation " +
                         std::to_string(type) + " symbol " + std::to_string(symbol) + " type " +
                         std::to_string(symbol ? dynamic[i].symbols[symbol].type : 0) + " local " +

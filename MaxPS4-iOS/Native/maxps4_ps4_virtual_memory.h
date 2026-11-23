@@ -4,6 +4,7 @@
 #include <array>
 #include <mutex>
 #include <utility>
+#include <shared_mutex>
 #include <vector>
 
 namespace maxps4 {
@@ -18,9 +19,13 @@ public:
 // dereferences the returned pointer directly; otherwise they are logical
 // buffers from `base`. x86 executable bytes remain host DATA (FEX does not
 // run them yet); this is not an iOS executable-code allocator.
-// Owner serializes access and resets this object whenever it restages the ELF.
+// Owner resets this object whenever it restages the ELF. Guest threads read
+// the mappings (translate) while others change them: regions_lock_ orders
+// them, as regions_ moves when it grows.
 class PS4VirtualMemory final : public PS4DynamicMemory {
 public:
+    // A general image's mmap window; false for other images.
+    bool window(uint64_t& address, uint64_t& bytes) const { return image_.heap(address, bytes); }
     static constexpr uint64_t page_size = 0x4000;
     // Byte-vector mappings (bounded images) and host pages of a general
     // image's mmap window: games map hundreds of MiB (heap, GPU memory).
@@ -65,6 +70,18 @@ public:
     static constexpr size_t moved_limit = 16;
     // Copies the last records (oldest first); returns how many moves happened.
     size_t moved(std::array<Moved, moved_limit>& out, size_t& count) const;
+    // Recent map/unmap/protect calls, for the report of a thread that faulted
+    // on game memory. `kind`: 'm' placed, 'f' fixed, 'u' unmapped, 'p' protected.
+    struct Operation { uint64_t address = 0, size = 0, ns = 0, result = 0; uint32_t protection = 0; int error = 0; char kind = 0; };
+    static constexpr size_t operation_limit = 16384;
+    // The last calls (oldest first) whose span (or result span) comes within
+    // `radius` bytes of `address` (0: holds it); returns how many there were
+    // among the kept ones. `total`: calls recorded since the start.
+    size_t operations_at(uint64_t address, uint64_t radius, std::array<Operation, 6>& out, size_t& count, size_t& total) const;
+    // The mapped spans nearest below and above `address` (0, 0 when none).
+    // Unsynchronized, like translate(): for reports.
+    void neighbours(uint64_t address, uint64_t& below_start, uint64_t& below_end, uint64_t& above_start, uint64_t& above_end) const;
+    static uint64_t clock_ns();
     // The mapping holding `address` (or, with `next`, the first at or after it):
     // its span of pages with the same permissions and their PS4 protection
     // (READ 1, WRITE 2, EXEC 4). False when there is none.
@@ -82,13 +99,20 @@ private:
         bool outside = false;
     };
     const GuestELF& image_;
+    mutable std::shared_mutex regions_lock_;
     std::vector<Region> regions_;
+    size_t contiguous_unlocked(uint64_t address, size_t limit, uint32_t permissions) const;
     size_t used_ = 0;
     // Read by the session report while the game maps memory.
     mutable std::mutex moved_lock_;
     std::array<Moved, moved_limit> moved_ {};
     size_t moved_total_ = 0;
     void record_move(uint64_t hint, uint64_t size, uint64_t result, int status);
+    std::vector<Operation> operations_ = std::vector<Operation>(operation_limit);
+    size_t operations_total_ = 0;
+    void record(char kind, uint64_t address, uint64_t size, uint32_t protection, ps4::Error error, uint64_t result = 0);
+    ps4::Error unmap_unrecorded(uint64_t address, uint64_t length);
+    ps4::Error protect_unrecorded(uint64_t address, uint64_t length, uint32_t protection);
     ps4::Error place_unrecorded(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
                                 bool fixed, uint64_t& result);
     // General images only: host pages at an aligned address the host chooses

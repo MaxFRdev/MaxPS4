@@ -80,7 +80,7 @@ int main() {
     assert(video.pending(port) == 1 && video.flip_status(port, status) == 0);
     assert(read(status) == 0 && read(status + 52, 4) == 1 && read(status + 56, 4) == UINT32_MAX);
     assert(video.submit(port, 1, 1, 0) == PS4VideoOut::error(0x12));
-    assert(video.dropped() == 0); video.count_dropped(); assert(video.dropped() == 1);
+    assert(video.dropped() == 0); video.count_dropped(5); assert(video.dropped() == 1);
     // A GNM flip replaces a pending one the host has not taken, once taken not.
     maxps4_videoout_frame replaced{}; uint64_t replaced_address = 0;
     const uint64_t first = (video.target(replaced, replaced_address), replaced.ticket);
@@ -172,6 +172,23 @@ int main() {
     assert(std::chrono::steady_clock::now() - stop_started < std::chrono::milliseconds(40));
     video.set_paused(false);
     while (poll() == ok) {}
+    {   // Replaced and skipped flips get their events with the shown one, in order.
+        assert(video.flip_status(port, status) == 0);
+        const uint64_t before = read(status);
+        assert(video.submit(port, 0, 1, 31) == 0 && video.submit(port, 1, 1, 32, true, true) == 0);
+        maxps4_videoout_frame shown{}; uint64_t shown_address = 0;
+        assert(video.target(shown, shown_address) == 0);
+        assert(video.submit(port, 0, 1, 33, true, true) == PS4VideoOut::error(0x12));
+        video.count_dropped(33);
+        assert(poll() == timedout && video.complete(shown.ticket, true) == 0);
+        assert(poll() == ok && read(count, 4) == 1 && read(events) == 6 && video.event_field(events, 0, 2) == 3);
+        assert(video.event_field(events, status, 1) == 0 && read(status) == 33);
+        assert(video.flip_status(port, status) == 0 && read(status) == before + 3 && poll() == timedout);
+        // Not shown (a stop): nothing is owed any more.
+        assert(video.submit(port, 0, 1, 34) == 0 && video.target(shown, shown_address) == 0);
+        video.count_dropped(35);
+        assert(video.complete(shown.ticket, false) == 0 && poll() == timedout);
+    }
     // Closing removes only VideoOut subscriptions, not user or GNM events.
     assert(queues.user_event_add(queue, 6, true) == ok && queues.user_event_trigger(queue, 6, 77) == ok);
     assert(queues.graphics_event_add(queue, 6, 88) == ok);

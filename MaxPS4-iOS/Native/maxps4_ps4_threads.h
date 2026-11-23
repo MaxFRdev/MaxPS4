@@ -2,6 +2,8 @@
 #include "maxps4_ps4_abi.h"
 #include "maxps4_ps4_guest_memory.h"
 #include <array>
+#include <atomic>
+#include <string>
 #include <condition_variable>
 #include <mutex>
 
@@ -50,7 +52,13 @@ public:
     // and a normal one blocks (until interrupt()), as POSIX says.
     ps4::Error lock(uint64_t slot, uint64_t thread);
     ps4::Error unlock(uint64_t slot, uint64_t thread);
+    // The thread holding the mutex at `slot`, 0 if none (for reports).
+    uint64_t mutex_owner(uint64_t slot);
     ps4::Error destroy(uint64_t slot);
+    // Mutex records in use now, and the most ever in use (for the report).
+    void mutex_usage(size_t& used, size_t& peak) const;
+    // Inits over a mutex that still existed, and over one that was held (with its slot).
+    void mutex_reinits(uint64_t& live, uint64_t& held, uint64_t& held_slot) const;
     // Condition attributes (clock, process sharing) do not change waits here.
     ps4::Error cond_init(uint64_t slot, uint64_t attributes, uint64_t name);
     ps4::Error cond_destroy(uint64_t slot);
@@ -99,7 +107,8 @@ public:
     ps4::Error sema_create(uint64_t output, uint64_t name, int32_t initial, int32_t max);
     ps4::Error sema_delete(uint64_t handle);
     // `poll`: EBUSY instead of waiting.
-    ps4::Error sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll);
+    // `left`: microseconds to wait, for a caller without a guest timeout cell.
+    ps4::Error sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll, const uint64_t* left = nullptr);
     ps4::Error sema_signal(uint64_t handle, int32_t count);
     ps4::Error sema_cancel(uint64_t handle, int32_t count, uint64_t waiters);
     // Wait modes: and 1, or 2, then clear all 0x10 or the waited bits 0x20.
@@ -111,7 +120,12 @@ public:
     ps4::Error flag_wait(uint64_t handle, uint64_t bits, uint32_t mode, uint64_t result, uint64_t timeout, bool poll);
     ps4::Error flag_cancel(uint64_t handle, uint64_t pattern, uint64_t waiters);
     // An end-of-pipe interrupt: triggers every registered EOP event (id 0x40).
-    void graphics_interrupt();
+    // `count` end-of-pipe interrupts of one submission, each returned by a wait.
+    void graphics_interrupt(uint32_t count = 1);
+    uint64_t graphics_interrupts() const { return graphics_interrupts_.load(); }
+    // For reports: a semaphore's count, its waiters; an event queue's events.
+    std::string sema_state(uint64_t handle);
+    std::string equeue_state(uint64_t handle);
     ps4::Error video_event_add(uint64_t queue, uint64_t source, uint64_t id, uint64_t user_data);
     ps4::Error video_event_delete(uint64_t queue, uint64_t source, uint64_t id);
     void video_event_remove_source(uint64_t source);
@@ -143,6 +157,9 @@ private:
     std::condition_variable changed_;
     std::array<uint64_t, thread_limit> threads_{};
     std::array<Mutex, mutex_limit> mutexes_{};
+    size_t mutex_peak_ = 0;
+    uint64_t reinit_live_ = 0, reinit_held_ = 0, reinit_held_slot_ = 0;
+    void note_mutex_peak(); // Under guard_, after a record is taken.
     std::array<Cond, cond_limit> conds_{};
     std::array<Attr, attr_limit> attrs_{};
     std::array<MutexAttr, attr_limit> mutexattrs_{};
@@ -156,6 +173,8 @@ private:
         uint64_t user_data = 0, data = 0, ticket = 0;
         int16_t filter = -11;
         uint64_t source = 0;
+        // EOP interrupts not yet returned: each wait returns one (they never merge).
+        uint32_t pending = 0;
     };
     struct Equeue { uint64_t token = 0; std::array<Event, event_limit> events{}; };
     std::array<Equeue, equeue_limit> equeues_{};
@@ -163,6 +182,7 @@ private:
     struct Sema { uint64_t token = 0, generation = 0; int32_t count = 0, max = 0; uint32_t waiters = 0; };
     struct Flag { uint64_t token = 0, generation = 0, pattern = 0; uint32_t attributes = 0, waiters = 0; };
     std::array<Sema, sema_limit> semas_{};
+    std::atomic<uint64_t> graphics_interrupts_{0};
     std::array<Flag, flag_limit> flags_{};
     // A readable name of at most 32 bytes (0: none).
     ps4::Error check_name(uint64_t name) const;

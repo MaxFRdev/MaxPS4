@@ -47,6 +47,7 @@ struct PM4DrawStats {
 };
 struct PM4Draw {
     std::uint64_t vs = 0, ps = 0;                     // program addresses
+    unsigned vsVGPRCount = 256, psVGPRCount = 256;     // exact for collected draws; 256 for manual fixtures
     std::uint32_t vsUser[16] = {}, psUser[16] = {};   // user SGPRs
     unsigned vsUserCount = 0, psUserCount = 0;
     std::uint32_t psInputAddr = 0;                    // SPI_PS_INPUT_ADDR (or _ENA)
@@ -104,6 +105,7 @@ struct PM4Dispatch {
     std::uint32_t user[16] = {};
     unsigned userCount = 0;
     std::uint32_t rsrc2 = 0;
+    unsigned vgprCount = 256;
     std::uint32_t threads[3] = {}, groups[3] = {};
 };
 
@@ -167,6 +169,7 @@ public:
                 if (n < 3) break;
                 PM4Dispatch c;
                 c.program = program;
+                c.vgprCount = 4 * ((shader_[0x212] & 0x3f) + 1);          // COMPUTE_PGM_RSRC1 VGPRS
                 c.rsrc2 = shader_[0x213];                                // COMPUTE_PGM_RSRC2
                 c.userCount = std::min(16u, unsigned((c.rsrc2 >> 1) & 31));
                 for (unsigned k = 0; k < 16; ++k) c.user[k] = shader_[0x240 + k]; // COMPUTE_USER_DATA_0..15
@@ -302,7 +305,17 @@ private:
         d.indices.resize(count);
         if (indexed) {
             std::vector<std::uint8_t> bytes(std::size_t(count) * indexBytes_);
-            if (!memory_.read(indexAddress, bytes.data(), bytes.size())) { stats_.fail("unreadable index buffer"); return; }
+            // An index buffer the guest memory does not hold skips that draw
+            // only: one missing draw beats stopping the game. Its address goes
+            // to the report.
+            if (!memory_.read(indexAddress, bytes.data(), bytes.size())) {
+                char text[96];
+                std::snprintf(text, sizeof text, "tampon d'indices illisible 0x%llx (%zu octets)",
+                              (unsigned long long)indexAddress, bytes.size());
+                ++stats_.skipped;
+                stats_.lastSkipped = text;
+                return;
+            }
             for (std::uint32_t k = 0; k < count; ++k) {
                 std::uint32_t value = 0;
                 std::memcpy(&value, bytes.data() + std::size_t(k) * indexBytes_, indexBytes_);
@@ -337,6 +350,8 @@ private:
         } else if (indexed) for (auto& value : d.indices) value += context_[0x102];
         d.vs = (std::uint64_t(shader_[0x48]) | std::uint64_t(shader_[0x49]) << 32) << 8;
         d.ps = (std::uint64_t(shader_[0x08]) | std::uint64_t(shader_[0x09]) << 32) << 8;
+        d.vsVGPRCount = 4 * ((shader_[0x4a] & 0x3f) + 1);
+        d.psVGPRCount = 4 * ((shader_[0x0a] & 0x3f) + 1);
         d.vsUserCount = std::min(16u, (shader_[0x4b] >> 1) & 0x1f);
         d.psUserCount = std::min(16u, (shader_[0x0b] >> 1) & 0x1f);
         for (unsigned k = 0; k < 16; ++k) { d.vsUser[k] = shader_[0x4c + k]; d.psUser[k] = shader_[0x0c + k]; }

@@ -27,6 +27,7 @@ int main() {
     assert(threads.unlock(m, 1) == perm);
     assert(threads.lock(m, 1) == ok && memory.read(m, wire, 8) && get_le(wire, 8) > 2);
     assert(threads.lock(m, 1) == deadlk && threads.trylock(m, 1) == busy);
+    assert(threads.mutex_owner(m) == 1 && threads.mutex_owner(0) == 0); // For reports: who holds it.
     assert(threads.trylock(adaptive, 1) == ok && threads.unlock(adaptive, 1) == ok);
     assert(threads.lock(data + 1, 1) == fault && threads.lock(UINT64_MAX - 7, 1) == fault);
     assert(threads.lock(m, 99) == inval);
@@ -84,7 +85,8 @@ int main() {
     // Destroyed objects stay invalid until initialized again.
     assert(threads.cond_destroy(cv) == ok && threads.cond_destroy(cv) == inval);
     assert(threads.cond_signal(cv, false) == inval);
-    assert(threads.cond_init(cv, 0, 0) == ok && threads.cond_init(cv, 0, 0) == busy);
+    assert(threads.cond_init(cv, 0, 0) == ok && threads.cond_destroy(cv) == ok);
+    assert(threads.cond_init(cv, 0, 0) == ok && threads.cond_init(cv, 0, 0) == ok); // A new one, never busy.
     assert(threads.destroy(m) == ok && threads.lock(m, 1) == inval && threads.trylock(m, 1) == inval);
     // Thread attributes: defaults, detach state, stack size; initializing a
     // slot again gives a fresh object.

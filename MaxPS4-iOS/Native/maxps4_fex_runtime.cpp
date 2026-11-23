@@ -47,6 +47,7 @@
 #include "maxps4_dispatch_fault.h"
 #include "maxps4_exit_link_trace.h"
 #include <fcntl.h>
+#include <memory>
 #include <new>
 #include <atomic>
 #include <chrono>
@@ -57,6 +58,7 @@
 #include <thread>
 #include <unordered_map>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #if defined(__APPLE__)
@@ -121,7 +123,7 @@ public:
     // Per guest thread: the HLE call in progress, or the last one and when it
     // returned, so a stalled game shows where each of its threads waits.
     struct Activity {
-        std::atomic<uint64_t> thread {0}, since {0}, returned {0};
+        std::atomic<uint64_t> thread {0}, since {0}, returned {0}, rsp {0}, rbp {0}, argument {0};
         std::atomic<uint32_t> service {0};
         std::atomic<bool> inside {false};
     };
@@ -217,6 +219,10 @@ public:
                 // seventh, at RSP+8 past the trampoline's return address) are
                 // readable. Bounded images keep 0, which makes them fault.
                 image->general() ? r[x86::REG_RSP] : 0};
+            call.r14 = r[x86::REG_R14];
+            call.r15 = r[x86::REG_R15];
+            call.r12 = r[x86::REG_R12];
+            call.rbp = r[x86::REG_RBP];
             // POSIX pthread_* (see pthread_token): no name arguments, and an
             // absolute CLOCK_REALTIME deadline turned into the microseconds left.
             if (pthread) {
@@ -237,7 +243,11 @@ public:
                 }
             }
             Activity* slot = activity_slot();
-            if (slot) { slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns(); slot->inside = true; }
+            if (slot) {
+                slot->service = static_cast<uint32_t>(orbis); slot->since = now_ns();
+                slot->rsp = r[x86::REG_RSP]; slot->rbp = r[x86::REG_RBP]; slot->argument = r[x86::REG_RDI];
+                slot->inside = true;
+            }
             const uint64_t timed_from = timing && timing->enabled() ? now_ns() : 0;
             if (timed_from && (orbis == maxps4::PS4KernelService::video_submit ||
                                orbis == maxps4::PS4KernelService::gnm_submit_flip ||
@@ -495,6 +505,91 @@ bool install(FEXCore::Core::InternalThreadState* thread) {
 // runs once when the limit elapses (it wakes HLE waits such as a join).
 // A child guest thread's guard has `install` false: the main run's guard owns
 // the process handlers for the whole run, this one only routes its thread.
+// Where a fault that kills the app (one no handler takes) is described, set by
+// the app for each run: the iOS crash log only shows which thread got the
+// signal back, not the host code that faulted.
+static char host_crash_note[1024] {};
+// Defined by the patched iOS FEX (patch-fexcore-code-cache-reuse.py); absent elsewhere.
+extern "C" __attribute__((weak)) uint64_t maxps4_fex_code_cache_used();
+extern "C" __attribute__((weak)) uint64_t maxps4_fex_code_cache_reuses();
+#if (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+// A return address without its pointer authentication bits.
+static uint64_t ptrauth_strip_address(uint64_t address) {
+#if defined(__APPLE__)
+#if __has_feature(ptrauth_calls)
+    return reinterpret_cast<uint64_t>(ptrauth_strip(reinterpret_cast<void*>(address), ptrauth_key_return_address));
+#endif
+#endif
+    return address & 0x0000ffffffffffffULL;
+}
+// Image and symbol of a host code address, for the note.
+static int describe_host_address(char* out, size_t size, uint64_t address) {
+    Dl_info info {};
+    if (!address || !::dladdr(reinterpret_cast<void*>(address), &info) || !info.dli_fbase)
+        return std::snprintf(out, size, " 0x%llx", (unsigned long long)address);
+    const char* image = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
+    image = image ? image + 1 : (info.dli_fname ? info.dli_fname : "?");
+    const auto base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    if (info.dli_sname && info.dli_saddr)
+        return std::snprintf(out, size, " %s+0x%llx (%s+0x%llx)", image, (unsigned long long)(address - base),
+            info.dli_sname, (unsigned long long)(address - reinterpret_cast<uintptr_t>(info.dli_saddr)));
+    return std::snprintf(out, size, " %s+0x%llx", image, (unsigned long long)(address - base));
+}
+// The app is about to die of `number`: write what faulted, its host call stack
+// (frame pointers, within this thread's stack) and the guest thread it ran.
+static void write_host_crash_note(int number, const siginfo_t* info, const ucontext_t* machine,
+                                  uint64_t guest_thread, uint64_t guest_rip) {
+    static std::atomic<bool> writing {false};
+    if (!host_crash_note[0] || writing.exchange(true)) return;
+    const int fd = ::open(host_crash_note, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return;
+    static char text[8192];
+    size_t used = 0;
+    const auto add = [&](int n) { if (n > 0) used = std::min(sizeof text - 1, used + size_t(n)); };
+#if defined(__APPLE__)
+    const auto& state = machine->uc_mcontext->__ss;
+    const uint64_t pc = state.__pc, lr = state.__lr, fp = state.__fp, sp = state.__sp;
+    const uint64_t* x = reinterpret_cast<const uint64_t*>(state.__x);
+#else
+    const auto& state = machine->uc_mcontext;
+    const uint64_t pc = state.pc, lr = state.regs[30], fp = state.regs[29], sp = state.sp;
+    const uint64_t* x = reinterpret_cast<const uint64_t*>(state.regs);
+#endif
+    add(std::snprintf(text + used, sizeof text - used,
+        "Plantage hôte : signal %d code %d adresse 0x%llx", number, info->si_code,
+        (unsigned long long)reinterpret_cast<uintptr_t>(info->si_addr)));
+    add(std::snprintf(text + used, sizeof text - used, ", thread du jeu %llu, RIP invité 0x%llx\nPC",
+        (unsigned long long)guest_thread, (unsigned long long)guest_rip));
+    add(describe_host_address(text + used, sizeof text - used, pc));
+    add(std::snprintf(text + used, sizeof text - used, "\n" "LR"));
+    add(describe_host_address(text + used, sizeof text - used, ptrauth_strip_address(lr)));
+    add(std::snprintf(text + used, sizeof text - used, "\n" "Pile :"));
+#if defined(__APPLE__)
+    const auto high = reinterpret_cast<uintptr_t>(::pthread_get_stackaddr_np(::pthread_self()));
+    const auto low = high - ::pthread_get_stacksize_np(::pthread_self());
+#else
+    const uintptr_t low = sp, high = sp + 0x100000;
+#endif
+    uint64_t frame = fp;
+    for (int i = 0; i < 24 && frame && !(frame & 7) && frame >= low && frame + 16 <= high; ++i) {
+        const auto* words = reinterpret_cast<const uint64_t*>(frame);
+        add(std::snprintf(text + used, sizeof text - used, "\n" "  "));
+        add(describe_host_address(text + used, sizeof text - used, ptrauth_strip_address(words[1])));
+        if (words[0] <= frame) break;
+        frame = words[0];
+    }
+    add(std::snprintf(text + used, sizeof text - used, "\n" "Registres :"));
+    for (int i = 0; i < 29; ++i)
+        add(std::snprintf(text + used, sizeof text - used, " x%d 0x%llx", i, (unsigned long long)x[i]));
+    add(std::snprintf(text + used, sizeof text - used, " sp 0x%llx\n", (unsigned long long)sp));
+    for (size_t done = 0; done < used;) {
+        const ssize_t n = ::write(fd, text + done, used - done);
+        if (n <= 0) break;
+        done += size_t(n);
+    }
+    ::close(fd);
+}
+#endif
 class GuestFaultGuard final {
 public:
     static constexpr bool available =
@@ -556,7 +651,7 @@ public:
     GuestFaultGuard& operator=(const GuestFaultGuard&) = delete;
     std::atomic<int> signal {0};
     int32_t code = 0;
-    uint64_t address = 0;
+    uint64_t address = 0, fault_rip = 0;
     // maxps4_fex_engine_sample_main_thread: the next SIGURG seen while
     // `sample_request` is set records where the guarded thread is, then
     // lets it run on. `where`: 1 JIT code, 2 FEX dispatcher, 3 other host code.
@@ -925,6 +1020,8 @@ private:
             if (stop) {
                 guard->code = number == SIGURG ? 0 : info->si_code;
                 guard->address = number == SIGURG ? 0 : reinterpret_cast<uintptr_t>(info->si_addr);
+                // The exact guest instruction (FEX's stored RIP is only its block).
+                guard->fault_rip = in_jit ? guard->context->RestoreRIPFromHostPC(guard->thread, pc) : 0;
                 guard->signal.store(number);
                 sp = guard->thread->CurrentFrame->ReturningStackLocation;
                 pc = stop;
@@ -975,6 +1072,14 @@ private:
             // so the watchdog's next signal is still seen.
             if (old.sa_handler == SIG_IGN || (number == SIGURG && old.sa_handler == SIG_DFL)) return;
             if (old.sa_handler == SIG_DFL) {
+#if (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+                // The default action ends the app: say where first.
+                if (number != SIGURG)
+                    // Thread 0: a host thread that runs no guest code (Metal, audio, the app).
+                    write_host_crash_note(number, info, static_cast<const ucontext_t*>(raw),
+                                          guard ? ProbeAddressSpace::guest_thread : 0,
+                                          guard ? guard->thread->CurrentFrame->State.rip : 0);
+#endif
                 ::sigaction(number, &old, nullptr);
                 ::raise(number);
             } else if (old.sa_flags & SA_SIGINFO) old.sa_sigaction(number, info, raw);
@@ -1218,15 +1323,185 @@ public:
             thread.used = false;
         }
     }
+    // For reports: where a child thread making no HLE call runs, from 8 reads
+    // 1 ms apart: the distinct guest addresses in JIT code (a spinning loop
+    // shows as a few), else the host function and its caller (a thread held
+    // inside FEX), and the guest RIP FEX last stored.
+    // `regs`, when given, receives x0-x30 of a sample taken in JIT code, and
+    // `jit_rip` that sample's guest RIP (0: no such sample).
+    std::string sample(uint64_t id, uint64_t relocation, uint64_t* regs_out = nullptr, uint64_t* jit_rip = nullptr) {
+        std::string out;
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+        std::lock_guard held(lock); // Keeps the thread's guard alive.
+        const auto at = std::find_if(threads.begin(), threads.end(),
+            [&](const Thread& t) { return t.used && !t.finished && t.id == id && t.guard; });
+        if (at == threads.end()) return " · thread hôte introuvable";
+        GuestFaultGuard* const fault = at->guard;
+        std::vector<uint64_t> rips;
+        const thread_act_t port = ::pthread_mach_thread_np(fault->host);
+        uint64_t pcs[8] {}, lrs[8] {};
+        // Host registers of one sample: in JIT code FEX keeps the guest's
+        // registers in host registers, so they show a spinning loop's state.
+        uint64_t regs[31] {};
+        bool have_regs = false;
+        size_t count = 0;
+        rips.reserve(8);
+        // Nothing that may lock runs while the thread is suspended.
+        for (int k = 0; k < 8; ++k) {
+            if (k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            arm_thread_state64_t state {};
+            mach_msg_type_number_t words = ARM_THREAD_STATE64_COUNT;
+            if (::thread_suspend(port) != KERN_SUCCESS) break;
+            const bool read = ::thread_get_state(port, ARM_THREAD_STATE64,
+                reinterpret_cast<thread_state_t>(&state), &words) == KERN_SUCCESS;
+            ::thread_resume(port);
+            if (!read) continue;
+            uint64_t pc = arm_thread_state64_get_pc(state), lr = arm_thread_state64_get_lr(state);
+#if __has_feature(ptrauth_calls)
+            pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
+            lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(lr), ptrauth_key_return_address)));
+#endif
+            if (!have_regs) {
+                std::copy(std::begin(state.__x), std::end(state.__x), regs);
+                regs[29] = uint64_t(arm_thread_state64_get_fp(state)); // FEX keeps guest r15 there.
+                regs[30] = lr;
+                have_regs = true;
+            }
+            lrs[count] = lr; pcs[count++] = pc;
+        }
+        auto relative = [&](uint64_t rip) { return rip >= relocation ? rip - relocation : rip; };
+        auto name = [](uint64_t address) {
+            Dl_info info {};
+            if (!::dladdr(reinterpret_cast<void*>(address), &info) || !info.dli_sname) return std::string("?");
+            char text[160];
+            std::snprintf(text, sizeof text, "%s+0x%llx", info.dli_sname,
+                (unsigned long long)(address - reinterpret_cast<uintptr_t>(info.dli_saddr)));
+            return std::string(text);
+        };
+        std::string host;
+        char line[96];
+        for (size_t k = 0; k < count; ++k) {
+            if (fault->in_jit(pcs[k])) {
+                const uint64_t rip = fault->guest_rip(pcs[k]);
+                if (std::find(rips.begin(), rips.end(), rip) == rips.end()) rips.push_back(rip);
+            } else if (host.empty()) {
+                host = fault->in_dispatcher(pcs[k]) ? std::string("répartiteur FEX") : name(pcs[k]) + " < " + name(lrs[k]);
+            }
+        }
+        const char* separator = " · tourne en";
+        for (const uint64_t rip : rips) {
+            std::snprintf(line, sizeof line, "%s 0x%llx", separator, (unsigned long long)relative(rip));
+            out += line; separator = ",";
+        }
+        if (!host.empty()) out += " · dans l'émulateur : " + host;
+        std::snprintf(line, sizeof line, " · RIP FEX 0x%llx", (unsigned long long)relative(fault->stored_rip()));
+        out += line;
+        if (!count) out += " · illisible";
+        if (regs_out && have_regs && !rips.empty()) {
+            std::copy(std::begin(regs), std::end(regs), regs_out);
+            if (jit_rip) *jit_rip = relative(rips.front());
+        }
+        // The JIT code around the first sample in it: the ARM64 FEX made of the loop.
+        for (size_t k = 0; k < count; ++k) {
+            if (!fault->in_jit(pcs[k])) continue;
+            const uint64_t from = (pcs[k] & ~uint64_t(3)) - 32 * 4;
+            if (!fault->in_jit(from) || !fault->in_jit(from + 63 * 4)) continue; // Stays inside the code buffer.
+            std::snprintf(line, sizeof line, " · code JIT depuis PC-0x80 (PC 0x%llx) :", (unsigned long long)pcs[k]);
+            out += line;
+            for (int w = 0; w < 64; ++w) {
+                uint32_t word = 0;
+                std::memcpy(&word, reinterpret_cast<const void*>(from + uint64_t(w) * 4), 4);
+                std::snprintf(line, sizeof line, " %08x", word);
+                out += line;
+            }
+            break;
+        }
+        if (have_regs && !rips.empty()) {
+            out += " · registres hôte :";
+            for (int r = 0; r < 31; ++r) {
+                std::snprintf(line, sizeof line, " x%d=0x%llx", r, (unsigned long long)regs[r]);
+                out += line;
+            }
+        }
+#else
+        (void)id; (void)relocation;
+#endif
+        return out;
+    }
+    // Where every guest thread is right now, one sample each: its guest RIP in
+    // JIT code, else the RIP FEX last stored (in a service or FEX itself).
+    std::string where_all(uint64_t relocation, bool registers = false) {
+        std::string out;
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+        std::lock_guard held(lock);
+        char line[64];
+        for (const Thread& t : threads) {
+            if (!t.used || t.finished || !t.guard) continue;
+            const thread_act_t port = ::pthread_mach_thread_np(t.guard->host);
+            arm_thread_state64_t state {};
+            mach_msg_type_number_t words = ARM_THREAD_STATE64_COUNT;
+            if (::thread_suspend(port) != KERN_SUCCESS) continue;
+            const bool read = ::thread_get_state(port, ARM_THREAD_STATE64,
+                reinterpret_cast<thread_state_t>(&state), &words) == KERN_SUCCESS;
+            ::thread_resume(port);
+            if (!read) continue;
+            uint64_t pc = arm_thread_state64_get_pc(state);
+#if __has_feature(ptrauth_calls)
+            pc = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(pc), ptrauth_key_return_address)));
+#endif
+            const bool jit = t.guard->in_jit(pc);
+            uint64_t rip = jit ? t.guard->guest_rip(pc) : t.guard->stored_rip();
+            if (rip >= relocation) rip -= relocation;
+            std::snprintf(line, sizeof line, " t%llu%s0x%llx", (unsigned long long)t.id, jit ? "@" : "~", (unsigned long long)rip);
+            out += line;
+            // In JIT code the host registers hold the guest's (x4 rax, x5 rdx,
+            // x6 rbx, x7 rcx, x8 rsp, x9 rbp, x10 rsi, x11 rdi, x12-x17 r8-r13,
+            // x19 r14, x29 r15 in this FEX build).
+            if (registers && jit) {
+                out += " [";
+                for (int r : {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 29}) {
+                    const uint64_t v = r == 29 ? uint64_t(arm_thread_state64_get_fp(state)) : state.__x[r];
+                    std::snprintf(line, sizeof line, "%sx%d=0x%llx", r == 4 ? "" : " ", r, (unsigned long long)v);
+                    out += line;
+                }
+                out += "]";
+            }
+        }
+#else
+        (void)relocation;
+#endif
+        return out;
+    }
+    // How a thread that is no longer running ended (false: unknown).
+    bool ending_of(uint64_t id, uint64_t& rip, uint64_t& ns, int& signal, int& code, uint64_t& address,
+                   std::array<uint64_t, 16>* gprs = nullptr) const {
+        std::lock_guard held(lock);
+        for (size_t k = 0; k < ended.size(); ++k) {
+            const Ended& e = ended[(ended_next + ended.size() - 1 - k) % ended.size()];
+            if (e.id == id && e.ns) {
+                rip = e.rip; ns = e.ns; signal = e.signal; code = e.code; address = e.address;
+                if (gprs) *gprs = e.gprs;
+                return true;
+            }
+        }
+        return false;
+    }
     bool faulted(maxps4_fex_guest_fault& out) const {
         std::lock_guard guard(lock);
         out = first_fault;
+        return first_fault.signal != 0;
+    }
+    // The thread that faulted first and its guest registers at the fault.
+    bool fault_thread(uint64_t& id, std::array<uint64_t, 16>& gprs) const {
+        std::lock_guard guard(lock);
+        id = first_fault_thread; gprs = first_fault_gprs;
         return first_fault.signal != 0;
     }
 private:
     struct Thread {
         bool used = false, joining = false, finished = false, ends_process = false, detached = false;
         uint64_t id = 0, entry = 0, arg = 0, rsp = 0, fs = 0, value = 0;
+        GuestFaultGuard* guard = nullptr; // While it runs guest code (under `lock`).
         std::thread host;
     };
     // Gives back the slots of detached threads that have ended. Never while
@@ -1248,6 +1523,9 @@ private:
         ProbeAddressSpace::guest_tls = thread.fs;
         current = &thread;
         maxps4_fex_guest_fault fault {};
+        uint64_t ended_rip = 0, ended_address = 0;
+        std::array<uint64_t, 16> ended_gprs {};
+        int ended_signal = 0, ended_code = 0;
         bool skip = false;
         { std::lock_guard guard(lock); skip = stopping; }
         if (!skip) {
@@ -1257,11 +1535,17 @@ private:
                     fex->CurrentFrame->State.gregs[FEXCore::X86State::REG_RDI] = thread.arg;
                     GuestFaultGuard guard(context, fex, config, 0, false, {}, nullptr,
                         [this](uint64_t a,size_t n,uint32_t p) { return memory.permitted(a,n,p); });
+                    { std::lock_guard held(lock); thread.guard = &guard; }
                     context->ExecuteThread(fex);
+                    { std::lock_guard held(lock); thread.guard = nullptr; }
                     const int signal = guard.signal.load();
+                    ended_rip = guard.fault_rip ? guard.fault_rip : fex->CurrentFrame->State.rip; ended_signal = signal;
+                    ended_code = guard.code; ended_address = guard.address;
+                    // Guest registers as the stop handler spilled them (x86 encoding order).
+                    std::copy_n(std::begin(fex->CurrentFrame->State.gregs), 16, ended_gprs.begin());
                     // SIGURG only comes from finish(): a stop, not a fault.
                     if (signal && signal != SIGURG)
-                        fault = {signal, guard.code, guard.address, fex->CurrentFrame->State.rip};
+                        fault = {signal, guard.code, guard.address, ended_rip};
                 }
                 context->DestroyThread(fex);
             }
@@ -1270,13 +1554,20 @@ private:
         bool stop_main = false;
         {
             std::lock_guard guard(lock);
-            if (fault.signal && !first_fault.signal) { first_fault = fault; stop_main = stopping = true; }
+            if (fault.signal && !first_fault.signal) {
+                first_fault = fault; first_fault_thread = thread.id; first_fault_gprs = ended_gprs;
+                stop_main = stopping = true;
+            }
             if (thread.ends_process) stop_main = stopping = true;
+            ended[ended_next++ % ended.size()] = {thread.id, ended_rip, ProbeAddressSpace::now_ns(), ended_address, ended_signal, ended_code, ended_gprs};
             thread.finished = true; // `thread` may be reused from here on.
         }
         changed.notify_all();
         if (!stop_main) return;
         // A faulting or exiting thread ends the process: stop the main thread too.
+        // Its next HLE call ends it (a game loop around waits that now return
+        // at once otherwise spins forever).
+        ending_.store(true, std::memory_order_relaxed);
         identities.interrupt();
         std::unique_lock guard(lock);
         while (!main_done) {
@@ -1294,8 +1585,14 @@ private:
     mutable std::mutex lock;
     std::condition_variable changed;
     std::array<Thread, maxps4::GuestELF::generalThreads> threads {};
+    // The last threads that ended, for reports: where FEX stopped them.
+    struct Ended { uint64_t id = 0, rip = 0, ns = 0, address = 0; int signal = 0, code = 0; std::array<uint64_t, 16> gprs {}; };
+    std::array<Ended, 32> ended {};
+    size_t ended_next = 0;
     bool stopping = false, main_done = false, main_exited = false, timed_out = false;
     maxps4_fex_guest_fault first_fault {};
+    uint64_t first_fault_thread = 0;
+    std::array<uint64_t, 16> first_fault_gprs {};
     static inline thread_local Thread* current = nullptr;
     std::atomic<bool> ending_ {false};
 };
@@ -1359,6 +1656,495 @@ struct CPUProfile {
     }
 #endif
 };
+// Diagnostic for Call of Duty: Modern Warfare Remastered (CUSA05379). Its
+// string table (65536 entries of 8 bytes: low 18 bits the next index of a
+// circular chain, then the key) ends up with a chain that loops without its
+// head, and a lookup spins forever (default.elf 0x5b1640), though every change
+// holds one mutex and no mutex call fails. On each lock of that mutex (at most
+// every 4 ms) the table is copied and the entries pointed at by two others are
+// counted; the first time that count grows, the entries changed since the
+// previous check and the last lock/unlock calls are kept for the report.
+class StringTableWatch {
+public:
+    StringTableWatch(maxps4::PS4GuestMemory& memory, uint64_t table, uint64_t pool, uint64_t relocation)
+        : memory_(memory), relocation_(relocation), table_(table), pool_(pool), start_(clock()), in_degree_(entries) {}
+    ~StringTableWatch() {
+        stop_ = true;
+        if (guard_thread_.joinable()) guard_thread_.join();
+    }
+    // Polls the 32 bytes of pool string `key` every 200 us; each change is kept
+    // with the bytes before and after and where every guest thread was (`who`).
+    // Call of Duty's release lookup spun on string 0x14e found zeroed while
+    // still in the table: this catches what wrote it.
+    void guard_string(uint32_t key, std::function<std::string(bool)> who) {
+        guard_key_ = key;
+        guard_thread_ = std::thread([this, key, who = std::move(who)] {
+            // The string's 32 bytes sit at offset `half` of a 4 KiB window.
+            constexpr size_t window = 4096, half = 2048;
+            std::vector<uint8_t> before_window(window), now_window(window);
+            uint8_t* const before = before_window.data() + half;
+            uint8_t* const now = now_window.data() + half;
+            bool have = false;
+            int last_bit = -1;
+            uint32_t last_word = 0;
+            while (!stop_.load()) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                {
+                    uint8_t head[8];
+                    uint32_t word = 0;
+                    if (block_state(key, head, word)) {
+                        const int bit = key_free(key, word) ? 1 : 0;
+                        if (last_bit >= 0 && bit != last_bit) {
+                            const bool live = (head[0] | head[1]) && head[3];
+                            std::string where = who(bit && live);
+                            std::lock_guard guard(lock_);
+                            ++word_changes_;
+                            char line[200];
+                            std::snprintf(line, sizeof line, "  %.3f s : %08x -> %08x, bit %d, chaîne %02x%02x%02x%02x%s · threads",
+                                double(clock() - start_) / 1e9, last_word, word, bit, head[0], head[1], head[2], head[3],
+                                bit && live ? " LIBRE ALORS QUE VIVANTE" : "");
+                            const std::string entry = line + where;
+                            if (word_log_.size() < 6) word_log_.push_back(entry);
+                            else word_tail_[word_tail_next_++ % word_tail_.size()] = entry;
+                        }
+                        last_bit = bit; last_word = word;
+                    }
+                }
+                uint8_t base_bytes[8];
+                if (!memory_.read(pool_, base_bytes, 8)) continue;
+                uint64_t base;
+                std::memcpy(&base, base_bytes, 8);
+                const uint64_t at = base + uint64_t(key) * 16;
+                if (!base || !memory_.read(at - half, now_window.data(), window)) continue;
+                if (have && !std::memcmp(before, now, 32)) { std::memcpy(before_window.data(), now_window.data(), window); continue; }
+                if (have) {
+                    // A string wiped (its length byte gone): the writer's registers too.
+                    const bool wiped = before[3] && !now[3];
+                    std::string where = who(wiped);
+                    // The changed span of the window and how much of it is now zero.
+                    size_t first = window, last = 0, zero = 0;
+                    for (size_t k = 0; k < window; ++k)
+                        if (before_window[k] != now_window[k]) {
+                            first = std::min(first, k); last = k;
+                            if (!now_window[k]) ++zero;
+                        }
+                    std::lock_guard guard(lock_);
+                    ++guard_changes_;
+                    char line[200];
+                    std::snprintf(line, sizeof line, "  %.3f s :", double(clock() - start_) / 1e9);
+                    std::string entry = line;
+                    entry += " avant " + bytes_text(before) + " · après " + bytes_text(now);
+                    if (first < window) {
+                        std::snprintf(line, sizeof line, " · fenêtre 0x%llx : changé de 0x%llx à 0x%llx (%zu octets dont %zu à zéro)",
+                            (unsigned long long)(at - half), (unsigned long long)(at - half + first),
+                            (unsigned long long)(at - half + last + 1), last + 1 - first, zero);
+                        entry += line;
+                    }
+                    entry += " · threads" + where;
+                    if (guard_log_.size() < 6) guard_log_.push_back(entry);
+                    else { guard_tail_[guard_tail_next_++ % guard_tail_.size()] = entry; }
+                }
+                std::memcpy(before_window.data(), now_window.data(), window);
+                have = true;
+            }
+        });
+    }
+    void event(uint64_t thread, uint64_t caller, bool unlock, uint64_t r15 = 0, uint64_t r14 = 0, uint64_t r12 = 0, uint64_t rbp = 0, uint64_t rsp = 0) {
+        std::lock_guard guard(lock_);
+        const uint64_t now = clock();
+        events_[next_event_++ % events_.size()] = {now, thread, caller, unlock};
+        note_creation(caller, unlock, uint32_t(r12), rbp);
+        note_release(thread, caller, unlock, uint32_t(r15), uint32_t(r14), now, rbp, rsp);
+        check_freed(thread, caller, unlock, now);
+        if (unlock || captured_.load() || (checks_ && now - last_check_ < 4000000)) return;
+        last_check_ = now;
+        check(thread, caller, now);
+    }
+    std::string report() const {
+        std::lock_guard guard(lock_);
+        char line[200];
+        std::snprintf(line, sizeof line, "Table de chaînes (CoD) : %llu vérifications, %llu entrées pointées deux fois (au départ %lld)%s\n",
+            (unsigned long long)checks_, (unsigned long long)last_bad_, (long long)baseline_,
+            unreadable_ ? " · table illisible" : "");
+        std::string out = std::string(line) + capture_;
+        if (guard_thread_.joinable()) {
+            std::snprintf(line, sizeof line, "Chaîne 0x%x surveillée : %llu changements (@ = code du jeu, ~ = dans un service)\n",
+                guard_key_.load(), (unsigned long long)guard_changes_);
+            out += line;
+            for (const auto& entry : guard_log_) out += entry + "\n";
+            const size_t tail = std::min<size_t>(guard_tail_next_, guard_tail_.size());
+            if (guard_tail_next_ > tail) out += "  …\n";
+            for (size_t k = 0; k < tail; ++k)
+                out += guard_tail_[(guard_tail_next_ - tail + k) % guard_tail_.size()] + "\n";
+            std::snprintf(line, sizeof line, "  bitmap, mot 0x%x (bit de la chaîne : 1 = libre) : %llu changements de ce bit\n",
+                guard_key_.load() >> 5, (unsigned long long)word_changes_);
+            out += line;
+            for (const auto& entry : word_log_) out += entry + "\n";
+            const size_t words = std::min<size_t>(word_tail_next_, word_tail_.size());
+            if (word_tail_next_ > words) out += "  …\n";
+            for (size_t k = 0; k < words; ++k)
+                out += word_tail_[(word_tail_next_ - words + k) % word_tail_.size()] + "\n";
+            out += freed_capture_.empty() ? "  jamais vue libérée vivante\n" : freed_capture_;
+            std::snprintf(line, sizeof line, "  libérations de chaînes : %llu, dont %llu de plus de 256 octets sur une clé hors début de mot\n",
+                (unsigned long long)releases_, (unsigned long long)bad_releases_);
+            out += line;
+            for (const auto& entry : bad_log_) out += entry + "\n";
+            std::snprintf(line, sizeof line, "  créations suivies : %llu · libérations d'une chaîne suivie avec une autre longueur : %llu · libérations non suivies : %llu\n",
+                (unsigned long long)creations_, (unsigned long long)mismatches_, (unsigned long long)unknown_releases_);
+            out += line;
+            for (const auto& entry : mismatch_log_) out += entry + "\n";
+            for (const auto& entry : unknown_log_) out += entry + "\n";
+        }
+        return out;
+    }
+    // The lookup spinning at default.elf 0x5b1640 walks a chain for an entry
+    // whose second word is `key` (guest r15d; FEX keeps it in x29), now at
+    // `node` (rdx, x5): the chain it walks, every entry holding `key` with
+    // its own chain, and the pool string `key` names (16-byte headers at the
+    // pointer in `pool_`: u16 references, byte 3 = length + 1 mod 256, text
+    // at +8) with the bucket its length and text give.
+    std::string explain(uint32_t key, uint32_t node) const {
+        std::vector<uint8_t> table(entries * 8);
+        if (node >= entries || !memory_.read(table_, table.data(), table.size())) return " · table illisible";
+        char line[96];
+        std::snprintf(line, sizeof line, " · recherche 0x%x, chaîne :", key);
+        std::string out = line;
+        uint32_t at = node;
+        for (int step = 0; step < 24; ++step) {
+            std::snprintf(line, sizeof line, " 0x%x[%08x:%08x]", at, word(table, at), word(table, at, 1));
+            out += line;
+            at = word(table, at) & 0x3ffff;
+            if (at >= entries || at == node) break;
+        }
+        out += " · entrées portant la clé :";
+        int found = 0;
+        for (size_t i = 0; i < entries && found < 8; ++i)
+            if (word(table, i, 1) == key) {
+                std::snprintf(line, sizeof line, " 0x%zx[%08x]", i, word(table, i));
+                out += line; ++found;
+            }
+        if (!found) out += " aucune";
+        for (size_t i = 0, shown = 0; i < entries && shown < 2; ++i) {
+            if (word(table, i, 1) != key || i == node) continue;
+            std::snprintf(line, sizeof line, " · chaîne de 0x%zx :", i);
+            out += line; ++shown;
+            uint32_t at = uint32_t(i);
+            for (int step = 0; step < 12; ++step) {
+                std::snprintf(line, sizeof line, " 0x%x[%08x:%08x]", at, word(table, at), word(table, at, 1));
+                out += line;
+                at = word(table, at) & 0x3ffff;
+                if (at >= entries || at == i) break;
+            }
+        }
+        out += describe_string(key);
+        return out;
+    }
+private:
+    static constexpr size_t entries = 0x10000;
+    struct Event { uint64_t ns = 0, thread = 0, caller = 0; bool unlock = false; };
+    static uint64_t clock() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    static uint32_t word(const std::vector<uint8_t>& table, size_t index, size_t half = 0) {
+        uint32_t value;
+        std::memcpy(&value, table.data() + index * 8 + half * 4, 4);
+        return value;
+    }
+    void check(uint64_t thread, uint64_t caller, uint64_t now) {
+        current_.resize(entries * 8);
+        if (!memory_.read(table_, current_.data(), current_.size())) { ++unreadable_; return; }
+        std::fill(in_degree_.begin(), in_degree_.end(), 0);
+        uint64_t bad = 0;
+        size_t sample = 0;
+        for (size_t i = 1; i < entries; ++i) {
+            const uint32_t next = word(current_, i) & 0x3ffff;
+            if (next >= entries) { ++bad; sample = i; continue; }
+            if (next && ++in_degree_[next] == 2) { ++bad; sample = next; }
+        }
+        ++checks_;
+        last_bad_ = bad;
+        if (baseline_ < 0) baseline_ = int64_t(bad);
+        if (int64_t(bad) > baseline_ && !previous_.empty()) {
+            capture(thread, caller, now, bad, sample);
+            captured_.store(true);
+            return;
+        }
+        previous_.swap(current_);
+        previous_check_ = now;
+    }
+    void capture(uint64_t thread, uint64_t caller, uint64_t now, uint64_t bad, size_t sample) {
+        char line[256];
+        std::snprintf(line, sizeof line, "  cassée à %.2f s (vérification %llu, la précédente %.2f ms avant) : %llu entrées doubles, vu par le thread %llu en prenant le verrou depuis 0x%llx\n",
+            double(now - start_) / 1e9, (unsigned long long)checks_, double(now - previous_check_) / 1e6,
+            (unsigned long long)bad, (unsigned long long)thread, (unsigned long long)caller);
+        capture_ += line;
+        std::snprintf(line, sizeof line, "  entrée 0x%zx (mot 0x%08x clé 0x%08x) pointée par :", sample, word(current_, sample), word(current_, sample, 1));
+        capture_ += line;
+        int shown = 0;
+        for (size_t i = 1; i < entries && shown < 4; ++i)
+            if ((word(current_, i) & 0x3ffff) == sample) {
+                std::snprintf(line, sizeof line, " 0x%zx (mot 0x%08x clé 0x%08x, avant 0x%08x)", i, word(current_, i), word(current_, i, 1), word(previous_, i));
+                capture_ += line; ++shown;
+            }
+        capture_ += "\n  entrées changées depuis la vérification précédente :";
+        size_t changed = 0;
+        for (size_t i = 0; i < entries; ++i) {
+            if (std::memcmp(current_.data() + i * 8, previous_.data() + i * 8, 8) == 0) continue;
+            if (++changed <= 32) {
+                std::snprintf(line, sizeof line, " 0x%zx %08x:%08x→%08x:%08x", i, word(previous_, i), word(previous_, i, 1), word(current_, i), word(current_, i, 1));
+                capture_ += line;
+            }
+        }
+        std::snprintf(line, sizeof line, " (%zu en tout)\n  derniers appels au verrou, récents d'abord :", changed);
+        capture_ += line;
+        for (size_t k = 0; k < events_.size() && k < next_event_; ++k) {
+            const Event& e = events_[(next_event_ - 1 - k) % events_.size()];
+            std::snprintf(line, sizeof line, " t%llu %s 0x%llx (-%.2f ms)", (unsigned long long)e.thread, e.unlock ? "libère" : "prend",
+                (unsigned long long)e.caller, double(now - e.ns) / 1e6);
+            capture_ += line;
+        }
+        capture_ += "\n";
+    }
+    maxps4::PS4GuestMemory& memory_;
+    const uint64_t relocation_;
+    const uint64_t table_, pool_;
+    // The pool string `key` names, as the game's release path reads it.
+    std::string describe_string(uint32_t key) const {
+        uint8_t base_bytes[8];
+        if (!memory_.read(pool_, base_bytes, 8)) return " · pool illisible";
+        uint64_t base;
+        std::memcpy(&base, base_bytes, 8);
+        const uint64_t at = base + uint64_t(key) * 16;
+        uint8_t head[8], text[0x400] = {};
+        if (!memory_.read(at, head, 8)) return " · chaîne illisible";
+        const bool whole = memory_.read(at + 8, text, sizeof text);
+        char line[160];
+        std::snprintf(line, sizeof line, " · chaîne 0x%x en 0x%llx : en-tête %02x%02x%02x%02x %02x%02x%02x%02x",
+            key, (unsigned long long)at, head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
+        std::string out = line;
+        if (!whole) return out + ", texte illisible";
+        // The length the release path finds (0x1882bf): byte 3 - 1 gives the
+        // low byte, the terminator decides the 256s.
+        const uint32_t low = uint8_t(head[3] - 1);
+        uint32_t length = low + 1;
+        for (uint32_t k = low; k < sizeof text && text[k]; k += 0x100) length += 0x100;
+        uint32_t hash = 0;
+        for (size_t k = 0; k < sizeof text && text[k]; ++k) hash = hash * 31 + uint32_t(int8_t(text[k]));
+        if (length >= 0x100) hash = length >> 2;
+        const uint32_t bucket = hash % 0xffff + 1;
+        std::snprintf(line, sizeof line, ", longueur %u, seau 0x%x, texte « ", length, bucket);
+        out += line;
+        for (size_t k = 0; k < 48 && text[k]; ++k) out += (text[k] >= 32 && text[k] < 127) ? char(text[k]) : '.';
+        return out + " »";
+    }
+    // The pool's allocation bitmap (MT_AllocIndex, default.elf 0x5af550): a
+    // 32-bit word per 32 blocks of 16 bytes at pool + 0x400000, the first
+    // block of a word in its top bit, a set bit free.
+    bool block_state(uint32_t key, uint8_t head[8], uint32_t& word) const {
+        uint8_t base_bytes[8];
+        if (!memory_.read(pool_, base_bytes, 8)) return false;
+        uint64_t base;
+        std::memcpy(&base, base_bytes, 8);
+        uint8_t w[4];
+        if (!base || !memory_.read(base + uint64_t(key) * 16, head, 8) ||
+            !memory_.read(base + 0x400000 + uint64_t(key >> 5) * 4, w, 4)) return false;
+        std::memcpy(&word, w, 4);
+        return true;
+    }
+    static bool key_free(uint32_t key, uint32_t word) { return (word >> (31 - (key & 31))) & 1; }
+    // Under lock_. The release (default.elf 0x5b1530) takes the lock with the
+    // key in r15d and the length the caller found in r14d, then frees the
+    // block with MT_FreeIndex(key, length + 8). A block over 256 bytes is freed
+    // as whole bitmap words, so a key that is not the first of a word with
+    // such a length frees other strings: those releases are kept with the
+    // string's header and text as the lock is taken.
+    // Under lock_. A new string (default.elf 0x5b0dad..0x5b0df3) unlocks with
+    // its key in r12d and its length with the terminator at [rbp - 0x48]: the
+    // size MT_AllocIndex got, kept to check each release against.
+    void note_creation(uint64_t caller, bool unlock, uint32_t key, uint64_t rbp) {
+        if (!unlock || caller != 0x26b0df8 || key >= created_.size() || !rbp) return;
+        uint8_t n[4];
+        if (!memory_.read(rbp - 0x48, n, 4)) return;
+        uint32_t length;
+        std::memcpy(&length, n, 4);
+        created_[key] = length ? length : 1;
+        ++creations_;
+    }
+    static uint32_t blocks(uint32_t length) { return (length + 8 + 15) / 16; }
+    void note_release(uint64_t thread, uint64_t caller, bool unlock, uint32_t key, uint32_t length, uint64_t now, uint64_t rbp, uint64_t rsp) {
+        if (unlock || caller != 0x26b15d8) return;
+        ++releases_;
+        // The release must free the block size the creation allocated.
+        if (key < created_.size() && created_[key]) {
+            const uint32_t made = created_[key];
+            created_[key] = 0;
+            if (made != length && mismatch_log_.size() < 8) {
+                uint8_t base_bytes[8], text[48] = {};
+                uint64_t base = 0;
+                if (memory_.read(pool_, base_bytes, 8)) std::memcpy(&base, base_bytes, 8);
+                if (base) (void)memory_.read(base + uint64_t(key) * 16, text, sizeof text);
+                char line[220];
+                std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x avec la longueur %u (%u blocs), créée avec %u (%u blocs) · ",
+                    double(now - start_) / 1e9, (unsigned long long)thread, key, length, blocks(length), made, blocks(made));
+                mismatch_log_.push_back(line + bytes_text(text) + " · octets :" + hex_bytes(text, sizeof text) + release_context(rbp, rsp));
+            }
+            if (made != length) ++mismatches_;
+        } else {
+            // No creation since the last release: a string released twice, or
+            // made by a path not followed.
+            ++unknown_releases_;
+            if (unknown_log_.size() < 8) {
+                uint8_t base_bytes[8], text[48] = {}, w[4] = {};
+                uint64_t base = 0;
+                if (memory_.read(pool_, base_bytes, 8)) std::memcpy(&base, base_bytes, 8);
+                if (base) {
+                    (void)memory_.read(base + uint64_t(key) * 16, text, sizeof text);
+                    (void)memory_.read(base + 0x400000 + uint64_t(key >> 5) * 4, w, 4);
+                }
+                uint32_t word;
+                std::memcpy(&word, w, 4);
+                char line[220];
+                std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x jamais vue créée ou déjà libérée, longueur %u (%u blocs), mot 0x%x du bitmap = %08x · ",
+                    double(now - start_) / 1e9, (unsigned long long)thread, key, length, blocks(length), key >> 5, word);
+                unknown_log_.push_back(line + bytes_text(text) + " · octets :" + hex_bytes(text, sizeof text) + release_context(rbp, rsp));
+            }
+        }
+        if (length + 8 <= 256 || !(key & 31)) return;
+        ++bad_releases_;
+        if (bad_log_.size() >= 8) return;
+        uint8_t base_bytes[8], text[40] = {};
+        uint64_t base = 0;
+        if (memory_.read(pool_, base_bytes, 8)) std::memcpy(&base, base_bytes, 8);
+        if (base) (void)memory_.read(base + uint64_t(key) * 16, text, sizeof text);
+        char line[200];
+        std::snprintf(line, sizeof line, "  %.3f s : t%llu libère la chaîne 0x%x avec la longueur %u (%u blocs de 16 octets) · ",
+            double(now - start_) / 1e9, (unsigned long long)thread, key, length, (length + 8 + 15) / 16);
+        bad_log_.push_back(line + bytes_text(text) + " · suite :" + hex_bytes(text + 8, 32));
+    }
+    // Only for the bounded anomaly logs, while the caller is at the service
+    // boundary. The first key-0 release can free live strings much earlier
+    // than their eventual corrupt lookup: retain its guest callers now.
+    std::string release_context(uint64_t rbp, uint64_t rsp) const {
+        char line[120];
+        std::snprintf(line, sizeof line, " | rbp 0x%llx rsp 0x%llx | appels (rbp) :",
+            (unsigned long long)rbp, (unsigned long long)rsp);
+        std::string out = line;
+        uint64_t frame = rbp;
+        for (unsigned depth = 0; depth < 12 && frame && !(frame & 7); ++depth) {
+            if (frame > UINT64_MAX - 15) break;
+            uint8_t pair[16];
+            if (!memory_.read(frame, pair, sizeof pair)) break;
+            uint64_t next = 0, back = 0;
+            std::memcpy(&next, pair, 8); std::memcpy(&back, pair + 8, 8);
+            if (back < relocation_ || back - relocation_ >= 0x20000000) break;
+            std::snprintf(line, sizeof line, " 0x%llx", (unsigned long long)(back - relocation_));
+            out += line;
+            if (next <= frame) break;
+            frame = next;
+        }
+        // This caller is the script-save reader. Its saved r15 is the
+        // MemoryFile*, and the value record is at caller rsp + 0x4c0.
+        // Snapshot only: neither the save nor guest execution is changed.
+        uint8_t returns[8];
+        uint64_t back = 0;
+        if (rbp && rbp <= UINT64_MAX - 15 && memory_.read(rbp + 8, returns, 8))
+            std::memcpy(&back, returns, 8);
+        if (back >= relocation_ && back - relocation_ == 0x2525ce8 && rbp >= 8) {
+            uint8_t saved[8], stream[64], value[12];
+            uint64_t pointer = 0;
+            if (memory_.read(rbp - 8, saved, 8)) std::memcpy(&pointer, saved, 8);
+            if (pointer && pointer <= UINT64_MAX - 63 && memory_.read(pointer, stream, sizeof stream)) {
+                uint64_t base = 0, size = 0, position = 0;
+                uint32_t mode = 0, compressed = 0;
+                std::memcpy(&base, stream, 8); std::memcpy(&size, stream + 8, 8);
+                std::memcpy(&position, stream + 24, 8);
+                std::memcpy(&mode, stream + 52, 4); std::memcpy(&compressed, stream + 56, 4);
+                std::snprintf(line, sizeof line, " | flux 0x%llx base 0x%llx taille %llu position %llu",
+                    (unsigned long long)pointer, (unsigned long long)base,
+                    (unsigned long long)size, (unsigned long long)position);
+                out += line;
+                std::snprintf(line, sizeof line, " mode %u compression %u erreur %u", mode, compressed, unsigned(stream[61]));
+                out += line;
+            }
+            if (rbp <= UINT64_MAX - 0x4db && memory_.read(rbp + 0x4d0, value, sizeof value))
+                out += " | valeur sauvegardee (8 octets puis type) :" + hex_bytes(value, sizeof value);
+        }
+        out += " | pile (mots bruts, pas une trace d'appels) :";
+        for (unsigned word = 0; rsp && word < 16; ++word) {
+            const uint64_t offset = uint64_t(word) * 8;
+            if (rsp > UINT64_MAX - offset - 7) break;
+            uint8_t bytes[8];
+            if (!memory_.read(rsp + offset, bytes, sizeof bytes)) break;
+            uint64_t value = 0;
+            std::memcpy(&value, bytes, 8);
+            std::snprintf(line, sizeof line, " +0x%x=0x%llx", word * 8, (unsigned long long)value);
+            out += line;
+        }
+        return out;
+    }
+    static std::string hex_bytes(const uint8_t* b, size_t n) {
+        std::string out;
+        char line[8];
+        for (size_t k = 0; k < n; ++k) { std::snprintf(line, sizeof line, "%s%02x", k % 4 ? "" : " ", b[k]); out += line; }
+        return out;
+    }
+    // Under lock_: the first time the watched string is still referenced
+    // (non-zero count and length) while its block is marked free, keep who
+    // took or released the string table's lock then, and the calls before.
+    void check_freed(uint64_t thread, uint64_t caller, bool unlock, uint64_t now) {
+        const uint32_t key = guard_key_.load();
+        if (!key || !freed_capture_.empty()) return;
+        uint8_t head[8];
+        uint32_t word = 0;
+        if (!block_state(key, head, word)) return;
+        const bool live = (head[0] | head[1]) && head[3];
+        if (!live || !key_free(key, word)) return;
+        char line[200];
+        std::snprintf(line, sizeof line, "  libérée vivante à %.3f s, vu quand t%llu %s le verrou depuis 0x%llx : en-tête %02x%02x%02x%02x, mot 0x%x du bitmap = %08x\n  derniers appels au verrou, récents d'abord :",
+            double(now - start_) / 1e9, (unsigned long long)thread, unlock ? "libère" : "prend", (unsigned long long)caller,
+            head[0], head[1], head[2], head[3], key >> 5, word);
+        freed_capture_ = line;
+        for (size_t k = 0; k < events_.size() && k < next_event_; ++k) {
+            const Event& e = events_[(next_event_ - 1 - k) % events_.size()];
+            std::snprintf(line, sizeof line, " t%llu %s 0x%llx (-%.2f ms)", (unsigned long long)e.thread, e.unlock ? "libère" : "prend",
+                (unsigned long long)e.caller, double(now - e.ns) / 1e6);
+            freed_capture_ += line;
+        }
+        freed_capture_ += "\n";
+    }
+    // Header in hex, then the text as characters.
+    static std::string bytes_text(const uint8_t* b) {
+        char line[40];
+        std::snprintf(line, sizeof line, "%02x%02x%02x%02x %02x%02x%02x%02x «", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        std::string out = line;
+        for (int k = 8; k < 32 && b[k]; ++k) out += (b[k] >= 32 && b[k] < 127) ? char(b[k]) : '.';
+        return out + "»";
+    }
+    std::atomic<bool> stop_ {false};
+    std::thread guard_thread_;
+    std::atomic<uint32_t> guard_key_ {0};
+    std::string freed_capture_;
+    uint64_t releases_ = 0, bad_releases_ = 0, creations_ = 0, mismatches_ = 0, unknown_releases_ = 0;
+    std::vector<uint32_t> created_ = std::vector<uint32_t>(0x40000);
+    std::vector<std::string> mismatch_log_, unknown_log_;
+    std::vector<std::string> bad_log_;
+    std::vector<std::string> word_log_;
+    std::array<std::string, 10> word_tail_ {};
+    uint64_t word_changes_ = 0, word_tail_next_ = 0;
+    uint64_t guard_changes_ = 0, guard_tail_next_ = 0;
+    std::vector<std::string> guard_log_;
+    std::array<std::string, 10> guard_tail_ {};
+    const uint64_t start_;
+    mutable std::mutex lock_;
+    std::array<Event, 48> events_ {};
+    uint64_t next_event_ = 0, checks_ = 0, last_check_ = 0, previous_check_ = 0, last_bad_ = 0, unreadable_ = 0;
+    int64_t baseline_ = -1;
+    std::atomic<bool> captured_ {false};
+    std::vector<uint8_t> current_, previous_;
+    std::vector<uint16_t> in_degree_;
+    std::string capture_;
+};
 struct maxps4_fex_engine {
     // This real FEX configuration holder installs no process signal handlers.
     // It outlives the context. Only admitted no-fault straight-line code executes.
@@ -1371,6 +2157,9 @@ struct maxps4_fex_engine {
     bool orbis_admitted = false;
     maxps4_fex_cpu_report cpu_report{};
     maxps4_fex_guest_fault last_fault{};
+    // The faulting child thread, its exact instruction, registers and target
+    // memory, for the final report (the threads are gone by then).
+    std::string last_fault_detail;
     uint32_t time_limit_ms = 0; // 0: no limit.
     std::atomic<bool> stop_requested{false};
     // The running main thread's guard, for sampling; guarded by sample_lock.
@@ -1396,6 +2185,10 @@ struct maxps4_fex_engine {
     std::vector<std::atomic<uint32_t>> missing_reported;
     fextl::unique_ptr<FEXCore::Context::Context> context;
     int32_t stage = MAXPS4_FEX_CONTEXT_CREATED;
+    // Call of Duty only (see StringTableWatch): its string table, checked under its mutex.
+    // Last member: destroyed first, its polling thread joined while sample_lock
+    // and the guest memory it reads still exist.
+    std::unique_ptr<StringTableWatch> table_watch;
 };
 namespace {
 // FEX configuration is process-global. This adapter owns it until the last
@@ -1440,6 +2233,15 @@ extern "C" int32_t maxps4_fex_engine_open(maxps4_fex_engine **out) {
 #if !defined(VIXL_SIMULATOR)
     // Read by the context created below; the simulator always runs without it.
     FEXCore::Config::Set(FEXCore::Config::CONFIG_TSOENABLED, tso_emulation.load() ? "1" : "0");
+    // Full x86 ordering, not FEX's faster defaults: vector loads/stores, REP
+    // MOVS/STOS and split-line locked operations ordered and untorn as well.
+    // Call of Duty's string references are counted by lock-free code; with the
+    // defaults it looked up a string already freed and spun forever (default.elf
+    // 0x5b1640), its table intact and every mutex call successful.
+    const char* strict = tso_emulation.load() ? "1" : "0";
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, strict);
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, strict);
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_STRICTINPROCESSSPLITLOCKS, strict);
 #endif
     // Real Darwin sysctl-based feature discovery; never fabricated features.
     const auto features = FEX::FetchHostFeatures();
@@ -1577,6 +2379,46 @@ extern "C" int32_t maxps4_fex_engine_probe(maxps4_fex_engine *engine,
     return maxps4_fex_engine_run_elf(engine, file.data(), file.size(), 3, result, backend, &entry);
 }
 
+static std::string fault_registers(maxps4_fex_engine* engine, const std::array<uint64_t, 16>& gprs);
+static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address);
+// The first faulting child thread, its exact instruction, registers and target memory.
+static std::string fault_detail(maxps4_fex_engine* engine, const maxps4_fex_guest_fault& fault, uint64_t id,
+                                const std::array<uint64_t, 16>& gprs) {
+    char line[256];
+    const uint64_t rip = fault.rip >= engine->relocation ? fault.rip - engine->relocation : fault.rip;
+    std::snprintf(line, sizeof line, "Plantage : thread %llu, signal %d code %d adresse 0x%llx, instruction exacte 0x%llx, octets",
+        (unsigned long long)id, fault.signal, fault.code, (unsigned long long)fault.address, (unsigned long long)rip);
+    std::string detail = line;
+    uint8_t bytes[8] {};
+    if (engine->system_memory.read(fault.rip, bytes, sizeof bytes))
+        for (const uint8_t b : bytes) { std::snprintf(line, sizeof line, " %02x", b); detail += line; }
+    else detail += " illisibles";
+    detail += fault_memory(engine, fault.address);
+    detail += fault_registers(engine, gprs);
+    return detail + "\n";
+}
+// Call of Duty: Modern Warfare Remastered's string table check (StringTableWatch),
+// when its code is the one known: the lookup's lea of the table at default.elf
+// 0x5b15eb. Other games and versions keep no watch.
+static void watch_string_table(maxps4_fex_engine* engine) {
+    engine->libkernel.watch_mutex(0, {});
+    engine->table_watch.reset();
+    const uint64_t base = engine->relocation + 0x2100000; // default.elf's load address.
+    static constexpr uint8_t lookup[] = {0x4c, 0x8d, 0x25, 0x0e, 0xe9, 0x69, 0x0c};
+    uint8_t bytes[sizeof lookup] = {};
+    if (!engine->system_memory.read(base + 0x5b15eb, bytes, sizeof bytes) || std::memcmp(bytes, lookup, sizeof lookup)) return;
+    engine->table_watch = std::make_unique<StringTableWatch>(engine->system_memory, base + 0xcc4ff00, base + 0xc847d28, engine->relocation);
+    StringTableWatch* watch = engine->table_watch.get();
+    const uint64_t relocation = engine->relocation;
+    engine->libkernel.watch_mutex(base + 0xc0bc978, [watch, relocation](uint64_t thread, uint64_t caller, bool unlock,
+                                                                       const maxps4::PS4KernelCall& call) {
+        watch->event(thread, caller >= relocation ? caller - relocation : caller, unlock, call.r15, call.r14, call.r12, call.rbp, call.rsp);
+    });
+    watch->guard_string(0x14e, [engine, relocation](bool registers) {
+        std::lock_guard sampling(engine->sample_lock);
+        return engine->probe.threads ? engine->probe.threads->where_all(relocation, registers) : std::string(" ?");
+    });
+}
 namespace {
 struct PM4Request {
     uint64_t address;
@@ -1696,6 +2538,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     if (!persistent_frame || !engine->frame_code_cached) engine->context->ClearCodeCache(thread, false);
     engine->frame_code_cached = persistent_frame;
     engine->last_fault = {};
+    { std::lock_guard sampling(engine->sample_lock); engine->last_fault_detail.clear(); }
     {
         // General images may create guest threads; all are joined before the
         // guard (which owns the signal handlers) goes away.
@@ -1741,13 +2584,32 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
         if (main_exit) threads->wait();
         maxps4_fex_guest_fault child {};
         if (threads) threads->finish();
-        engine->probe.threads = nullptr;
+        { std::lock_guard sampling(engine->sample_lock); engine->probe.threads = nullptr; }
         if (main_exit && threads->expired() && !engine->probe.exited) signal = SIGURG;
         // A child's exit function stops the main thread with SIGURG: not a timeout.
         if (signal == SIGURG && engine->probe.exited) signal = 0;
         // RIP is the guest position FEX last stored (block granularity).
-        if (threads && threads->faulted(child)) { engine->last_fault = child; signal = child.signal; }
-        else if (signal) engine->last_fault = {signal, guard.code, guard.address, state.rip};
+        if (threads && threads->faulted(child)) {
+            engine->last_fault = child; signal = child.signal;
+            uint64_t id = 0;
+            std::array<uint64_t, 16> gprs {};
+            threads->fault_thread(id, gprs);
+            std::string detail = fault_detail(engine, child, id, gprs);
+            std::lock_guard sampling(engine->sample_lock);
+            engine->last_fault_detail = std::move(detail);
+        }
+        else if (signal) {
+            // The main thread (1) faulted: its exact instruction when the fault
+            // was in JIT code, and its guest registers as FEX spilled them.
+            engine->last_fault = {signal, guard.code, guard.address, guard.fault_rip ? guard.fault_rip : state.rip};
+            if (signal != SIGURG) {
+                std::array<uint64_t, 16> gprs {};
+                std::copy_n(std::begin(state.gregs), 16, gprs.begin());
+                std::string detail = fault_detail(engine, engine->last_fault, 1, gprs);
+                std::lock_guard sampling(engine->sample_lock);
+                engine->last_fault_detail = std::move(detail);
+            }
+        }
         if (signal) {
             engine->frame_code_cached = false;
             return signal == SIGURG ? (engine->stop_requested.load() ? -ECANCELED : -ETIMEDOUT) :
@@ -2020,6 +2882,7 @@ extern "C" int32_t maxps4_fex_engine_prepare_orbis_general(maxps4_fex_engine* en
         message(status ? reason : "SCE image linked and identity-mapped; execution not attempted");
         engine->orbis_admitted = status == 0;
         if (!status) *relocation = engine->relocation = moved;
+        if (!status) watch_string_table(engine);
         return status;
     } catch (const std::bad_alloc&) { message("Orbis allocation failed"); return -ENOMEM; }
 }
@@ -2257,7 +3120,20 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
         struct File { std::filesystem::path path; bool optional; };
         std::vector<File> files;
         for (const auto& found : maxps4::discover_app_modules(root, update)) files.push_back({found.path, found.root_level});
-        files.push_back({!update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin", false});
+        std::filesystem::path program = !update.empty() && std::filesystem::exists(update / "eboot.bin", error) ? update / "eboot.bin" : root / "eboot.bin";
+        bool launched = false;
+        // No sceSystemServiceLoadExec: a launcher is replaced by what it would start.
+        {
+            std::ifstream in(program, std::ios::binary);
+            const std::vector<uint8_t> launcher{std::istreambuf_iterator<char>(in), {}};
+            if (maxps4::orbisLauncherOfDefaultElf(launcher.data(), launcher.size())) {
+                const auto next = program.parent_path() / "default.elf";
+                if (std::filesystem::exists(next, error)) { program = next; launched = true; }
+                else if (std::filesystem::exists(root / "default.elf", error)) { program = root / "default.elf"; launched = true; }
+            }
+        }
+        const std::string programName = program.filename().string();
+        files.push_back({program, false});
         // A root-level file is optional: one that is unreadable, not an ELF/SELF
         // the metadata parser accepts, or not a PRX (0xfe18) is skipped, and the
         // game boots as before. sce_module modules and the eboot stay required.
@@ -2352,7 +3228,7 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
             // prepare_orbis_general never mark a module.
             engine->private_export_modules = with_optional ? private_exports : std::set<std::string>{};
             const int32_t status = maxps4_fex_engine_prepare_orbis_general(engine, table.data(), table.size(),
-                                                                           "eboot.bin", relocation, diagnostic, capacity);
+                                                                           programName.c_str(), relocation, diagnostic, capacity);
             engine->private_export_modules.clear();
             return status;
         };
@@ -2368,6 +3244,7 @@ extern "C" int32_t maxps4_fex_engine_load_game(maxps4_fex_engine* engine, const 
             prepared = prepare(false);
         }
         if (prepared) return prepared;
+        if (launched) engine->staged_ps4.start_without_program_name();
         const int64_t mounted = maxps4_fex_engine_mount_app0(engine, root.string().c_str());
         if (mounted) return int32_t(mounted);
         if (!update.empty()) {
@@ -2816,6 +3693,144 @@ extern "C" int32_t maxps4_fex_set_tso_emulation(uint32_t enabled) {
     if (enabled > 1) return -EINVAL;
     tso_emulation = enabled != 0; return 0;
 }
+// Where a thread's faulting access went: the game's view of the page (read,
+// write), the host's protection of it, and the game's last map/unmap/protect
+// calls that covered it.
+// The guest registers of a faulting thread, and the first 0x30 bytes each
+// readable register points at (a Gnm command buffer: begin, end, current,
+// reserve callback and its argument).
+static std::string fault_registers(maxps4_fex_engine* engine, const std::array<uint64_t, 16>& gprs) {
+    static constexpr const char* names[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+                                              "r8","r9","r10","r11","r12","r13","r14","r15"};
+    std::string out = " · registres :";
+    char line[160];
+    for (size_t i = 0; i < 16; ++i) {
+        std::snprintf(line, sizeof line, " %s 0x%llx", names[i], (unsigned long long)gprs[i]);
+        out += line;
+    }
+    // The guest call chain through saved frame pointers ([rbp] the caller's
+    // rbp, [rbp + 8] its return address), while it stays within readable memory.
+    {
+        out += " · appels (rbp) :";
+        uint64_t frame = gprs[5];
+        for (int depth = 0; depth < 12 && frame && !(frame & 7); ++depth) {
+            uint8_t pair[16];
+            if (!engine->system_memory.read(frame, pair, sizeof pair)) break;
+            const uint64_t next = maxps4::ps4::get_le(pair, 8), back = maxps4::ps4::get_le(pair + 8, 8);
+            const bool code = back >= engine->relocation && back - engine->relocation < 0x20000000;
+            if (!code) break;
+            std::snprintf(line, sizeof line, " 0x%llx", (unsigned long long)(back - engine->relocation));
+            out += line;
+            if (next <= frame) break;
+            frame = next;
+        }
+    }
+    // The stack's top (16 words) holds the return addresses of the callers.
+    for (const size_t i : {size_t(4), size_t(3), size_t(7), size_t(14)}) {
+        uint8_t bytes[0x80];
+        const size_t size = i == 4 ? sizeof bytes : 0x30;
+        if (!gprs[i] || !engine->system_memory.read(gprs[i], bytes, size)) continue;
+        std::snprintf(line, sizeof line, " · [%s] :", names[i]);
+        out += line;
+        for (size_t q = 0; q < size / 8; ++q) {
+            const uint64_t value = maxps4::ps4::get_le(bytes + 8 * q, 8);
+            const bool code = value >= engine->relocation && value - engine->relocation < 0x10000000;
+            std::snprintf(line, sizeof line, code ? " code+0x%llx" : " 0x%llx",
+                (unsigned long long)(code ? value - engine->relocation : value));
+            out += line;
+        }
+    }
+    return out;
+}
+static std::string fault_memory(maxps4_fex_engine* engine, uint64_t address) {
+    std::string out;
+    char line[320];
+    std::snprintf(line, sizeof line, " · page du jeu : lecture %s, écriture %s",
+        engine->system_memory.permitted(address, 1, 4) ? "oui" : "non",
+        engine->system_memory.permitted(address, 1, 2) ? "oui" : "non");
+    out += line;
+#if defined(__APPLE__)
+    vm_address_t region = vm_address_t(address);
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info {};
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    const kern_return_t kr = vm_region_64(mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64,
+        reinterpret_cast<vm_region_info_t>(&info), &count, &object);
+    if (kr != KERN_SUCCESS) std::snprintf(line, sizeof line, " · hôte : erreur %d", int(kr));
+    else if (region > address) std::snprintf(line, sizeof line, " · hôte : non mappée (suivante 0x%llx)", (unsigned long long)region);
+    else std::snprintf(line, sizeof line, " · hôte : 0x%llx-0x%llx %c%c%c (max %c%c%c)",
+        (unsigned long long)region, (unsigned long long)(region + size),
+        (info.protection & VM_PROT_READ) ? 'r' : '-', (info.protection & VM_PROT_WRITE) ? 'w' : '-',
+        (info.protection & VM_PROT_EXECUTE) ? 'x' : '-', (info.max_protection & VM_PROT_READ) ? 'r' : '-',
+        (info.max_protection & VM_PROT_WRITE) ? 'w' : '-', (info.max_protection & VM_PROT_EXECUTE) ? 'x' : '-');
+    out += line;
+#endif
+    uint64_t below_start = 0, below_end = 0, above_start = 0, above_end = 0;
+    engine->dynamic_ps4.neighbours(address, below_start, below_end, above_start, above_end);
+    std::snprintf(line, sizeof line, " · mappé avant : 0x%llx-0x%llx, après : 0x%llx-0x%llx",
+        (unsigned long long)below_start, (unsigned long long)below_end,
+        (unsigned long long)above_start, (unsigned long long)above_end);
+    out += line;
+    const uint64_t now = maxps4::PS4VirtualMemory::clock_ns();
+    for (const uint64_t radius : {uint64_t(0), uint64_t(32) << 20}) {
+        std::array<maxps4::PS4VirtualMemory::Operation, 6> operations {};
+        size_t shown = 0, total = 0;
+        const size_t found = engine->dynamic_ps4.operations_at(address, radius, operations, shown, total);
+        std::snprintf(line, sizeof line, radius ? " · %zu appels mémoire à moins de 32 Mio (sur %zu)" :
+            " · %zu appels mémoire sur cette page (sur %zu)", found, total);
+        out += line;
+        for (size_t i = 0; i < shown; ++i) {
+            const auto& o = operations[i];
+            const char* kind = o.kind == 'u' ? "unmap" : o.kind == 'p' ? "protect" : o.kind == 'f' ? "map fixe" : "map";
+            std::snprintf(line, sizeof line, "%s il y a %.2f s %s 0x%llx +0x%llx prot 0x%x%s",
+                i ? " ;" : " :", double(now - std::min(now, o.ns)) / 1e9, kind,
+                (unsigned long long)o.address, (unsigned long long)o.size, o.protection, o.error ? " REFUSÉ" : "");
+            out += line;
+            if (o.result && o.result != o.address) {
+                std::snprintf(line, sizeof line, " -> 0x%llx", (unsigned long long)o.result);
+                out += line;
+            }
+        }
+    }
+    // Memory calls libkernel refused (BatchMap entries included), some before
+    // reaching the mappings above.
+    std::array<maxps4::PS4Libkernel::MemoryFailure, maxps4::PS4Libkernel::memory_failure_limit> failures {};
+    size_t listed = 0;
+    const size_t refused = engine->libkernel.memory_failures(failures, listed);
+    if (!refused) out += " · aucun appel mémoire refusé";
+    else {
+        std::snprintf(line, sizeof line, " · %zu appels mémoire refusés, récents d'abord :", refused);
+        out += line;
+    }
+    for (size_t i = 0; i < std::min<size_t>(listed, 6); ++i) {
+        const auto& f = failures[i];
+        std::snprintf(line, sizeof line, "%s %s(0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx) adresse 0x%llx = 0x%llx",
+            i ? " ;" : "", service_name(f.service), (unsigned long long)f.call.rdi, (unsigned long long)f.call.rsi,
+            (unsigned long long)f.call.rdx, (unsigned long long)f.call.rcx, (unsigned long long)f.call.r8,
+            (unsigned long long)f.hint, (unsigned long long)f.result);
+        out += line;
+    }
+    return out;
+}
+extern "C" void maxps4_fex_set_host_crash_note(const char* path) {
+    const size_t length = path ? std::min(std::strlen(path), sizeof host_crash_note - 1) : 0;
+    // The first byte last: a signal handler never sees a half-written path.
+    host_crash_note[0] = 0;
+    if (!length) return;
+    std::memcpy(host_crash_note + 1, path + 1, length - 1);
+    host_crash_note[length] = 0;
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+    host_crash_note[0] = path[0];
+}
+extern "C" int32_t maxps4_fex_engine_fault_detail(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    std::lock_guard sampling(engine->sample_lock);
+    const size_t length = std::min(engine->last_fault_detail.size(), capacity - 1);
+    std::memcpy(text, engine->last_fault_detail.data(), length);
+    text[length] = 0;
+    return int32_t(length);
+}
 extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     char header[160];
@@ -2823,9 +3838,87 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         tso_emulation.load() ? "émulé" : "désactivé", (unsigned long long)alignment_repairs.load(),
         (unsigned long long)last_repair_pc.load());
     std::string out = header;
+    out += "Interruptions GPU de fin de travail : " + std::to_string(engine->libkernel.threads().graphics_interrupts()) + "\n";
+    if (const std::string asked = engine->libkernel.load_exec(); !asked.empty())
+        out += "LoadExec demandé : " + asked + "\n";
     out += engine->libkernel.graphics().submit_activity();
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();
+    std::unique_lock sampling(engine->sample_lock);
+    out += engine->last_fault_detail;
+    if (engine->last_fault_detail.empty()) {
+        // While the run stops, before the threads are gone: the live report
+        // keeps it even if the app itself dies on the way.
+        maxps4_fex_guest_fault fault {};
+        uint64_t id = 0;
+        std::array<uint64_t, 16> gprs {};
+        if (engine->probe.threads && engine->probe.threads->faulted(fault) && engine->probe.threads->fault_thread(id, gprs))
+            out += fault_detail(engine, fault, id, gprs);
+    }
+    sampling.unlock();
+    {
+        std::array<maxps4::PS4Libkernel::SaveCall, maxps4::PS4Libkernel::save_call_limit> calls {};
+        size_t count = 0;
+        std::string root;
+        const size_t total = engine->libkernel.save_calls(calls, count, root);
+        if (total) {
+            char line[256];
+            std::snprintf(line, sizeof line, "Sauvegarde : dossier %s · %zu appels, récents d'abord :\n",
+                root.empty() ? "AUCUN" : root.c_str(), total);
+            out += line;
+            for (size_t i = 0; i < std::min<size_t>(count, 12); ++i) {
+                const auto& c = calls[i];
+                std::snprintf(line, sizeof line, "  %s(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%llx%s%s\n",
+                    service_name(c.service), (unsigned long long)c.call.rdi, (unsigned long long)c.call.rsi,
+                    (unsigned long long)c.call.rdx, (unsigned long long)c.call.rcx, (unsigned long long)c.result,
+                    c.path[0] ? " " : "", c.path);
+                out += line;
+            }
+        }
+    }
+    {
+        const auto ajm = engine->libkernel.ajm().stats();
+        if (ajm.batches || ajm.instances) {
+            char line[200];
+            std::snprintf(line, sizeof line, "Ajm : %u instances · %llu lots, %llu tâches (%llu en erreur, dernier résultat 0x%x) · %llu trames MP3, %llu échantillons\n",
+                ajm.instances, (unsigned long long)ajm.batches, (unsigned long long)ajm.jobs,
+                (unsigned long long)ajm.failed_jobs, unsigned(ajm.last_result), (unsigned long long)ajm.frames,
+                (unsigned long long)ajm.samples);
+            out += line;
+        }
+    }
+    if (engine->table_watch) out += engine->table_watch->report();
+    if (maxps4_fex_code_cache_used) {
+        // The iOS code buffer's fill and in-place clears (patch-fexcore-code-cache-reuse.py):
+        // a clear while other threads run can leave them on stale code.
+        char line[160];
+        std::snprintf(line, sizeof line, "Cache JIT : %.1f Mio utilisés sur 128 · %llu vidages en place\n",
+            double(maxps4_fex_code_cache_used()) / (1024.0 * 1024.0),
+            (unsigned long long)(maxps4_fex_code_cache_reuses ? maxps4_fex_code_cache_reuses() : 0));
+        out += line;
+    }
+    {
+        // A failed lock the game ignores leaves its critical section unprotected.
+        size_t used = 0, peak = 0;
+        engine->libkernel.mutex_usage(used, peak);
+        const auto failed = engine->libkernel.mutex_failures();
+        char line[400];
+        int n = std::snprintf(line, sizeof line, "Mutex : %zu en service (au plus %zu sur %zu) · échecs : lock %llu, trylock %llu, unlock %llu",
+            used, peak, maxps4::PS4Threads::mutex_limit, (unsigned long long)failed.lock,
+            (unsigned long long)failed.trylock, (unsigned long long)failed.unlock);
+        if (failed.lock || failed.trylock || failed.unlock)
+            n += std::snprintf(line + n, sizeof line - size_t(n), " · dernier %s(0x%llx) thread %llu = 0x%llx",
+                service_name(failed.last_service), (unsigned long long)failed.last_slot,
+                (unsigned long long)failed.last_thread, (unsigned long long)failed.last_result);
+        // An init over a mutex another thread holds lets two threads into its critical section.
+        uint64_t reinit_live = 0, reinit_held = 0, reinit_slot = 0;
+        engine->libkernel.mutex_reinits(reinit_live, reinit_held, reinit_slot);
+        if (reinit_live && n > 0 && size_t(n) < sizeof line)
+            n += std::snprintf(line + n, sizeof line - size_t(n), " · réinitialisés vivants %llu, dont tenus %llu (dernier 0x%llx)",
+                (unsigned long long)reinit_live, (unsigned long long)reinit_held, (unsigned long long)reinit_slot);
+        out += line;
+        out += "\n";
+    }
     const uint64_t now = ProbeAddressSpace::now_ns();
     if (const uint64_t asked = engine->probe.stop_asked_ns.load()) {
         const uint64_t told = engine->probe.stop_told_ns.load();
@@ -2864,13 +3957,79 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         const double seconds = double(now - std::min(now, a.since.load())) / 1e9;
         const auto returned = (unsigned long long)a.returned.load();
         char line[192];
-        if (a.inside.load())
-            std::snprintf(line, sizeof line, "thread %llu : dans %s depuis %.1f s (%llu appels)\n",
-                (unsigned long long)thread, name, seconds, returned);
-        else
-            std::snprintf(line, sizeof line, "thread %llu : code du jeu depuis %.1f s, dernier %s (%llu appels)\n",
+        if (!a.inside.load()) {
+            std::snprintf(line, sizeof line, "thread %llu : code du jeu depuis %.1f s, dernier %s (%llu appels)",
                 (unsigned long long)thread, seconds, name, returned);
+            out += line;
+            // Over a second without a call: where it spins.
+            if (seconds > 1 && thread != 1) {
+                std::lock_guard sampling(engine->sample_lock);
+                if (engine->probe.threads) {
+                    uint64_t regs[31] {}, jit_rip = 0;
+                    out += engine->probe.threads->sample(thread, engine->relocation, regs, &jit_rip);
+                    // Spinning in Call of Duty's string lookup: what it looks for, and where.
+                    if (engine->table_watch && jit_rip >= 0x26b1600 && jit_rip < 0x26b1670)
+                        out += engine->table_watch->explain(uint32_t(regs[29]), uint32_t(regs[5]));
+                    uint64_t rip = 0, ended_ns = 0, address = 0;
+                    int signal = 0, code = 0;
+                    std::array<uint64_t, 16> gprs {};
+                    if (engine->probe.threads->ending_of(thread, rip, ended_ns, signal, code, address, &gprs)) {
+                        std::snprintf(line, sizeof line, " · terminé il y a %.1f s en 0x%llx (signal %d code %d adresse 0x%llx), octets",
+                            double(now - std::min(now, ended_ns)) / 1e9,
+                            (unsigned long long)(rip >= engine->relocation ? rip - engine->relocation : rip), signal, code,
+                            (unsigned long long)address);
+                        out += line;
+                        uint8_t code[8] {};
+                        if (engine->system_memory.read(rip, code, sizeof code))
+                            for (const uint8_t byte : code) { std::snprintf(line, sizeof line, " %02x", byte); out += line; }
+                        else out += " illisibles";
+                        if (address && signal != SIGILL) {
+                            out += fault_memory(engine, address);
+                            out += fault_registers(engine, gprs);
+                        }
+                    }
+                }
+                else out += " · threads inconnus";
+            }
+            out += "\n";
+            continue;
+        }
+        std::snprintf(line, sizeof line, "thread %llu : dans %s depuis %.1f s (%llu appels)",
+            (unsigned long long)thread, name, seconds, returned);
         out += line;
+        // A thread waiting for a mutex: who holds it (itself: a deadlock).
+        // A semaphore or an event queue a thread waits on: its state.
+        if (raw == static_cast<uint32_t>(maxps4::PS4KernelService::sema_wait))
+            out += " · sémaphore " + engine->libkernel.threads().sema_state(a.argument.load());
+        if (raw == static_cast<uint32_t>(maxps4::PS4KernelService::equeue_wait))
+            out += " · file : " + engine->libkernel.threads().equeue_state(a.argument.load());
+        if (raw == static_cast<uint32_t>(maxps4::PS4KernelService::mutex_lock)) {
+            const uint64_t owner = engine->libkernel.threads().mutex_owner(a.argument.load());
+            if (owner == thread) out += " · verrou déjà tenu par ce thread";
+            else if (owner) {
+                std::snprintf(line, sizeof line, " · verrou tenu par le thread %llu", (unsigned long long)owner);
+                out += line;
+            }
+        }
+        // Where the game called from: the return address, then the frame pointer
+        // chain (the stack stays put while the thread is inside the service).
+        auto relative = [&](uint64_t rip) { return rip >= engine->relocation ? rip - engine->relocation : rip; };
+        uint64_t words[2] {};
+        const char* separator = " depuis";
+        if (engine->system_memory.read(a.rsp.load(), words, 8)) {
+            std::snprintf(line, sizeof line, "%s 0x%llx", separator, (unsigned long long)relative(words[0]));
+            out += line;
+            separator = " <";
+        }
+        uint64_t frame = a.rbp.load();
+        for (int depth = 0; depth < 6 && frame && engine->system_memory.read(frame, words, 16); ++depth) {
+            std::snprintf(line, sizeof line, "%s 0x%llx", separator, (unsigned long long)relative(words[1]));
+            out += line;
+            separator = " <";
+            if (words[0] <= frame) break; // Frames only go up the stack.
+            frame = words[0];
+        }
+        out += "\n";
     }
     const size_t n = std::min(capacity - 1, out.size());
     std::memcpy(text, out.data(), n);

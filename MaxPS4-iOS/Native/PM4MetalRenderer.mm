@@ -71,7 +71,7 @@ unsigned colourSlots(const PM4Draw& d) {
 }
 
 id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format, MTLPixelFormat depth) {
-    const PipelineKey key{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
+    const PipelineKey key{d.vs, d.ps, d.vsVGPRCount, d.psVGPRCount, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
                           (d.blend >> 30) & 1 ? d.blend : 0u, d.mask, unsigned(depth)};
     if (asyncPipelines) {
         std::lock_guard<std::mutex> lock(async_->mutex);
@@ -96,9 +96,11 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     }
     GCNTranslateOptions vsOptions;
     vsOptions.stage = GCNStage::vertex; vsOptions.name = "vs_program"; vsOptions.userCount = d.vsUserCount;
+    vsOptions.vgprCount = d.vsVGPRCount;
     for (unsigned k = 0; k < 16; ++k) vsOptions.userData[k] = d.vsUser[k];
     GCNTranslateOptions psOptions;
     psOptions.name = "ps_program"; psOptions.userCount = d.psUserCount;
+    psOptions.vgprCount = d.psVGPRCount;
     psOptions.directLoads = native_ || !guest_; // Each draw is scanned: its table is complete.
     for (unsigned k = 0; k < 16; ++k) psOptions.userData[k] = d.psUser[k];
     compiling = 3;
@@ -108,8 +110,19 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     if (d.ps || d.colour) ps = translateGCN(code_, d.ps, psOptions);
     else ps.source = "GCN_FN void ps_program(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) { (void)L; (void)M; (void)Q; }\n";
     compiling = 0;
-    if (!vs) { fail("VS translation: " + vs.error); return nil; }
-    if (!ps) { fail("PS translation: " + ps.error); return nil; }
+    if (!vs) {
+        if (costly_.insert(d.vs).second)
+            programListings += programWords("VS refuse", d.vs, d.vsUser, d.vsUserCount);
+        fail("VS translation: " + vs.error); return nil;
+    }
+    if (!ps) {
+        // The first-draw listings are capped and often omit the failing shader.
+        // Keep its bounded raw words, including code beyond an early ENDPGM,
+        // so LDS writes can be studied with their reads and synchronization.
+        if (costly_.insert(d.ps).second)
+            programListings += programWords("PS refuse", d.ps, d.psUser, d.psUserCount);
+        fail("PS translation: " + ps.error); return nil;
+    }
     {
         ScalarSites& sites = scalarSites_[d.ps];
         sites.list = ps.sites; sites.words = ps.siteWords;
@@ -131,8 +144,9 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     descriptor.depthAttachmentPixelFormat = depth;
     // The depth texture carries the stencil too.
     descriptor.stencilAttachmentPixelFormat = depth == MTLPixelFormatDepth32Float_Stencil8 ? depth : MTLPixelFormatInvalid;
-    // Without colour, the pixel program only matters when it may discard.
-    const bool fragment = d.colour || ps.mayKill;
+    // Without colour, the pixel program only matters when it may discard or
+    // replace the rasterized depth.
+    const bool fragment = d.colour || ps.mayKill || ps.depth;
     // Slot 0 is CB_COLOR0; slots 1-7 are the draw's other targets.
     auto attach = [&](unsigned slot, MTLPixelFormat pixelFormat, unsigned mask, std::uint32_t blendControl, bool exported) {
         MTLRenderPipelineColorAttachmentDescriptor* color = descriptor.colorAttachments[slot];
@@ -322,11 +336,12 @@ id<MTLLibrary> PM4MetalRenderer::library(const std::string& source) {
 }
 
 id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
-    const auto key = std::make_pair(c.program, c.rsrc2);
+    const auto key = std::make_tuple(c.program, c.rsrc2, c.vgprCount);
     const auto found = kernels_.find(key);
     if (found != kernels_.end()) return found->second;
     GCNTranslateOptions options;
     options.stage = GCNStage::compute; options.name = "cs_program"; options.userCount = c.userCount;
+    options.vgprCount = c.vgprCount;
     options.maxInstructions = 1024;
     for (unsigned k = 0; k < 16; ++k) options.userData[k] = c.user[k];
     compiling = 3;
@@ -726,14 +741,18 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
     return buffer;
 }
 
-// A BC7 T# in tile mode 13 (Thin_1dThin: blocks in 8x8 micro tiles, Morton
-// order inside) decoded once into a texture: Metal cannot sample it on iPhone.
-id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch) {
+// A BC1, BC2, BC3 or BC7 T# (dfmt 35, 36, 37, 41) in tile mode 13
+// (Thin_1dThin: blocks in 8x8 micro tiles, Morton order inside) decoded once
+// into an RGBA8 texture: Metal cannot sample BC textures on iPhone, and the
+// translated shader would otherwise decode every texel it samples.
+id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch,
+                                            unsigned dfmt) {
+    const std::uint64_t blockBytes = dfmt == 35 ? 8 : 16;
     const std::uint64_t blocksWide = (pitch + 3) / 4, blocksHigh = (height + 3) / 4;
     const std::uint64_t tilesWide = (blocksWide + 7) / 8, tilesHigh = (blocksHigh + 7) / 8;
-    const std::uint64_t bytes = tilesWide * tilesHigh * 64 * 16;
+    const std::uint64_t bytes = tilesWide * tilesHigh * 64 * blockBytes;
     if (!bytes || bytes > (64ull << 20)) return nil;
-    const auto key = std::make_tuple(base, width, height);
+    const auto key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32, height);
     const auto found = bc7Textures_.find(key);
     if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
     // A game fills its atlases as it loads: 16 bytes of every 4 KiB, once a
@@ -747,19 +766,27 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     if (found != bc7Textures_.end() && found->second.mark == mark) { found->second.batch = batchSerial_; return found->second.texture; }
     std::vector<std::uint8_t> blocks(bytes);
     copyGuest(base, blocks.data(), bytes);
-    const std::uint64_t rowBytes = blocksWide * 16;
+    const std::uint64_t rowBytes = blocksWide * 16; // 4 RGBA8 pixels per block row.
     std::vector<std::uint8_t> pixels(rowBytes * blocksHigh * 4);
     for (std::uint64_t y = 0; y < blocksHigh; ++y) for (std::uint64_t x = 0; x < blocksWide; ++x) {
         const std::uint64_t morton = (x & 1) | (y & 1) << 1 | (x & 2) << 1 | (y & 2) << 2 | (x & 4) << 2 | (y & 4) << 3;
-        const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * 16;
-        bcdec_bc7(blocks.data() + at, pixels.data() + y * 4 * rowBytes + x * 16, int(rowBytes));
+        const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * blockBytes;
+        std::uint8_t* out = pixels.data() + y * 4 * rowBytes + x * 16;
+        switch (dfmt) {
+        case 35: bcdec_bc1(blocks.data() + at, out, int(rowBytes)); break;
+        case 36: bcdec_bc2(blocks.data() + at, out, int(rowBytes)); break;
+        case 37: bcdec_bc3(blocks.data() + at, out, int(rowBytes)); break;
+        default: bcdec_bc7(blocks.data() + at, out, int(rowBytes)); break;
+        }
     }
     auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
     if (!texture) return nil;
     [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
-    if (bc7Textures_.size() >= 32) bc7Textures_.clear();
+    // Menus draw from hundreds of small BC textures: keep up to 256 MiB.
+    decodedBytes_ += std::uint64_t(width) * height * 4;
+    if (bc7Textures_.size() >= 512 || decodedBytes_ > (256ull << 20)) { bc7Textures_.clear(); decodedBytes_ = std::uint64_t(width) * height * 4; }
     bc7Textures_[key] = {texture, mark, batchSerial_};
     return texture;
 }
@@ -779,9 +806,9 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         nativeLastMiss = text;
         return nil;
     };
-    if (dfmt == 41) {
+    if (dfmt == 41 || dfmt == 35 || dfmt == 36 || dfmt == 37) {
         if (((t[3] >> 20) & 31) != 13 || ((t[1] >> 26) & 15) != 0) return miss(1, 0);
-        id<MTLTexture> decoded = bc7Texture(base, width, height, pitch);
+        id<MTLTexture> decoded = bc7Texture(base, width, height, pitch, dfmt);
         return decoded ? decoded : miss(4, 0);
     }
     // A colour target lives only in its Metal texture, never written back to
@@ -825,6 +852,19 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     descriptor.cpuCacheMode = holder.cpuCacheMode;
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> view = [holder newTextureWithDescriptor:descriptor offset:offset bytesPerRow:rowBytes];
+    // What Metal reads for a video plane, at its start and middle, when the
+    // CPU can see the buffer (guest memory may hold data a stale copy lacks).
+    if (view && dfmt == 1 && holder.storageMode == MTLStorageModeShared && holder.contents) {
+        const auto* bytesSeen = static_cast<const std::uint8_t*>(holder.contents) + offset;
+        unsigned counts[2] = {0, 0};
+        for (unsigned half = 0; half < 2; ++half)
+            for (unsigned i = 0; i < 64; ++i) counts[half] += bytesSeen[half * (bytes / 2) + i] != 0;
+        char text[160];
+        std::snprintf(text, sizeof text, "%llux%llu base 0x%llx : non nuls %u/64, %u/64 (buffer %s)",
+                      (unsigned long long)width, (unsigned long long)height, (unsigned long long)base, counts[0], counts[1],
+                      holder == memory ? "mémoire" : "partagé");
+        nativeLastPlane = text;
+    }
     return view ? view : miss(4, alignment);
 }
 
@@ -1222,6 +1262,20 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                     std::snprintf(text, sizeof text, " (memoire : %u/%u pixels non noirs)", lit, read);
                     batchDraws += text;
                 }
+                // What guest memory holds there: non-zero bytes out of 64 at the
+                // start and in the middle (a black video plane is all zeros).
+                const std::uint64_t bytes = std::uint64_t((t[2] & 0x3fff) + 1) * (((t[2] >> 14) & 0x3fff) + 1);
+                for (const std::uint64_t at : {base, base + bytes / 2}) {
+                    std::uint8_t sample[64];
+                    if (!code_.read(at, sample, sizeof sample)) { batchDraws += at == base ? " [illisible" : ", illisible"; }
+                    else {
+                        unsigned set = 0;
+                        for (const auto byte : sample) set += byte != 0;
+                        std::snprintf(text, sizeof text, "%s%u/64", at == base ? " [non nuls " : ", ", set);
+                        batchDraws += text;
+                    }
+                }
+                batchDraws += "]";
             }
         }
     }

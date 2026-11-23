@@ -29,9 +29,254 @@ rt::GCNMemory window(const Arena& arena) { return {arena.bytes.data(), Arena::st
 }
 int main() {
     Arena arena;
-    loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena);
+    loadEmbeddedVS(arena); loadQuadPS(arena); loadFetchVS(arena); loadResinfoVS(arena); loadDepthCompareVS(arena);
     const rt::GCNMemory M = window(arena);
     rt::GCNQuad unusedQuad;
+    {
+        loadRelativeSourcePS(arena);
+        for(unsigned offset=0;offset<10;++offset) {
+            GCNWave wave(arena.memory,64); wave.s[0]=offset;
+            for(unsigned reg=4;reg<16;++reg) wave.s[reg]=bits(float(reg-3)/16.0f);
+            assert(wave.run(relativeSourcePS));
+            for(unsigned lane=0;lane<64;++lane) {
+                rt::GCNLane L; L.user[0]=offset;
+                for(unsigned reg=4;reg<16;++reg) L.user[reg]=bits(float(reg-3)/16.0f);
+                rt::ps_relative_source(L,M,unusedQuad);
+                for(unsigned c=0;c<3;++c) {
+                    const float expected=float(offset+c+1)/16.0f;
+                    assert(L.color[0][c]==expected);
+                    assert(bits(expected)==wave.exports[0].value[c][lane]);
+                }
+                assert(L.color[0][3]==1.0f);
+            }
+        }
+        GCNWave masked(arena.memory,64); masked.s[0]=3; masked.vgprCount=16;
+        for(unsigned reg=4;reg<16;++reg) masked.s[reg]=bits(float(reg-3)/16.0f);
+        for(unsigned lane=0;lane<64;++lane) masked.v(20,lane)=0xdead0000u+lane;
+        masked.setExec(0x5555555555555555ull);
+        assert(masked.run(relativeSourcePS));
+        for(unsigned lane=0;lane<64;++lane)
+            assert(masked.v(20,lane)==((lane&1) ? 0xdead0000u+lane : bits(4.0f/16.0f)));
+        arena.code(0x11800,{0xbefc0300,0xd3860014,0x00000104,0xbf810000});
+        GCNWave vop3(arena.memory,64); vop3.s[0]=3; vop3.vgprCount=16;
+        for(unsigned lane=0;lane<64;++lane) vop3.v(7,lane)=0x77000000u+lane;
+        assert(vop3.run(0x11800));
+        for(unsigned lane=0;lane<64;++lane) assert(vop3.v(20,lane)==0x77000000u+lane);
+        arena.code(0x11800,{0xbefc0300,0x7e288704,0xbf810000});
+        GCNWave outside(arena.memory,64); outside.s[0]=12; outside.vgprCount=16;
+        for(unsigned lane=0;lane<64;++lane) outside.v(0,lane)=0xabc00000u+lane;
+        assert(outside.run(0x11800));
+        for(unsigned lane=0;lane<64;++lane) assert(outside.v(20,lane)==0xabc00000u+lane);
+        std::puts("PASS relative VGPR source: unsigned M0 selects all ten packed triplets on 64 lanes");
+    }
+    {
+        loadScalarSpillPS(arena);
+        for(unsigned trial=0;trial<32;++trial) {
+            GCNWave wave(arena.memory,64);
+            for(unsigned c=0;c<4;++c) wave.s[c]=bits(float(4*trial+c+1)/129.0f);
+            assert(wave.run(scalarSpillPS));
+            for(unsigned lane=0;lane<64;++lane) {
+                rt::GCNLane L; L.simdLane=lane;
+                for(unsigned c=0;c<4;++c) L.user[c]=bits(float(4*trial+c+1)/129.0f);
+                rt::ps_scalar_spill(L,M,unusedQuad);
+                for(unsigned c=0;c<4;++c) {
+                    assert(bits(L.color[0][c])==wave.exports[0].value[c][lane]);
+                    assert(L.color[0][c]==float(4*trial+c+1)/129.0f);
+                }
+            }
+            for(unsigned lane=0;lane<64;++lane) {
+                unsigned saved=4;
+                for(unsigned c=0;c<4;++c) if(lane==(c==3 ? 63 : c+4)) saved=c;
+                assert(wave.v(53,lane)==(saved<4 ? bits(float(4*trial+saved+1)/129.0f) : 0u));
+            }
+        }
+        std::puts("PASS scalar lane spills: four slots including lane 63 survive EXEC=0 and scalar clobbers on 64 lanes");
+        arena.put(scalarSpillPS,0xbf800000);
+        arena.put(scalarSpillPS+4*13,0x7e6a02f2);
+        arena.put(scalarSpillPS+4*14,0x7e000335);
+        GCNWave reused(arena.memory,64);
+        for(unsigned c=0;c<4;++c) reused.s[c]=bits(float(c+1)/8.0f);
+        assert(reused.run(scalarSpillPS));
+        for(unsigned lane=0;lane<64;++lane) {
+            rt::GCNLane L;
+            for(unsigned c=0;c<4;++c) L.user[c]=bits(float(c+1)/8.0f);
+            rt::ps_scalar_spill_reuse(L,M,unusedQuad);
+            for(unsigned c=0;c<4;++c) assert(bits(L.color[0][c])==reused.exports[0].value[c][lane]);
+            assert(L.color[0][0]==1.0f);
+        }
+    }
+    {
+        loadJoinedLDSPs(arena);
+        for(unsigned path=0;path<2;++path) {
+            GCNWave wave(arena.memory,64); wave.s[10]=path;
+            for(unsigned lane=0;lane<64;++lane) {
+                wave.v(0,lane)=bits(float(lane)+0.25f);
+                wave.v(1,lane)=bits(float(lane)+0.5f);
+                wave.v(6,lane)=bits(float(lane)+0.75f);
+            }
+            assert(wave.run(joinedLDSPs));
+            for(unsigned lane=0;lane<64;++lane) {
+                rt::GCNLane L; L.simdLane=lane; L.user[10]=path;
+                L.vinit[0]=bits(float(lane)+0.25f); L.vinit[1]=bits(float(lane)+0.5f); L.vinit[6]=bits(float(lane)+0.75f);
+                rt::ps_joined_lds(L,M,unusedQuad);
+                for(unsigned c=0;c<3;++c) {
+                    assert(L.color[0][c]==float(lane)+0.25f*float(c+1));
+                    assert(bits(L.color[0][c])==wave.exports[0].value[c][lane]);
+                }
+            }
+        }
+    }
+    {
+        loadPrivateLDSPs(arena);
+        GCNWave wave(arena.memory,64);
+        for(unsigned lane=0;lane<64;++lane) {
+            wave.v(0,lane)=bits(float(lane)+0.25f);
+            wave.v(1,lane)=bits(float(lane)+0.5f);
+        }
+        assert(wave.run(privateLDSPs));
+        for(unsigned lane=0;lane<64;++lane) {
+            rt::GCNLane L; L.simdLane=lane;
+            L.vinit[0]=bits(float(lane)+0.25f); L.vinit[1]=bits(float(lane)+0.5f);
+            rt::ps_private_lds(L,M,unusedQuad);
+            assert(L.color[0][0]==float(lane)+0.25f && L.color[0][1]==float(lane)+0.5f);
+            assert(bits(L.color[0][0])==wave.exports[0].value[0][lane]);
+            assert(bits(L.color[0][1])==wave.exports[0].value[1][lane]);
+        }
+        // LDS bounds are checked in the independent interpreted memory model.
+        arena.code(0x1a100,{0xd8d80000,0x04000002,0xbf810000});
+        wave.reset(); wave.s[124]=4; wave.v(2,0)=4;
+        assert(!wave.run(0x1a100) && wave.error.find("LDS dword range")!=std::string::npos);
+    }
+    {
+        arena.code(0x11c00,{0xd2460021,0x000100c1,0xd2480022,0x000242c1,0xf8001801,0x22,0xbf810000});
+        GCNWave wave(arena.memory,64);
+        assert(wave.run(0x11c00));
+        for (unsigned lane=0;lane<64;++lane) {
+            rt::GCNLane L; L.simdLane=lane;
+            rt::ps_mbcnt(L,M,unusedQuad);
+            assert(bits(L.color[0][0])==lane);
+            assert(wave.exports[0].value[0][lane]==lane);
+            for (uint32_t mask : {0u,1u,0x80000000u,0x55555555u,0xffffffffu}) {
+                for (bool high : {false,true}) {
+                    unsigned expected=0;
+                    for (unsigned bit=0;bit<32;++bit)
+                        if ((mask&(1u<<bit)) && bit+(high ? 32u : 0u)<lane) ++expected;
+                    assert(rt::gcn_mbcnt(mask,7,lane,high)==expected+7);
+                }
+            }
+        }
+    }
+    {
+        arena.code(0x11b00,{0xebf33000,0x80030f01,0xf80008cf,0x1211100f,0xbf810000});
+        const float values[4]={1.25f,-2.5f,3.75f,1.0f};
+        for (unsigned n=0;n<4;++n) arena.put(0x15230+4*n,bits(values[n]));
+        rt::GCNLane L;
+        GCNWave wave(arena.memory,1);
+        L.user[12]=wave.s[12]=0x15200;
+        L.user[13]=wave.s[13]=32u<<16;
+        L.user[14]=wave.s[14]=2;
+        L.user[15]=wave.s[15]=0x50fac; // descriptor says RGBA8; instruction overrides FLOAT32x4
+        L.vinit[1]=wave.v(1,0)=1;
+        L.vinit[2]=wave.v(2,0)=16;
+        assert(wave.run(0x11b00));
+        rt::vs_typed(L,M,unusedQuad);
+        for (unsigned n=0;n<4;++n) {
+            assert(L.pos[n]==values[n]);
+            assert(gcn_detail::f32(wave.exports[0].value[n][0])==values[n]);
+        }
+        assert(wave.s[15]==0x50fac); // instruction must not modify the resource descriptor
+        L.vinit[1]=2; // descriptor bounds, no access to a third record
+        rt::vs_typed(L,M,unusedQuad);
+        for (unsigned n=0;n<4;++n) assert(L.pos[n]==0);
+    }
+    {
+        rt::GCNLane L;
+        L.vinit[0]=bits(0.95f);
+        rt::ps_depth_export(L,M,unusedQuad);
+        assert(L.depth==0.95f && L.colorWritten==0 && !L.killed);
+        rt::GCNLane inactive; inactive.exec=false; inactive.depth=0.4f;
+        inactive.vinit[0]=bits(0.95f);
+        rt::ps_depth_export(inactive,M,unusedQuad);
+        assert(inactive.depth==0.4f && inactive.killed);
+    }
+    {
+        // Exact device operation: green component, signed x offset -1.
+        arena.code(0x11900,{0xf15c0200,0x0040040c,0xf800180f,0x07060504,0xbf810000});
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            arena.put(0x15000+4*(4*y+x),0xff000000u | ((4*y+x)*16u<<8));
+        const uint32_t descriptor[8]={0x150,10u<<20,3u|(3u<<14),0x90800fac,3u<<13,0,0,0};
+        GCNWave wave(arena.memory,1);
+        rt::GCNLane L;
+        for (unsigned n=0;n<8;++n) L.user[n]=wave.s[n]=descriptor[n];
+        L.user[8]=wave.s[8]=0x12; // clamp-to-edge
+        L.vinit[12]=wave.v(12,0)=63; // -1 in signed six-bit encoding
+        L.vinit[13]=wave.v(13,0)=bits(0.375f);
+        L.vinit[14]=wave.v(14,0)=bits(0.375f);
+        assert(wave.run(0x11900));
+        rt::ps_gather_lz(L,M,unusedQuad);
+        const unsigned expected[4]={128,144,80,64};
+        for (unsigned n=0;n<4;++n) {
+            const float value=float(expected[n])/255;
+            assert(std::abs(L.color[0][n]-value)<0.00001f);
+            assert(std::abs(gcn_detail::f32(wave.exports[0].value[n][0])-value)<0.00001f);
+        }
+        rt::GCNRes8 t{}; for (unsigned n=0;n<8;++n) t.d[n]=descriptor[n];
+        rt::GCNRes4 sampler{{0x12,0,0x500000,0}}; // filtering must not blend gather taps
+        auto got=rt::gcn_gather_lz(M,t,sampler,false,0.375f,0.375f,63,1);
+        for (unsigned n=0;n<4;++n) assert(std::abs(got[n]-float(expected[n])/255)<0.00001f);
+        sampler.d[0]=0x8000|0x12;
+        got=rt::gcn_gather_lz(M,t,sampler,false,1.5f,1.5f,63,1);
+        for (unsigned n=0;n<4;++n) assert(std::abs(got[n]-float(expected[n])/255)<0.00001f);
+        sampler.d[0]=4u|(4u<<3); sampler.d[3]=2u<<30;
+        got=rt::gcn_gather_lz(M,t,sampler,true,-20,-20,0,1);
+        for (unsigned n=0;n<4;++n) assert(got[n]==1); // white border
+    }
+    // Analytic 2D footprint: eight texels per pixel gives log2(8) = 3.
+    // Exercise the generated shader, all four lanes and the real quad exchange.
+    {
+        rt::GCNQuad Q;
+        arena.code(0x11800,{0xf1800300,0x00400a00,0xf800180f,0x0d0c0b0a,0xbf810000});
+        GCNWave lodWave(arena.memory,4);
+        lodWave.s[2]=255u | (127u<<14); lodWave.s[3]=0x90070000; lodWave.s[9]=0xfff000;
+        for (unsigned lane=0;lane<4;++lane) {
+            lodWave.v(0,lane)=bits(float(lane&1u)/32.0f);
+            lodWave.v(1,lane)=bits(float(lane>>1)/16.0f);
+        }
+        assert(lodWave.run(0x11800));
+        for (unsigned lane=0;lane<4;++lane) {
+            assert(gcn_detail::f32(lodWave.exports[0].value[0][lane])==3.0f);
+            assert(gcn_detail::f32(lodWave.exports[0].value[1][lane])==3.0f);
+        }
+        GCNWave scanWave(arena.memory,1);
+        scanWave.s=lodWave.s;
+        assert(scanWave.run(0x11800)); // resource scans continue beyond GET_LOD
+        rt::GCNLane lanes[4];
+        std::thread workers[4];
+        for (unsigned lane=0; lane<4; ++lane) {
+            auto& L=lanes[lane]; L.quadLane=lane;
+            L.user[2]=255u | (127u << 14);
+            L.user[3]=0x90070000; // 2D, levels 0..7
+            L.user[9]=0xfff000; // max LOD 15.996
+            L.vinit[0]=bits(float(lane & 1u)/32.0f);
+            L.vinit[1]=bits(float(lane >> 1)/16.0f);
+            workers[lane]=std::thread([&,lane] { rt::ps_lod(lanes[lane], M, Q); });
+        }
+        for (auto& worker:workers) worker.join();
+        for (const auto& L:lanes) assert(L.color[0][0]==3.0f && L.color[0][1]==3.0f);
+        rt::GCNRes8 t{{0,0,255u | (127u << 14),0x90070000,0,0,0,0}};
+        rt::GCNRes4 s{{0,0xfff000,0,0}};
+        auto value=rt::gcn_image_lod_2d(t,s,false,1.0f/32,0,0,1.0f/16);
+        assert(value[0]==3.0f && value[1]==3.0f);
+        s.d[1]=512u | (1024u<<12); // min 2, max 4
+        value=rt::gcn_image_lod_2d(t,s,true,32,0,0,32);
+        assert(value[0]==4.0f && value[1]==5.0f);
+        s.d[2]=0x3f00; // signed bias -1
+        value=rt::gcn_image_lod_2d(t,s,true,8,0,0,8);
+        assert(value[0]==2.0f && value[1]==2.0f);
+        s.d[1]=0xfff000; s.d[2]=0;
+        value=rt::gcn_image_lod_2d(t,s,false,0,0,0,0);
+        assert(value[0]==0 && std::isinf(value[1]) && value[1]<0);
+    }
     // Vertex programs: one lane per vertex, against one interpreter wave.
     {
         GCNWave wave(arena.memory, 3);
@@ -100,6 +345,24 @@ int main() {
             for (unsigned c = 0; c < 4; ++c) assert(wave.exports[0].value[c][lane] == expected[c]);
         }
     }
+    // image_sample_c (LESS against depth 0.75), reference 0.5 * lane: 1, 1, 0, 0.
+    {
+        GCNWave wave(arena.memory, 4);
+        for (unsigned n = 0; n < 12; ++n) wave.s[n] = depthCompareSgprs[n];
+        for (unsigned lane = 0; lane < 4; ++lane) wave.v(0, lane) = lane;
+        assert(wave.run(depthCompareVS));
+        for (unsigned lane = 0; lane < 4; ++lane) {
+            rt::GCNLane L;
+            for (unsigned n = 0; n < 12; ++n) L.user[n] = depthCompareSgprs[n];
+            L.vinit[0] = lane;
+            rt::vs_depth_compare(L, M, unusedQuad);
+            const float expected = lane < 2 ? 1.0f : 0.0f;
+            for (unsigned c = 0; c < 4; ++c) {
+                assert(gcn_detail::u32(L.pos[c]) == wave.exports[0].value[c][lane]);
+                assert(wave.exports[0].value[c][lane] == bits(expected));
+            }
+        }
+    }
     // The pixel quad: four lanes on four threads in lockstep, lane 3 a helper.
     {
         GCNWave wave(arena.memory, 4);
@@ -159,5 +422,5 @@ int main() {
         assert(translated.bytes[computeImage + 4 * (8 + 1) + 2 - Arena::start] == 32);
         assert(translated.bytes[computeImage + 4 * 64 - Arena::start] == 0);
     }
-    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, pixel quad, compute stores)");
+    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, depth compare, pixel quad, compute stores)");
 }

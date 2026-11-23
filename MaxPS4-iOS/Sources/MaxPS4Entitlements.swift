@@ -48,4 +48,17 @@ enum MaxPS4Entitlements {
 
     // RAM the app can still use before iOS closes it (0 when unknown).
     static func availableMemory() -> UInt64 { UInt64(os_proc_available_memory()) }
+
+    // Memory in use and the iOS limit (use plus what iOS still allows), in MiB,
+    // for the game report.
+    static func memory() -> (used: UInt64, limit: UInt64)? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<natural_t>.stride)
+        let status = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        }
+        guard status == KERN_SUCCESS else { return nil }
+        let used = UInt64(info.phys_footprint), left = UInt64(os_proc_available_memory())
+        return (used >> 20, (used + left) >> 20)
+    }
 }

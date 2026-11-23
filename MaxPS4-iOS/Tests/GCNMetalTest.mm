@@ -181,5 +181,219 @@ int main() {
             std::puts("PASS GCN MRT exports compile to a three-target Metal pipeline");
         }
         std::printf("PASS GCN programs translated to Metal match the software renderer (worst channel difference %d)\n", worst);
+        // GET_LOD at the movie-to-3D transition: analytic footprint of eight
+        // texels per pixel, so both results are 3 (displayed divided by eight).
+        arena.code(pixelProgram, {
+            0x100004ff,0x3d000000, // v0 = POS_X / 32
+            0x100206ff,0x3d800000, // v1 = POS_Y / 16
+            0xf1800300,0x00400a00, // image_get_lod v[10:11], v0, s[0:7], s[8:11]
+            0x101414ff,0x3e000000, // v10 *= 1/8
+            0x101616ff,0x3e000000, // v11 *= 1/8
+            0x7e1a02f2,            // v13 = 1
+            0xf800180f,0x0d0c0b0a,0xbf810000});
+        const auto lodPS=translateGCN(arena.memory,pixelProgram,psOptions);
+        assert(lodPS && lodPS.quad);
+        const std::string lodSource=gcnMetalPrelude()+vs.source+lodPS.source+
+            gcnMetalEntryPoints(vs,lodPS,"vs_program","ps_program",psInputAddr,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:lodSource.c_str()] options:options error:&error];
+        if (!library) { std::printf("LOD MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        pipelineDescriptor.vertexFunction=[library newFunctionWithName:@"gcn_vertex"];
+        pipelineDescriptor.fragmentFunction=[library newFunctionWithName:@"gcn_fragment"];
+        pipeline=[device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+        if (!pipeline) { std::printf("LOD pipeline: %s\n",error.localizedDescription.UTF8String); return 1; }
+        state.psUser[2]=255u | (127u<<14);
+        state.psUser[3]=0x90070000;
+        state.psUser[9]=0xfff000;
+        buffer=[queue commandBuffer]; encoder=[buffer renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:pipeline];
+        [encoder setVertexBuffer:memory offset:0 atIndex:0];
+        [encoder setFragmentBuffer:memory offset:0 atIndex:0];
+        [encoder setVertexBytes:&state length:sizeof state atIndex:1];
+        [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
+        [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding]; [buffer commit]; [buffer waitUntilCompleted];
+        assert(buffer.status==MTLCommandBufferStatusCompleted && !buffer.error);
+        [image getBytes:pixels bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        for (unsigned n=0;n<width*height;++n) {
+            assert(std::abs(int(pixels[4*n+2])-96)<=1);
+            assert(std::abs(int(pixels[4*n+1])-96)<=1);
+            assert(pixels[4*n+3]==255);
+        }
+        std::puts("PASS image_get_lod on Metal: clamped and raw 2D LOD = 3 in every pixel");
+        // Exact failing gather operation: four distinct green texels, offset -1.
+        arena.code(pixelProgram,{
+            0x7e1802ff,63,0x7e1a02ff,0x3ec00000,0x7e1c02ff,0x3ec00000,
+            0xf15c0200,0x0040040c,0xf800180f,0x07060504,0xbf810000});
+        const auto gatherPS=translateGCN(arena.memory,pixelProgram,psOptions);
+        assert(gatherPS);
+        const std::string gatherSource=gcnMetalPrelude()+vs.source+gatherPS.source+
+            gcnMetalEntryPoints(vs,gatherPS,"vs_program","ps_program",psInputAddr,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:gatherSource.c_str()] options:options error:&error];
+        if (!library) { std::printf("gather MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        pipelineDescriptor.vertexFunction=[library newFunctionWithName:@"gcn_vertex"];
+        pipelineDescriptor.fragmentFunction=[library newFunctionWithName:@"gcn_fragment"];
+        pipeline=[device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+        if (!pipeline) { std::printf("gather pipeline: %s\n",error.localizedDescription.UTF8String); return 1; }
+        for (unsigned y=0;y<4;++y) for (unsigned x=0;x<4;++x)
+            arena.put(0x15000+4*(4*y+x),0xff000000u|((4*y+x)*16u<<8));
+        std::memcpy(memory.contents,arena.bytes.data(),arena.bytes.size());
+        state.psUser[0]=0x150; state.psUser[1]=10u<<20;
+        state.psUser[2]=3u|(3u<<14); state.psUser[3]=0x90800fac;
+        state.psUser[4]=3u<<13; state.psUser[9]=0;
+        buffer=[queue commandBuffer]; encoder=[buffer renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:pipeline];
+        [encoder setVertexBuffer:memory offset:0 atIndex:0];
+        [encoder setFragmentBuffer:memory offset:0 atIndex:0];
+        [encoder setVertexBytes:&state length:sizeof state atIndex:1];
+        [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
+        [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding]; [buffer commit]; [buffer waitUntilCompleted];
+        assert(buffer.status==MTLCommandBufferStatusCompleted && !buffer.error);
+        [image getBytes:pixels bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        const int gatherBGRA[4]={80,144,128,64};
+        for (unsigned n=0;n<width*height*4;++n) assert(std::abs(int(pixels[n])-gatherBGRA[n%4])<=1);
+        std::puts("PASS image_gather4_lz_o on Metal: channel, tap order and signed offset at every pixel");
+        // Real typed vertex fetch. The descriptor deliberately says RGBA8;
+        // the exact device instruction must instead load FLOAT32x4 positions.
+        arena.code(0x11b00,{0x7e020300,0xebf33000,0x80030f01,0xf80008cf,0x1211100f,0xbf810000});
+        arena.code(0x11b80,{0x7e080280,0x7e0a02f2,0xf800180f,0x05040504,0xbf810000});
+        const auto typedVS=translateGCN(arena.memory,0x11b00,vsOptions);
+        const auto greenPS=translateGCN(arena.memory,0x11b80,psOptions);
+        assert(typedVS && greenPS);
+        const std::string typedSource=gcnMetalPrelude()+typedVS.source+greenPS.source+
+            gcnMetalEntryPoints(typedVS,greenPS,"vs_program","ps_program",0,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:typedSource.c_str()] options:options error:&error];
+        if (!library) { std::printf("typed MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        pipelineDescriptor.vertexFunction=[library newFunctionWithName:@"gcn_vertex"];
+        pipelineDescriptor.fragmentFunction=[library newFunctionWithName:@"gcn_fragment"];
+        pipeline=[device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+        if (!pipeline) { std::printf("typed pipeline: %s\n",error.localizedDescription.UTF8String); return 1; }
+        std::memcpy(memory.contents,arena.bytes.data(),arena.bytes.size());
+        state.vsUser[12]=0x10e00; state.vsUser[13]=16u<<16;
+        state.vsUser[14]=3; state.vsUser[15]=0x50fac;
+        buffer=[queue commandBuffer]; encoder=[buffer renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:pipeline];
+        [encoder setVertexBuffer:memory offset:0 atIndex:0];
+        [encoder setFragmentBuffer:memory offset:0 atIndex:0];
+        [encoder setVertexBytes:&state length:sizeof state atIndex:1];
+        [encoder setFragmentBytes:&state length:sizeof state atIndex:1];
+        [encoder setVertexBytes:indices length:sizeof indices atIndex:2];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding]; [buffer commit]; [buffer waitUntilCompleted];
+        assert(buffer.status==MTLCommandBufferStatusCompleted && !buffer.error);
+        [image getBytes:pixels bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        for (unsigned n=0;n<width*height;++n)
+            assert(pixels[4*n]==0 && pixels[4*n+1]==255 && pixels[4*n+2]==0 && pixels[4*n+3]==255);
+        std::puts("PASS typed vertex fetch on Metal: instruction format overrides descriptor at every pixel");
+        arena.code(0x11c00,{
+            0xd2460021,0x000100c1,0xd2480022,0x000242c1,
+            0x7e440d22,0x104444ff,0x3c800000, // integer lane -> float / 64
+            0xf8001801,0x22,0xbf810000});
+        const auto mbcntPS=translateGCN(arena.memory,0x11c00,psOptions);
+        assert(mbcntPS && mbcntPS.laneIndex);
+        const std::string mbcntSource=gcnMetalPrelude()+typedVS.source+mbcntPS.source+
+            gcnMetalEntryPoints(typedVS,mbcntPS,"vs_program","ps_program",0,inputCntl)+
+            "fragment float4 mbcnt_reference(GCNVaryings in [[stage_in]], uint lane [[thread_index_in_simdgroup]]) { return float4(float(lane)/64.0f,0.0f,0.0f,1.0f); }";
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:mbcntSource.c_str()] options:options error:&error];
+        if (!library) { std::printf("mbcnt MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        auto renderCount=[&](NSString* function,std::uint8_t* output) {
+            pipelineDescriptor.vertexFunction=[library newFunctionWithName:@"gcn_vertex"];
+            pipelineDescriptor.fragmentFunction=[library newFunctionWithName:function];
+            pipeline=[device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+            if (!pipeline) { std::printf("mbcnt pipeline: %s\n",error.localizedDescription.UTF8String); std::abort(); }
+            id<MTLCommandBuffer> cb=[queue commandBuffer];
+            id<MTLRenderCommandEncoder> enc=[cb renderCommandEncoderWithDescriptor:pass];
+            [enc setRenderPipelineState:pipeline];
+            [enc setVertexBuffer:memory offset:0 atIndex:0]; [enc setFragmentBuffer:memory offset:0 atIndex:0];
+            [enc setVertexBytes:&state length:sizeof state atIndex:1]; [enc setFragmentBytes:&state length:sizeof state atIndex:1];
+            [enc setVertexBytes:indices length:sizeof indices atIndex:2];
+            [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            assert(cb.status==MTLCommandBufferStatusCompleted && !cb.error);
+            [image getBytes:output bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        };
+        std::uint8_t nativeCount[sizeof pixels]={};
+        renderCount(@"gcn_fragment",pixels);
+        renderCount(@"mbcnt_reference",nativeCount);
+        for (unsigned n=0;n<sizeof pixels;++n) assert(std::abs(int(pixels[n])-int(nativeCount[n]))<=1);
+        std::puts("PASS mbcnt low/high on Metal matches native SIMD lane index at every pixel");
+        loadPrivateLDSPs(arena);
+        std::uint32_t privateWords[25]={};
+        assert(arena.memory.read(privateLDSPs,privateWords,sizeof privateWords));
+        arena.code(pixelProgram,{0x100000ff,bits(1.0f/width),0x100202ff,bits(1.0f/height)});
+        for(unsigned n=0;n<25;++n) arena.put(pixelProgram+16+4*n,privateWords[n]);
+        const auto privatePS=translateGCN(arena.memory,pixelProgram,psOptions);
+        assert(privatePS && privatePS.source.find("privateLDS0")!=std::string::npos);
+        const std::string privateSource=gcnMetalPrelude()+typedVS.source+privatePS.source+
+            gcnMetalEntryPoints(typedVS,privatePS,"vs_program","ps_program",0x300,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:privateSource.c_str()] options:options error:&error];
+        if(!library) { std::printf("private LDS MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        renderCount(@"gcn_fragment",pixels);
+        for(unsigned y=0;y<height;++y) for(unsigned x=0;x<width;++x) {
+            const unsigned at=4*(y*width+x);
+            assert(std::abs(int(pixels[at+2])-int(std::lround(255.0f*(float(x)+0.5f)/width)))<=1);
+            assert(std::abs(int(pixels[at+1])-int(std::lround(255.0f*(float(y)+0.5f)/height)))<=1);
+            assert(pixels[at]==0 && pixels[at+3]==255);
+        }
+        std::puts("PASS proved lane-private LDS on Metal: two slots survive branch and rebuilt addresses at every pixel");
+        loadJoinedLDSPs(arena);
+        std::uint32_t joinedWords[24]={};
+        assert(arena.memory.read(joinedLDSPs,joinedWords,sizeof joinedWords));
+        arena.code(pixelProgram,{0x100000ff,bits(1.0f/width),0x100202ff,bits(1.0f/height),0x7e0c02ff,bits(0.75f)});
+        for(unsigned n=0;n<24;++n) arena.put(pixelProgram+24+4*n,joinedWords[n]);
+        const auto joinedPS=translateGCN(arena.memory,pixelProgram,psOptions);
+        assert(joinedPS && joinedPS.source.find("privateLDS2")!=std::string::npos);
+        const std::string joinedSource=gcnMetalPrelude()+typedVS.source+joinedPS.source+
+            gcnMetalEntryPoints(typedVS,joinedPS,"vs_program","ps_program",0x300,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:joinedSource.c_str()] options:options error:&error];
+        if(!library) { std::printf("joined LDS MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        for(unsigned path=0;path<2;++path) {
+            state.psUser[10]=path;
+            renderCount(@"gcn_fragment",pixels);
+            for(unsigned y=0;y<height;++y) for(unsigned x=0;x<width;++x) {
+                const unsigned at=4*(y*width+x);
+                assert(std::abs(int(pixels[at+2])-int(std::lround(255.0f*(float(x)+0.5f)/width)))<=1);
+                assert(std::abs(int(pixels[at+1])-int(std::lround(255.0f*(float(y)+0.5f)/height)))<=1);
+                assert(std::abs(int(pixels[at])-191)<=1 && pixels[at+3]==255);
+            }
+        }
+        std::puts("PASS three private LDS slots after a branch join on Metal: both paths match at every pixel");
+        loadScalarSpillPS(arena);
+        const auto spillPS=translateGCN(arena.memory,scalarSpillPS,psOptions);
+        assert(spillPS && !spillPS.laneIndex);
+        const std::string spillSource=gcnMetalPrelude()+typedVS.source+spillPS.source+
+            gcnMetalEntryPoints(typedVS,spillPS,"vs_program","ps_program",0,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:spillSource.c_str()] options:options error:&error];
+        if(!library) { std::printf("scalar spill MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        for(unsigned trial=0;trial<4;++trial) {
+            for(unsigned c=0;c<4;++c) state.psUser[c]=bits(float(4*trial+c+1)/17.0f);
+            renderCount(@"gcn_fragment",pixels);
+            for(unsigned n=0;n<width*height;++n) for(unsigned c=0;c<4;++c) {
+                const unsigned channel=c==0 ? 2 : c==2 ? 0 : c; // BGRA8 target
+                assert(std::abs(int(pixels[4*n+channel])-int(std::lround(255.0f*float(4*trial+c+1)/17.0f)))<=1);
+            }
+        }
+        std::puts("PASS scalar lane spills on Metal: four slots including lane 63 survive EXEC=0 at every pixel");
+        loadRelativeSourcePS(arena);
+        GCNTranslateOptions relativeOptions=psOptions; relativeOptions.vgprCount=16;
+        const auto relativePS=translateGCN(arena.memory,relativeSourcePS,relativeOptions);
+        assert(relativePS);
+        const std::string relativeSource=gcnMetalPrelude()+typedVS.source+relativePS.source+
+            gcnMetalEntryPoints(typedVS,relativePS,"vs_program","ps_program",0,inputCntl);
+        library=[device newLibraryWithSource:[NSString stringWithUTF8String:relativeSource.c_str()] options:options error:&error];
+        if(!library) { std::printf("relative source MSL: %s\n",error.localizedDescription.UTF8String); return 1; }
+        for(const unsigned offset:{0u,3u,6u,9u}) {
+            state.psUser[0]=offset;
+            for(unsigned reg=4;reg<16;++reg) state.psUser[reg]=bits(float(reg-3)/16.0f);
+            renderCount(@"gcn_fragment",pixels);
+            for(unsigned n=0;n<width*height;++n) for(unsigned c=0;c<3;++c) {
+                const unsigned channel=c==0 ? 2 : c==2 ? 0 : c;
+                const int expected=int(std::lround(255.0f*float(offset+c+1)/16.0f));
+                assert(std::abs(int(pixels[4*n+channel])-expected)<=1 && pixels[4*n+3]==255);
+            }
+        }
+        std::puts("PASS relative VGPR source on Metal: four M0-selected float3 values match at every pixel");
     }
 }

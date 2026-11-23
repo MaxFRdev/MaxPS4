@@ -259,6 +259,9 @@ int main() {
             const auto* words=image.translate(params,32,4);
             uint64_t argv0=0; std::memcpy(&argv0,words+8,8);
             CHECK(words[0]==1 && argv0==params+32 && !std::memcmp(image.translate(argv0,10,4),"eboot.bin",10));
+            // Started in a launcher's place: argv[0] is empty, not a program name.
+            image.start_without_program_name();
+            CHECK(image.write_entry_params()==params && *image.translate(argv0,1,4)==0);
             // Then the thread-return trampoline: MOV RDI,RAX; MOV EAX,thread_exit;
             // SYSCALL (an HLE gate site); HLT, where every child thread ends.
             const uint64_t back=image.thread_return();
@@ -406,6 +409,18 @@ int main() {
             CHECK(memory.read(reserved+page,word,sizeof(word)) && maxps4::ps4::get_le(word,8)==0);
             CHECK(kernel.invoke(S::mtype_protect,{reserved,page,0,1})==0);
             CHECK(memory.permitted(reserved,page,4) && !memory.permitted(reserved,1,2));
+            // Mappings that touch read as one range; the hole after them stops it.
+            for (const uint64_t at : {reserved+4*page, reserved+5*page}) {
+                uint8_t flexible[32]{};
+                maxps4::ps4::put_le(flexible,0,at,8);
+                maxps4::ps4::put_le(flexible,16,page,8);
+                maxps4::ps4::put_le(flexible,28,3,4); // Operation 3 maps flexible memory.
+                flexible[24]=3;
+                CHECK(memory.write(batch,flexible,sizeof(flexible)));
+                CHECK(kernel.invoke(S::batch_map,{batch,1,doneOut})==0);
+            }
+            CHECK(memory.permitted(reserved+4*page,2*page,6) && memory.contiguous(reserved+4*page,3*page,4)==2*page);
+            CHECK(!memory.permitted(reserved+4*page,3*page,4));
             kernel.reset();
             CHECK(vm.allocated()==0 && !memory.permitted(reserved+page,1,4));
         }

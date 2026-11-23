@@ -307,6 +307,29 @@ int main() {
             };
             const std::uint8_t green[4] = {0, 255, 0, 255}, red[4] = {0, 0, 255, 255};
             {
+                // Raster depth 0.6 would hide the following red draw at 0.9.
+                // Explicit MRTZ depth 0.95 must instead let red pass LESS.
+                Scene scene;
+                constexpr uint64_t exportedDepthPS=0x10400;
+                scene.arena.code(exportedDepthPS,{0x7e0002ff,bits(0.95f),0xf8001881,0x01010100,0xbf810000});
+                scene.depthBufferOn();
+                scene.st.set(0x69,0x200,{2|4|(1<<4)});
+                scene.st.set(0x69,0x8e,{0});
+                scene.ps(exportedDepthPS); scene.triangle(0.2f,forward);
+                scene.st.set(0x69,0x8e,{0xf});
+                scene.ps(redPS); scene.triangle(0.8f,forward);
+                check("shader depth export in depth-only pass",scene,red,2,1);
+                // Also exercise colour and explicit depth from the same shader.
+                Scene coloured;
+                coloured.arena.code(exportedDepthPS,{0x7e0002ff,bits(0.95f),0xf8000081,0x01010100,
+                    0x7e080280,0x7e0a02f2,0xf800180f,0x05040504,0xbf810000});
+                coloured.depthBufferOn();
+                coloured.st.set(0x69,0x200,{2|4|(1<<4)});
+                coloured.ps(exportedDepthPS); coloured.triangle(0.2f,forward);
+                coloured.ps(redPS); coloured.triangle(0.8f,forward);
+                check("shader colour and depth export",coloured,red,2,0);
+            }
+            {
                 // A near triangle hides a far one drawn after it (LESS, written).
                 Scene scene;
                 scene.depthBufferOn();
@@ -638,15 +661,20 @@ int main() {
         id<MTLCommandBuffer> isolated = [queue commandBuffer];
         isolation.beginBatch();
         textured.target = targetA;
+        const unsigned firstPSAllocation=textured.psVGPRCount;
+        assert(firstPSAllocation<=252);
         assert(isolation.encode(textured, isolated));
         std::memset(isolationArena.bytes.data() + (image - Arena::start), 0, width * height * 4);
         PM4SoftwareRenderer blankReference(isolationArena.memory);
         blankReference.execute(s.words.data(), s.words.size());
         assert(blankReference.stats.failed == 0);
         textured.target = targetB;
+        textured.psVGPRCount=firstPSAllocation+4; // same programs, distinct RSRC1 cache key
         assert(isolation.encode(textured, isolated));
         isolation.endBatch();
         assert(isolation.buffersBuilt == 2 && isolation.buffersReused == 0);
+        assert(isolation.pipelinesBuilt==2);
+        std::puts("PASS render pipeline cache separates RSRC1 VGPR allocations");
         [isolated commit]; [isolated waitUntilCompleted];
         assert(isolated.status == MTLCommandBufferStatusCompleted && !isolated.error);
         std::uint8_t isolatedPixels[width * height * 4]{};
@@ -767,6 +795,26 @@ int main() {
         assert([bridge submit:killed.words.data() count:killed.words.size()]==0);
         readback([bridge copyTargetAtAddress:targetB width:width height:height],after);
         assert(std::memcmp(green,after,sizeof green)==0);
+        {
+            // Reproduce the device failure after earlier successful draws.
+            // The public immutable report must include the newly refused shader.
+            MaxPS4GameMetalBridge* refused=[[MaxPS4GameMetalBridge alloc] initWithDevice:device
+                reader:^BOOL(uint64_t address,void* destination,size_t count) {
+                    return reader->memory.read(address,destination,count);
+                }];
+            assert(refused && [refused submit:s.words.data() count:s.words.size()]==0);
+            constexpr uint64_t ldsPS=0x11d00;
+            arena.code(ldsPS,{0xd8340000,0x00002022,0xbf810000});
+            Stream broken;
+            broken.set(0x76,0x08,{std::uint32_t(ldsPS>>8),0,0,0});
+            broken.words.insert(broken.words.end(),{0xc0012d00U,3,2});
+            assert([refused submit:broken.words.data() count:broken.words.size()]!=0);
+            assert([refused.failure containsString:@"LDS access"]);
+            assert([refused.report containsString:@"PS refuse 0x11d00"]);
+            assert([refused.report containsString:@"d8340000 00002022"]);
+            assert([refused.report containsString:@"LDS access"]);
+            std::puts("PASS failed shader capture reaches the public Metal report immediately");
+        }
         // A diagnostic read cannot wait behind a submission holding the renderer
         // lock. The simulated slow reader is released even on a timeout.
         auto entered = dispatch_semaphore_create(0), release = dispatch_semaphore_create(0);

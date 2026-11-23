@@ -57,6 +57,8 @@ public:
     };
     {
         wave.reset();
+        wave.expandResourceLanes = true;
+        wave.vgprCount = d.vsVGPRCount;
         wave.resource = note;
         wave.tiledReadsZero = true;
         wave.buffer = oversized(true);
@@ -73,6 +75,8 @@ public:
     }
     {
         wave.reset();
+        wave.expandResourceLanes = true;
+        wave.vgprCount = d.psVGPRCount;
         wave.resource = note;
         wave.tiledReadsZero = true;
         wave.buffer = oversized(false);
@@ -120,6 +124,8 @@ public:
         constexpr std::uint64_t largest = 256ull << 20;
         auto& wave = wave_;
         wave.reset();
+        wave.expandResourceLanes = true;
+        wave.vgprCount = c.vgprCount;
         wave.resource = [&](std::uint64_t base, std::uint64_t bytes) {
             if (bytes && bytes <= largest && base + bytes > base) found_.push_back({base, bytes});
         };

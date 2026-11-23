@@ -1,5 +1,6 @@
 #include "maxps4_ps4_virtual_memory.h"
 #include <algorithm>
+#include <chrono>
 #include <iterator>
 #include <cerrno>
 #include <new>
@@ -82,6 +83,7 @@ void PS4VirtualMemory::insert(Region region) {
     regions_.insert(at, std::move(region));
 }
 bool PS4VirtualMemory::query(uint64_t address, bool next, uint64_t& start, uint64_t& end, uint32_t& protection) const {
+    std::shared_lock reading(regions_lock_);
     // The page holding `address` or, with `next`, the first mapped one after it.
     const Region* best = nullptr;
     size_t first = 0;
@@ -153,7 +155,8 @@ void PS4VirtualMemory::release(uint64_t address, uint64_t size) {
         size_t run = page;
         while (run < stop && region.pages[run] != 0xff) ++run;
         const uint64_t at = region.address + page * page_size;
-        (void)unmap(at, (run - page) * page_size); // Re-sorts: look again from here.
+        const uint64_t length = (run - page) * page_size;
+        record('u', at, length, 0, unmap_unrecorded(at, length)); // Re-sorts: look again from here.
         r = first_ending_after(at);
     }
 }
@@ -162,21 +165,25 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
     // Refusals are recorded too (result 0, the PS4 error): a game that runs
     // out of memory usually only says so in its own way (Mortal Kombat's
     // video decoder: VPX_CODEC_MEM_ERROR).
-    Error e = place_unrecorded(hint, length, alignment, protection, fixed, result);
-    if (e == nomem && !fixed) {
-        // The window has no free span large enough (Mortal Kombat Trilogy
-        // maps 2 GiB of direct memory at once into a 3 GiB window under
-        // LiveContainer): a span the host chooses outside it, as for a fixed
-        // address it grants. Recorded as a move (status -2) so the session
-        // report shows where it went.
-        uint64_t outside = 0;
-        if (place_outside(length, alignment, protection, outside) == ok) {
-            record_move(hint, length, outside, -2);
-            result = outside;
-            return ok;
+    Error e = ok;
+    uint64_t outside = 0, window_free = 0;
+    {
+        std::unique_lock writing(regions_lock_);
+        e = place_unrecorded(hint, length, alignment, protection, fixed, result);
+        if (e == nomem && !fixed) {
+            // The window has no free span large enough (Mortal Kombat Trilogy
+            // maps 2 GiB of direct memory at once into a 3 GiB window under
+            // LiveContainer): a span the host chooses outside it, as for a fixed
+            // address it grants. Recorded as a move (status -2) so the session
+            // report shows where it went.
+            if (place_outside(length, alignment, protection, outside) == ok) { result = outside; e = ok; }
+            else outside = 0;
         }
+        if (e == nomem) window_free = largest_window_gap();
     }
-    if (e) {
+    if (outside) {
+        record_move(hint, length, outside, -2);
+    } else if (e) {
         record_move(hint, length, 0, int(e));
         if (e == nomem) {
             // Where the space went: the largest free span in the window, and
@@ -189,11 +196,13 @@ Error PS4VirtualMemory::place(uint64_t hint, uint64_t length, uint64_t alignment
                 }
             std::lock_guard guard(moved_lock_);
             Moved& last = moved_[(moved_total_ - 1) % moved_limit];
-            last.window_free = largest_window_gap(); last.host_free = host;
+            last.window_free = window_free; last.host_free = host;
         }
     }
+    record(fixed ? 'f' : 'm', hint, length, protection, e, e ? 0 : result);
     return e;
 }
+// The caller holds regions_lock_.
 uint64_t PS4VirtualMemory::largest_window_gap() const {
     uint64_t window = 0, window_bytes = 0;
     if (!image_.heap(window, window_bytes)) return 0;
@@ -206,6 +215,7 @@ uint64_t PS4VirtualMemory::largest_window_gap() const {
     if (window + window_bytes > cursor) largest = std::max(largest, window + window_bytes - cursor);
     return largest;
 }
+// The caller holds regions_lock_ exclusively.
 Error PS4VirtualMemory::place_outside(uint64_t length, uint64_t alignment, uint32_t protection, uint64_t& result) {
     uint64_t window = 0, window_bytes = 0;
     if (!image_.heap(window, window_bytes)) return nomem; // Bounded images: logical buffers only.
@@ -236,6 +246,35 @@ Error PS4VirtualMemory::place_outside(uint64_t length, uint64_t alignment, uint3
     } catch (const std::bad_alloc&) { ::munmap(reinterpret_cast<void*>(at), size_t(size)); return nomem; }
     used_ += size_t(size); result = at;
     return ok;
+}
+uint64_t PS4VirtualMemory::clock_ns() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+void PS4VirtualMemory::record(char kind, uint64_t address, uint64_t size, uint32_t protection, Error error, uint64_t result) {
+    std::lock_guard guard(moved_lock_);
+    operations_[operations_total_++ % operation_limit] = {address, size, clock_ns(), result, protection, int(error), kind};
+}
+size_t PS4VirtualMemory::operations_at(uint64_t address, uint64_t radius, std::array<Operation, 6>& out, size_t& count, size_t& total) const {
+    std::lock_guard guard(moved_lock_);
+    const size_t kept = std::min(operations_total_, operation_limit);
+    size_t found = 0;
+    count = 0;
+    total = operations_total_;
+    const uint64_t low = address > radius ? address - radius : 0;
+    const uint64_t high = address > UINT64_MAX - radius ? UINT64_MAX : address + radius;
+    auto holds = [low, high](uint64_t start, uint64_t size) {
+        return start && start <= high && (size > UINT64_MAX - start ? UINT64_MAX : start + size) > low;
+    };
+    // Newest first, then reversed to oldest first.
+    for (size_t i = 0; i < kept; ++i) {
+        const Operation& o = operations_[(operations_total_ - 1 - i) % operation_limit];
+        if (!holds(o.address, o.size) && !holds(o.result, o.size)) continue;
+        if (count < out.size()) out[count++] = o;
+        ++found;
+    }
+    std::reverse(out.begin(), out.begin() + long(count));
+    return found;
 }
 Error PS4VirtualMemory::place_unrecorded(uint64_t hint, uint64_t length, uint64_t alignment, uint32_t protection,
     bool fixed, uint64_t& result) {
@@ -388,6 +427,12 @@ bool PS4VirtualMemory::pieces(uint64_t address, uint64_t size, std::vector<std::
     return true;
 }
 Error PS4VirtualMemory::unmap(uint64_t address, uint64_t length) {
+    Error e = ok;
+    { std::unique_lock writing(regions_lock_); e = unmap_unrecorded(address, length); }
+    record('u', address, length, 0, e);
+    return e;
+}
+Error PS4VirtualMemory::unmap_unrecorded(uint64_t address, uint64_t length) {
     uint64_t size;
     if (address % page_size || !rounded(length, size)) return inval;
     std::vector<std::pair<uint64_t, uint64_t>> spans;
@@ -433,6 +478,12 @@ Error PS4VirtualMemory::unmap_one(uint64_t address, uint64_t size) {
     return ok;
 }
 Error PS4VirtualMemory::protect(uint64_t address, uint64_t length, uint32_t protection) {
+    Error e = ok;
+    { std::unique_lock writing(regions_lock_); e = protect_unrecorded(address, length, protection); }
+    record('p', address, length, protection, e);
+    return e;
+}
+Error PS4VirtualMemory::protect_unrecorded(uint64_t address, uint64_t length, uint32_t protection) {
     uint8_t permission;
     Error e = permissions(protection, permission);
     if (e) return e;
@@ -452,7 +503,25 @@ Error PS4VirtualMemory::protect_one(uint64_t address, uint64_t size, uint8_t per
     std::fill_n(region->pages.begin() + long(first), size_t(size / page_size), permission);
     return ok;
 }
+void PS4VirtualMemory::neighbours(uint64_t address, uint64_t& below_start, uint64_t& below_end,
+                                  uint64_t& above_start, uint64_t& above_end) const {
+    std::shared_lock reading(regions_lock_);
+    below_start = below_end = above_start = above_end = 0;
+    for (const auto& region : regions_) {
+        // Runs of mapped pages, merged across touching regions by the caller's eye.
+        for (size_t i = 0; i < region.pages.size(); ) {
+            if (region.pages[i] == 0xff) { ++i; continue; }
+            size_t j = i;
+            while (j < region.pages.size() && region.pages[j] != 0xff) ++j;
+            const uint64_t start = region.address + i * page_size, end = region.address + j * page_size;
+            if (end <= address && end > below_end) { below_start = start; below_end = end; }
+            if (start > address && (!above_start || start < above_start)) { above_start = start; above_end = end; }
+            i = j;
+        }
+    }
+}
 void PS4VirtualMemory::reset() {
+    std::unique_lock writing(regions_lock_);
     // Host pages go back to PROT_NONE (and zero) only while they still lie in
     // the current image's window; a cleared image already released them.
     for (const auto& region : regions_) {
@@ -462,23 +531,37 @@ void PS4VirtualMemory::reset() {
     regions_.clear(); used_ = 0;
 }
 size_t PS4VirtualMemory::contiguous(uint64_t address, size_t limit, uint32_t permissions) const {
+    std::shared_lock reading(regions_lock_);
+    return contiguous_unlocked(address, limit, permissions);
+}
+size_t PS4VirtualMemory::contiguous_unlocked(uint64_t address, size_t limit, uint32_t permissions) const {
     if (!limit || !permissions || (permissions & ~7U)) return 0;
-    const size_t r = holding(address);
+    size_t r = holding(address);
     if (r == SIZE_MAX) return 0;
-    const Region& region = regions_[r];
-    const uint64_t relative = address - region.address;
-    const size_t first = size_t(relative / page_size);
-    // Only the pages `limit` reaches: a region can hold a million of them.
-    const uint64_t reach = (relative + std::min<uint64_t>(limit, region.size - relative) + page_size - 1) / page_size;
-    const size_t end = size_t(std::min<uint64_t>(reach, region.pages.size()));
-    size_t last = first;
-    while (last < end && region.pages[last] != 0xff &&
-           (region.pages[last] & permissions) == permissions) ++last;
-    if (last == first) return 0;
-    return std::min(limit, size_t(last * page_size - relative));
+    // Host-backed regions that touch are one range (guest and host addresses
+    // coincide): Call of Duty maps its frame buffers 64 KiB at a time.
+    size_t total = 0;
+    for (;;) {
+        const Region& region = regions_[r];
+        const uint64_t relative = address + total - region.address;
+        const size_t first = size_t(relative / page_size);
+        // Only the pages `limit` reaches: a region can hold a million of them.
+        const uint64_t reach = (relative + std::min<uint64_t>(limit - total, region.size - relative) + page_size - 1) / page_size;
+        const size_t end = size_t(std::min<uint64_t>(reach, region.pages.size()));
+        size_t last = first;
+        while (last < end && region.pages[last] != 0xff &&
+               (region.pages[last] & permissions) == permissions) ++last;
+        if (last == first) return total;
+        total += std::min(limit - total, size_t(last * page_size - relative));
+        if (total == limit || last < region.pages.size() || r + 1 == regions_.size()) return total;
+        const Region& next = regions_[r + 1];
+        if (next.address != region.address + region.size || !hosted(region) || !hosted(next)) return total;
+        ++r;
+    }
 }
 const uint8_t* PS4VirtualMemory::translate(uint64_t address, size_t size, uint32_t permissions) const {
-    if (!size || contiguous(address, size, permissions) != size) return nullptr;
+    std::shared_lock reading(regions_lock_);
+    if (!size || contiguous_unlocked(address, size, permissions) != size) return nullptr;
     const size_t r = holding(address);
     return r == SIZE_MAX ? nullptr : regions_[r].data + (address - regions_[r].address);
 }

@@ -151,11 +151,11 @@ MAXPS4_GCN_TABLE(mtbuf)
     "image_sample_c_lz", "image_sample_o", "image_sample_cl_o", "image_sample_d_o", "image_sample_d_cl_o", \
     "image_sample_l_o", "image_sample_b_o", "image_sample_b_cl_o", "image_sample_lz_o", "image_sample_c_o", \
     "image_sample_c_cl_o", "image_sample_c_d_o", "image_sample_c_d_cl_o", "image_sample_c_l_o", \
-    "image_sample_c_b_o", "image_sample_c_b_cl_o", "image_sample_c_lz_o", "image_gather4", "image_gather4_cl", \
+    "image_sample_c_b_o", "image_sample_c_b_cl_o", "image_sample_c_lz_o", "image_gather4", "image_gather4_cl", nullptr, nullptr, \
     "image_gather4_l", "image_gather4_b", "image_gather4_b_cl", "image_gather4_lz", "image_gather4_c", \
-    "image_gather4_c_cl", "image_gather4_c_l", "image_gather4_c_b", "image_gather4_c_b_cl", "image_gather4_c_lz", \
-    "image_gather4_o", "image_gather4_cl_o", "image_gather4_l_o", "image_gather4_b_o", "image_gather4_b_cl_o", \
-    "image_gather4_lz_o", "image_gather4_c_o", "image_gather4_c_cl_o", "image_gather4_c_l_o", \
+    "image_gather4_c_cl", nullptr, nullptr, "image_gather4_c_l", "image_gather4_c_b", "image_gather4_c_b_cl", "image_gather4_c_lz", \
+    "image_gather4_o", "image_gather4_cl_o", nullptr, nullptr, "image_gather4_l_o", "image_gather4_b_o", "image_gather4_b_cl_o", \
+    "image_gather4_lz_o", "image_gather4_c_o", "image_gather4_c_cl_o", nullptr, nullptr, "image_gather4_c_l_o", \
     "image_gather4_c_b_o", "image_gather4_c_b_cl_o", "image_gather4_c_lz_o", "image_get_lod" }
 MAXPS4_GCN_TABLE(mimg)
 #undef MAXPS4_GCN_ENTRIES
@@ -367,11 +367,11 @@ inline std::string gcnDisassemble(const GCNInstruction& i) {
         break;
     }
     case GCNEncoding::vop2:
-        arg(operand(256 + ((w >> 17) & 0xff), i));
+        arg(operand((i.opcode == 1 ? 0 : 256) + ((w >> 17) & 0xff), i));
         if (i.opcode >= 37 && i.opcode <= 42) arg("vcc"); // carry out
         arg(operand(w & 0x1ff, i));
         if (i.opcode == 32) arg(hex(i.literal));          // v_madmk_f32 d, s0, K, s1
-        arg(operand(256 + ((w >> 9) & 0xff), i));
+        arg(operand((i.opcode == 1 || i.opcode == 2 ? 0 : 256) + ((w >> 9) & 0xff), i));
         if (i.opcode == 0 || (i.opcode >= 40 && i.opcode <= 42)) arg("vcc"); // carry/select in
         if (i.opcode == 33) arg(hex(i.literal));          // v_madak_f32 d, s0, s1, K
         break;
@@ -398,7 +398,7 @@ inline std::string gcnDisassemble(const GCNInstruction& i) {
         };
         unsigned sources = 2;
         if (op < 256) arg(operand(w & 0xff, i, 2)); // compare: SGPR pair destination
-        else arg(operand(256 + (w & 0xff), i));
+        else arg(operand((op == 257 || op == 386 ? 0 : 256) + (w & 0xff), i));
         if (op >= 320 && op < 384) sources = 3;
         else if (op >= 384) sources = 1;
         else if (op == 256 || op == 296 || op == 297 || op == 298) sources = 3; // cndmask, addc/subb
@@ -447,6 +447,7 @@ inline std::string gcnDisassemble(const GCNInstruction& i) {
         const unsigned dmask = (w >> 8) & 15;
         unsigned count = 0;
         for (unsigned b = 0; b < 4; ++b) count += (dmask >> b) & 1;
+        if (name.compare(0,12,"image_gather")==0) count=4;
         arg(range('v', (w1 >> 8) & 0xff, count ? count : 1));
         arg(operand(256 + (w1 & 0xff), i));
         arg(range('s', ((w1 >> 16) & 0x1f) * 4, (w & 0x8000) ? 4 : 8));

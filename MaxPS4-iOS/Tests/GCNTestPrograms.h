@@ -27,6 +27,64 @@ struct Arena {
 };
 inline std::uint32_t bits(float f) { std::uint32_t v; std::memcpy(&v, &f, 4); return v; }
 
+constexpr std::uint64_t scalarSpillPS=0x1a600;
+inline void loadScalarSpillPS(Arena& arena) {
+    // Save four scalar values in lanes 4,5,6,63 of v53 with EXEC=0.
+    // Clobber the source SGPRs, restore into different SGPRs, enable exports.
+    arena.code(scalarSpillPS,{
+        0xbefe0480, // s_mov_b64 exec,0
+        0x04000000u|(53u<<17)|(132u<<9)|0u,
+        0x04000000u|(53u<<17)|(133u<<9)|1u,
+        0x04000000u|(53u<<17)|(134u<<9)|2u,
+        0x04000000u|(53u<<17)|(191u<<9)|3u,
+        0xbe800380,0xbe810380,0xbe820380,0xbe830380,
+        0x02000000u|(8u<<17)|(132u<<9)|309u,
+        0x02000000u|(9u<<17)|(133u<<9)|309u,
+        0x02000000u|(10u<<17)|(134u<<9)|309u,
+        0x02000000u|(11u<<17)|(191u<<9)|309u,
+        0xbefe04c1, // s_mov_b64 exec,-1
+        0x7e000208,0x7e020209,0x7e04020a,0x7e06020b,
+        0xf800180f,0x03020100,0xbf810000});
+}
+
+constexpr std::uint64_t relativeSourcePS=0x1a700;
+inline void loadRelativeSourcePS(Arena& arena) {
+    // Twelve scalar values become four packed float3 values in v4..v15.
+    // M0 selects one component triplet through three V_MOVRELS_B32 reads.
+    std::vector<std::uint32_t> words{0xbefc0300}; // s_mov_b32 m0,s0
+    for(unsigned reg=4;reg<16;++reg) words.push_back(0x7e000200u|(reg<<17)|reg);
+    words.insert(words.end(),{
+        0x7e288704,0x7e2a8705,0x7e2c8706, // v20..v22 = v[4..6 + M0]
+        0x7e2e02f2,                       // v23 = 1.0
+        0xf800180f,0x17161514,0xbf810000});
+    std::uint64_t at=relativeSourcePS;
+    for(const auto word:words) { arena.put(at,word); at+=4; }
+}
+
+constexpr std::uint64_t privateLDSPs=0x1a000;
+inline void loadPrivateLDSPs(Arena& arena) {
+    // Two lane-private dwords, live across a branch and a rebuilt address.
+    arena.code(privateLDSPs,{
+        0xbefc03ff,65536,
+        0xd2480002,0x000100c1,0x460404c1,0x34040482,
+        0xd8340000,0x00000002,0xd8340100,0x00000102,
+        0xbf820001,0xbf800000,
+        0xd2480003,0x000100c1,0x460606c1,0x34060682,
+        0xbefc03ff,65536,
+        0xd8d80000,0x04000003,0xd8d80100,0x05000003,
+        0xf8001803,0x00000504,0xbf810000});
+}
+constexpr std::uint64_t joinedLDSPs=0x1a200;
+inline void loadJoinedLDSPs(Arena& arena) {
+    arena.code(joinedLDSPs,{
+        0xbf06800a,0xbf850001,0xbf800000, // two paths join before all LDS operations
+        0xbefc03ff,65536,
+        0xd2480002,0x000100c1,0x460404c1,0x34040482,
+        0xd8340000,0x00000002,0xd8340100,0x00000102,0xd8340200,0x00000602,
+        0xd8d80000,0x04000002,0xd8d80100,0x05000002,0xd8d80200,0x06000002,
+        0xf8001807,0x00060504,0xbf810000});
+}
+
 // shadPS4's embedded full-screen VS (one lane per vertex id).
 constexpr std::uint64_t embeddedVS = 0x10000;
 inline void loadEmbeddedVS(Arena& arena) {
@@ -130,5 +188,23 @@ inline void loadResinfoVS(Arena& arena) {
         0xbf8c1f70,             // s_waitcnt vmcnt(0)
         0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
         0xbf810000});
+}
+// A VS exporting image_sample_c of a 2x2 float depth image (every texel 0.75)
+// with DEPTH_COMPARE_FUNC LESS: reference 0.5 * vertex index (v0), at (0.5, 0.5).
+constexpr std::uint64_t depthCompareVS = 0x11f00, depthImage = 0x17000;
+inline const std::uint32_t depthCompareSgprs[12] = {
+    0x170, (4u << 20) | (7u << 26), 1 | (1u << 14), 0x90800fac, 1u << 13, 0, 0, 0, // T#: 2x2 32 float, linear 2D
+    0x12 | (1u << 12), 0, 0x500000, 0};                                           // S#: clamp, bilinear, LESS
+inline void loadDepthCompareVS(Arena& arena) {
+    arena.code(depthCompareVS, {
+        0x7e000d00,             // v_cvt_f32_u32 v0, v0
+        0x100000f0,             // v_mul_f32 v0, 0.5, v0
+        0x7e0202f0,             // v_mov_b32 v1, 0.5
+        0x7e0402f0,             // v_mov_b32 v2, 0.5
+        0xf0a00f00, 0x00400400, // image_sample_c v[4:7], v[0:2], s[0:7], s[8:11] dmask:0xf
+        0xbf8c1f70,             // s_waitcnt vmcnt(0)
+        0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
+        0xbf810000});
+    for (unsigned n = 0; n < 4; ++n) arena.put(depthImage + 4 * n, bits(0.75f));
 }
 } // namespace gcn_test

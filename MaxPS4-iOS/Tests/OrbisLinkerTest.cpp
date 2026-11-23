@@ -1,6 +1,7 @@
 #include "../Native/OrbisLinker.hpp"
 #include "../Native/OrbisLinkerBridge.h"
 #include "OrbisLinkerFixture.h"
+#include "../Native/OrbisFixedLayout.hpp"
 #include <iostream>
 #include <cstdlib>
 #include <fstream>
@@ -14,6 +15,58 @@ static uint64_t value(const Linker::Image& image, uint64_t address) {
     uint64_t v = 0; for (size_t i=0;i<8;++i) v |= uint64_t(p[i])<<(i*8); return v;
 }
 int main(int argc, char** argv) {
+    {   // The compatibility branch patch is transactional and build-specific.
+        using namespace maxps4::detail;
+        std::vector<uint8_t> text(64, 0x90); text[16] = 0x77; text[17] = 0x61;
+        const auto original = text;
+        OrbisCodeFingerprint fingerprints[] = {
+            {8, 24, orbisCodeFingerprint(text.data() + 8, 24)},
+            {48, 16, orbisCodeFingerprint(text.data() + 48, 16)}};
+        auto patch = [&](uint8_t* p, size_t n) {
+            return orbisGuardedBranchPatch(p, n, 16, 0x77, 0xeb, fingerprints, 2);
+        };
+        check(!patch(nullptr, text.size()), "null compatibility image");
+        check(!patch(text.data(), 16) && text == original, "branch outside image");
+        check(!patch(text.data(), 17) && text == original, "truncated branch");
+        check(!patch(text.data(), 63) && text == original, "truncated reader is transactional");
+        text[63] ^= 1; const auto wrongReader = text;
+        check(!patch(text.data(), text.size()) && text == wrongReader, "reader mismatch leaves writer untouched");
+        text = original; text[8] ^= 1; const auto wrongWriter = text;
+        check(!patch(text.data(), text.size()) && text == wrongWriter, "writer mismatch leaves image untouched");
+        text = original;
+        check(patch(text.data(), text.size()), "matching writer and reader patched");
+        check(text[16] == 0xeb && text[17] == 0x61, "branch retains displacement and width");
+        for (size_t i = 0; i < text.size(); ++i)
+            check(text[i] == (i == 16 ? 0xeb : original[i]), "only branch opcode changes");
+        const auto patched = text;
+        check(!patch(text.data(), text.size()) && text == patched, "already patched image unchanged");
+        fingerprints[1] = {SIZE_MAX, 16, 0}; text = original;
+        check(!patch(text.data(), text.size()) && text == original, "fingerprint range cannot wrap");
+        check(!maxps4::orbisUseLiteralSaveStrings(text.data(), text.size()) && text == original, "unrelated build unchanged");
+    }
+    {   // Call of Duty's fixed layout moves into the window, all or nothing.
+        const std::pair<size_t, uint64_t> sites[] = {{0x558ae4,0x1000000000},{0x558b23,0x1080000000},{0x558b69,0x1100000000},
+            {0x558b73,0x1180000000},{0x558bc0,0x1200000000},{0x558c23,0x400000000},{0x558c2d,0x1600200000},
+            {0x558c7a,0x1a00200000},{0x61cafe,0x2000000000}};
+        std::vector<uint8_t> text(0x620000, 0x90);
+        for (const auto& [at, immediate] : sites) { text[at] = 0x48; text[at + 1] = 0xb8; put(text, at + 2, immediate); }
+        const auto read = [&](size_t at) { uint64_t v = 0; std::memcpy(&v, text.data() + at + 2, 8); return v; };
+        const auto untouched = text;
+        constexpr uint64_t window = 0x7014864000, gib = uint64_t{1} << 30;
+        check(!maxps4::orbisRelocateFixedLayout(text.data(), text.size(), window, 16 * gib) && text == untouched, "window too small");
+        check(!maxps4::orbisRelocateFixedLayout(text.data(), 0x558c00, window, 24 * gib) && text == untouched, "short text");
+        text[0x61cb00] ^= 1; // Another build of the game: nothing changes.
+        const auto other = text;
+        check(!maxps4::orbisRelocateFixedLayout(text.data(), text.size(), window, 24 * gib) && text == other, "other build");
+        text = untouched;
+        check(maxps4::orbisRelocateFixedLayout(text.data(), text.size(), window, 24 * gib), "fixed layout moved");
+        const uint64_t start = read(0x558ae4);
+        check(start % gib == 0 && start >= window + gib && start < window + 3 * gib, "layout start");
+        check(read(0x558b23) == start + 2 * gib && read(0x558bc0) == start + 8 * gib && read(0x558c23) == 5 * gib, "regions");
+        check(read(0x558c2d) == start + 13 * gib + 0x200000 && read(0x558c7a) == start + 18 * gib + 0x200000, "large regions");
+        check(!(read(0x558bc0) & 0x200000) && !(read(0x558c7a) & 0x20000000), "bits ORed into the bases stay clear");
+        check(read(0x61cafe) == start + 20 * gib && read(0x61cafe) + 2 * gib <= window + 24 * gib, "allocator inside the window");
+    }
     auto provider = make(true), consumer = make(false);
     if (argc == 2) {
         const std::pair<const char*, const std::vector<uint8_t>*> fixtures[] = {{"provider.prx", &provider}, {"app.elf", &consumer}};
@@ -77,6 +130,24 @@ int main(int argc, char** argv) {
     put(consumer,0x900,0x20fc); reject(batch(),"relocation target"); consumer=original;
     put(consumer,0x908,(uint64_t{1}<<32)|99); reject(batch(),"unsupported x86-64 relocation"); consumer=original;
     put(consumer,0x908,(uint64_t{99}<<32)|7); reject(batch(),"invalid relocation symbol"); consumer=original;
+    {   // R_RELATIVE ignores a symbol index: base + addend.
+        put(consumer,0x908,(uint64_t{1}<<32)|8); put(consumer,0x910,0x1234);
+        Linker::Image relative;
+        check(Linker::link(batch(),{},relative,diagnostic),diagnostic.c_str());
+        check(value(relative,0x102000)==0x101234,"R_RELATIVE with a symbol index");
+        consumer=original;
+    }
+    {   // An undefined _GLOBAL_OFFSET_TABLE_ may be declared, not relocated against.
+        const std::string table = "_GLOBAL_OFFSET_TABLE_";
+        std::copy(table.begin(), table.end(), consumer.begin() + 0x640);
+        setTag(consumer,0x61000037,0x60); put(consumer,0x818,0x40,4); consumer[0x81c]=0x10;
+        reject(batch(),"relocation against _GLOBAL_OFFSET_TABLE_");
+        put(consumer,0x908,8); put(consumer,0x910,0x10);
+        Linker::Image declared;
+        check(Linker::link({input("app.elf",consumer,0x100000,{})},{},declared,diagnostic),diagnostic.c_str());
+        check(value(declared,0x102000)==0x100010,"declared _GLOBAL_OFFSET_TABLE_");
+        consumer=original;
+    }
     reject(batch(),"memory budget",1023); reject(batch(),"budget exceeds",513*1024*1024);
     put(consumer,64+56+4,4,4); reject(batch(),"relocation target"); consumer=original;
     put(consumer,64+4,7,4); reject(batch(),"writable executable"); consumer=original;
@@ -211,9 +282,9 @@ int main(int argc, char** argv) {
     check(!Linker::link(batch(),{{id,0x201000}},hleImage,diagnostic),"HLE/export collision rejected");
     check(!Linker::link(hleBatch,{{id,0x202000}},hleImage,diagnostic),"HLE data target refused");
     id.libraryVersion=2; check(!Linker::link(hleBatch,{{id,0x201000}},hleImage,diagnostic),"HLE version mismatch unresolved");
-    // System PRX exports may be protected (visibility 3); imports may not.
+    // System PRX exports and imports may be protected (visibility 3).
     provider[0x81d]=3; check(Linker::link(batch(),{},hleImage,diagnostic),diagnostic.c_str()); provider[0x81d]=0;
-    consumer[0x81d]=3; check(!Linker::link(batch(),{},hleImage,diagnostic),"import visibility refused"); consumer=original;
+    consumer[0x81d]=3; check(Linker::link(batch(),{},hleImage,diagnostic),diagnostic.c_str()); consumer=original;
     // HLE ignores the module version (games import libkernel 1.1 for the same functions).
     id.libraryVersion=1; id.moduleVersion=0x909;
     check(Linker::link(hleBatch,{{id,0x201000}},hleImage,diagnostic) && value(hleImage,0x102000)==0x201000,

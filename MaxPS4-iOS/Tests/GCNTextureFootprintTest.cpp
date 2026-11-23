@@ -47,5 +47,25 @@ int main() {
             }
         }
     }
+    {   // Thin micro tiling (index 13): 8x8 tiles row by row, Morton order inside.
+        constexpr unsigned width = 20, height = 12, pitch = 24; // 3x2 tiles of 8x8.
+        std::vector<unsigned char> data(3 * 2 * 64 * 4, 0);
+        for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+            const unsigned inner = (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
+            const std::size_t at = ((y / 8) * (pitch / 8) + x / 8) * 256 + inner * 4;
+            data[at] = static_cast<unsigned char>(x * 10); data[at + 1] = static_cast<unsigned char>(y * 20);
+            data[at + 2] = 7; data[at + 3] = 255;
+        }
+        rt::GCNMemory memory{data.data(), base, data.size()};
+        rt::GCNRes8 texture{{unsigned(base >> 8), 10u << 20, (width - 1) | ((height - 1) << 14), (13u << 20) | 0xfacu,
+                             (pitch - 1) << 13, 0, 0, 0}};
+        for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+            const auto texel = rt::gcn_texel(memory, texture, int(x), int(y));
+            const auto sampled = rt::gcn_sample(memory, texture, rt::GCNRes4{}, true, float(x) + 0.5f, float(y) + 0.5f);
+            assert(texel[0] == float(x * 10) / 255.0f && texel[1] == float(y * 20) / 255.0f && texel[3] == 1.0f);
+            for (unsigned c = 0; c < 4; ++c) assert(sampled[c] == texel[c]);
+            ++cases;
+        }
+    }
     std::printf("PASS texture footprint: %u exact comparisons, padded pitch, formats, filters, wrap/border, packed/split/truncated/missing ranges\n", cases);
 }

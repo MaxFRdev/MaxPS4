@@ -37,6 +37,7 @@ private:
         for (std::size_t first = 0; first < d.indices.size(); first += 64) {
             const unsigned lanes = unsigned(std::min<std::size_t>(64, d.indices.size() - first));
             GCNWave wave(memory_, lanes, &cache);
+            wave.vgprCount = d.vsVGPRCount;
             for (unsigned k = 0; k < d.vsUserCount; ++k) wave.s[k] = d.vsUser[k];
             for (unsigned lane = 0; lane < lanes; ++lane) { wave.v(0, lane) = d.indices[first + lane]; wave.v(3, lane) = 0; }
             if (!wave.run(d.vs)) { stats.fail("VS: " + wave.error); return false; }
@@ -131,6 +132,7 @@ private:
         for (int ty = minY & ~7; ty < maxY; ty += 8) {
             for (int tx = minX & ~7; tx < maxX; tx += 8) {
                 GCNWave wave(memory_, 64, &cache);
+                wave.vgprCount = d.psVGPRCount;
                 wave.images = &images;
                 std::uint64_t covered = 0;
                 for (unsigned lane = 0; lane < 64; ++lane) {

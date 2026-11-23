@@ -7,7 +7,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <algorithm>
 #include <array>
+#include <vector>
 #include <csignal>
 #include <pthread.h>
 #include <fcntl.h>
