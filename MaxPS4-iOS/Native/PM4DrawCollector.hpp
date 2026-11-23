@@ -383,6 +383,28 @@ private:
         d.scissor[1] = std::min(context_[0x0c] >> 16, d.height);
         d.scissor[2] = std::min(context_[0x0d] & 0xffff, d.pitch);
         d.scissor[3] = std::min(context_[0x0d] >> 16, d.height);
+        // The hardware scissor is the screen scissor met with the window,
+        // generic and (when PA_SC_MODE_CNTL_0 enables it) viewport 0
+        // scissors: CoD clips its menu highlight and scrolling text with the
+        // generic scissor. A pair never written (BR 0) restricts nothing.
+        auto meet = [&](std::uint32_t tl, std::uint32_t br, bool offset) {
+            if (!br) return;
+            std::int32_t dx = 0, dy = 0;
+            if (offset && !(tl >> 31)) {
+                dx = std::int16_t(context_[0x80] & 0xffff);
+                dy = std::int16_t(context_[0x80] >> 16);
+            }
+            auto clampTo = [](std::int32_t v, unsigned limit) { return unsigned(std::clamp<std::int32_t>(v, 0, std::int32_t(limit))); };
+            d.scissor[0] = std::max(d.scissor[0], clampTo(std::int32_t(tl & 0x7fff) + dx, d.pitch));
+            d.scissor[1] = std::max(d.scissor[1], clampTo(std::int32_t((tl >> 16) & 0x7fff) + dy, d.height));
+            d.scissor[2] = std::min(d.scissor[2], clampTo(std::int32_t(br & 0x7fff) + dx, d.pitch));
+            d.scissor[3] = std::min(d.scissor[3], clampTo(std::int32_t((br >> 16) & 0x7fff) + dy, d.height));
+        };
+        meet(context_[0x81], context_[0x82], true);  // PA_SC_WINDOW_SCISSOR_TL/BR
+        meet(context_[0x90], context_[0x91], true);  // PA_SC_GENERIC_SCISSOR_TL/BR
+        if (context_[0x292] & 2) meet(context_[0x94], context_[0x95], false); // PA_SC_VPORT_SCISSOR_0
+        d.scissor[2] = std::max(d.scissor[2], d.scissor[0]);
+        d.scissor[3] = std::max(d.scissor[3], d.scissor[1]);
         draw(static_cast<const PM4Draw&>(d));
     }
 };
