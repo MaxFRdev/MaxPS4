@@ -590,6 +590,12 @@ private:
         case 288: expr = "gu(fa * gf(" + hex(i.literal) + ") + fb)"; break;
         case 289: expr = "gu(fa * fb + gf(" + hex(i.literal) + "))"; break;
         case 290: expr = "gcn_popcount(a) + b"; break;
+        // v_mbcnt_lo/hi: lanes of the mask below this one, plus b. One lane
+        // per invocation: in a pixel quad the lane is its quad position (the
+        // usual mbcnt_lo(-1, 0) then mbcnt_hi(-1, ...) lane id gives 0-3),
+        // elsewhere 0; no lane is in the high half.
+        case 291: expr = "gcn_popcount(a & ((1u << L.quadLane) - 1u)) + b"; break;
+        case 292: expr = "b"; break;
         case 293: carry = "ulong t = ulong(a) + ulong(b); r = uint(t); co = uint(t >> 32);"; break;
         case 294: carry = "r = a - b; co = b > a ? 1u : 0u;"; break;
         case 295: carry = "r = b - a; co = a > b ? 1u : 0u;"; break;
