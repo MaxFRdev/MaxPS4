@@ -241,14 +241,17 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
               } }
             if (have) { made(have, nil); return; }
             if (!start) return; // the compile in flight calls it
-            [device newLibraryWithSource:text options:options completionHandler:^(id<MTLLibrary> library, NSError* error) {
-                std::vector<std::function<void(id<MTLLibrary>, NSError*)>> waiters;
-                { std::lock_guard<std::mutex> lock(async->mutex);
-                  if (library) async->libraries[libraryKey] = library;
-                  waiters.swap(async->compiling[libraryKey]);
-                  async->compiling.erase(libraryKey); }
-                for (auto& waiter : waiters) waiter(library, error);
-            }];
+            async->startCompile([=] {
+                [device newLibraryWithSource:text options:options completionHandler:^(id<MTLLibrary> library, NSError* error) {
+                    std::vector<std::function<void(id<MTLLibrary>, NSError*)>> waiters;
+                    { std::lock_guard<std::mutex> lock(async->mutex);
+                      if (library) async->libraries[libraryKey] = library;
+                      waiters.swap(async->compiling[libraryKey]);
+                      async->compiling.erase(libraryKey); }
+                    async->compileDone();
+                    for (auto& waiter : waiters) waiter(library, error);
+                }];
+            });
         };
         // Default optimisation did not finish some programs on the iPhone, large or
         // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
@@ -307,8 +310,8 @@ void PM4MetalRenderer::listCostly(std::uint64_t address) {
 std::string PM4MetalRenderer::pipelineStatus() const {
     std::lock_guard<std::mutex> lock(async_->mutex);
     // Which programs still run their size build, and what the queue is doing.
-    char queue[96];
-    std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées", async_->librariesCompiled, async_->librariesShared);
+    char queue[160];
+    std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées, %u en compilation, %zu en file", async_->librariesCompiled, async_->librariesShared, async_->compilesRunning, async_->compileQueue.size());
     std::string defaults = queue;
     std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente", async_->later.size());
     defaults += queue;
@@ -765,7 +768,24 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
 // blocks in 8x8 micro tiles, Morton order inside) decoded once into a
 // texture: Metal cannot sample BC formats on iPhone. CoD's menus and fonts
 // are BC3 and BC1.
-id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt) {
+namespace {
+// A signed (SNORM) BC4 block: 4x4 int8 values, every `step` bytes in a row of
+// `pitch` bytes (bcdec decodes BC4/BC5 unsigned only). BC5 normal maps are
+// often SNORM.
+void decodeBC4Signed(const std::uint8_t* block, std::uint8_t* out, int pitch, int step) {
+    int a = std::int8_t(block[0]), b = std::int8_t(block[1]);
+    a = std::max(a, -127); b = std::max(b, -127);
+    int palette[8] = {a, b};
+    if (a > b) for (int k = 1; k < 7; ++k) palette[k + 1] = ((7 - k) * a + k * b) / 7;
+    else { for (int k = 1; k < 5; ++k) palette[k + 1] = ((5 - k) * a + k * b) / 5; palette[6] = -127; palette[7] = 127; }
+    std::uint64_t bits = 0;
+    for (int k = 0; k < 6; ++k) bits |= std::uint64_t(block[2 + k]) << (8 * k);
+    for (int i = 0; i < 16; ++i)
+        out[(i / 4) * pitch + (i % 4) * step] = std::uint8_t(std::int8_t(palette[(bits >> (3 * i)) & 7]));
+}
+}
+
+id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt, bool snorm) {
     const std::uint64_t blockBytes = dfmt == 35 || dfmt == 38 ? 8 : 16;
     // BC4 decodes to one channel, BC5 to two, the others to RGBA8.
     const std::uint64_t pixelBytes = dfmt == 38 ? 1 : dfmt == 39 ? 2 : 4;
@@ -773,7 +793,7 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     const std::uint64_t tilesWide = (blocksWide + 7) / 8, tilesHigh = (blocksHigh + 7) / 8;
     const std::uint64_t bytes = tilesWide * tilesHigh * 64 * blockBytes;
     if (!bytes || bytes > (64ull << 20)) return nil;
-    const auto key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32, height);
+    const auto key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32 | std::uint64_t(snorm) << 40, height);
     const auto found = bc7Textures_.find(key);
     if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
     // A game fills its atlases as it loads: 16 bytes of every 4 KiB, once a
@@ -794,15 +814,22 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
         const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * blockBytes;
         auto* out = pixels.data() + y * 4 * rowBytes + x * 4 * pixelBytes;
         switch (dfmt) {
-        case 38: bcdec_bc4(blocks.data() + at, out, int(rowBytes)); break;
-        case 39: bcdec_bc5(blocks.data() + at, out, int(rowBytes)); break;
+        case 38:
+            if (snorm) decodeBC4Signed(blocks.data() + at, out, int(rowBytes), 1);
+            else bcdec_bc4(blocks.data() + at, out, int(rowBytes));
+            break;
+        case 39:
+            if (snorm) { decodeBC4Signed(blocks.data() + at, out, int(rowBytes), 2); decodeBC4Signed(blocks.data() + at + 8, out + 1, int(rowBytes), 2); }
+            else bcdec_bc5(blocks.data() + at, out, int(rowBytes));
+            break;
         case 35: bcdec_bc1(blocks.data() + at, out, int(rowBytes)); break;
         case 36: bcdec_bc2(blocks.data() + at, out, int(rowBytes)); break;
         case 37: bcdec_bc3(blocks.data() + at, out, int(rowBytes)); break;
         default: bcdec_bc7(blocks.data() + at, out, int(rowBytes)); break;
         }
     }
-    const MTLPixelFormat pixelFormat = dfmt == 38 ? MTLPixelFormatR8Unorm : dfmt == 39 ? MTLPixelFormatRG8Unorm : MTLPixelFormatRGBA8Unorm;
+    const MTLPixelFormat pixelFormat = dfmt == 38 ? (snorm ? MTLPixelFormatR8Snorm : MTLPixelFormatR8Unorm)
+                                     : dfmt == 39 ? (snorm ? MTLPixelFormatRG8Snorm : MTLPixelFormatRG8Unorm) : MTLPixelFormatRGBA8Unorm;
     auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat width:width height:height mipmapped:NO];
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
@@ -866,8 +893,11 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         return nil;
     };
     if (dfmt == 41 || (dfmt >= 35 && dfmt <= 39)) {
-        if (((t[3] >> 20) & 31) != 13 || ((t[1] >> 26) & 15) != 0) return miss(1, 0);
-        id<MTLTexture> decoded = bc7Texture(base, width, height, pitch, dfmt);
+        // NFMT 0 unorm; BC4/BC5 also 1 snorm (normal maps).
+        const unsigned nfmt = (t[1] >> 26) & 15;
+        const bool snorm = nfmt == 1 && (dfmt == 38 || dfmt == 39);
+        if (((t[3] >> 20) & 31) != 13 || (nfmt != 0 && !snorm)) return miss(1, nfmt);
+        id<MTLTexture> decoded = bc7Texture(base, width, height, pitch, dfmt, snorm);
         return decoded ? decoded : miss(4, 0);
     }
     // 8_8 or 8_8_8_8 in tile mode 13: 8x8 pixel micro tiles, Morton order

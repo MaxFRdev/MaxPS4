@@ -221,6 +221,25 @@ private:
         std::map<LibraryKey, id<MTLLibrary>> libraries;
         std::map<LibraryKey, std::vector<std::function<void(id<MTLLibrary>, NSError*)>>> compiling;
         unsigned librariesShared = 0, librariesCompiled = 0;
+        // At most compileLimit library compiles in flight: hundreds started
+        // together (CoD's mission) left the iPhone's compiler service
+        // thrashing, each taking a minute. The rest wait their turn, in order.
+        static constexpr unsigned compileLimit = 3;
+        unsigned compilesRunning = 0;
+        std::deque<std::function<void()>> compileQueue;
+        void startCompile(std::function<void()> job) {
+            { std::lock_guard<std::mutex> lock(mutex);
+              if (compilesRunning >= compileLimit) { compileQueue.push_back(std::move(job)); return; }
+              ++compilesRunning; }
+            job();
+        }
+        void compileDone() {
+            std::function<void()> job;
+            { std::lock_guard<std::mutex> lock(mutex);
+              if (compileQueue.empty()) { --compilesRunning; return; }
+              job = std::move(compileQueue.front()); compileQueue.pop_front(); }
+            job();
+        }
     };
     std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
     bool deferred_ = false; // the last pipeline() call left its draw to a pending build
@@ -269,7 +288,7 @@ private:
     struct Decoded { id<MTLTexture> texture; std::uint64_t mark, batch; };
     std::uint64_t batchSerial_ = 0;
     std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, Decoded> bc7Textures_;
-    id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt);
+    id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt, bool snorm = false);
     id<MTLTexture> thinTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt);
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
     std::map<std::uint64_t, bool> fillPrograms_;
