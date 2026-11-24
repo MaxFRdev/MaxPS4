@@ -27,6 +27,7 @@
 #import <Metal/Metal.h>
 #include "PM4DrawCollector.hpp"
 #include "PM4ResourceScan.hpp"
+#include "GCNTranslator.hpp"
 #include <array>
 #include <atomic>
 #include <chrono>
