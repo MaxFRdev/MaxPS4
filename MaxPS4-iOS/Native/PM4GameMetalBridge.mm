@@ -117,6 +117,15 @@ struct GameMetalState {
     std::atomic<unsigned> phaseDraw{0};
     std::atomic<unsigned long long> phasePS{0};
     void enter(int p) { phase = p; phaseSince = Clock::now().time_since_epoch().count(); }
+    // The report (thousands of lines with program listings) was rebuilt on
+    // every submission and every displayed frame, under the lock: ~12 ms a
+    // frame. It is rebuilt at most every 250 ms, and at once after a failure.
+    Clock::time_point reportAt{};
+    bool reportDue() {
+        const auto now = Clock::now();
+        if (error.empty() && now - reportAt < std::chrono::milliseconds(250)) return false;
+        reportAt = now; return true;
+    }
     NSString* report() const {
         const unsigned* m = renderer.nativeMisses;
         NSString* native = nativeTextures ? [NSString stringWithFormat:
@@ -383,7 +392,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                     if (captureFrameTiming && state.frameTimingProfiling &&
                         state.frameTimingGeneration == frameTimingGeneration)
                         state.frameTimings.recordGPU(gpuMs(completed));
-                    self.lastReport = state.report();
+                    if (state.reportDue()) self.lastReport = state.report();
                 }});
             }];
             s.inflight.push_back(command);
@@ -396,7 +405,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         ++s.batches; s.slowBatches += submit > 33.3;
         s.mostBarriers = std::max(s.mostBarriers, s.batchBarriers);
         self.submitMilliseconds += submit;
-        self.lastReport = s.report();
+        if (s.reportDue()) self.lastReport = s.report();
         // The native queue retires synchronization packets only after this return.
         return 0;
     }
@@ -411,7 +420,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
     s.lastShown = address;
     if (!source || source.width < width || source.height < height) {
         ++s.absent;
-        self.lastReport = s.report();
+        if (s.reportDue()) self.lastReport = s.report();
         return nil;
     }
     ++s.shown;
@@ -461,12 +470,12 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                 } else {
                     recordDisplayCopy(state, completed, started, source, targets, pixel);
                 }
-                self.lastReport = state.report();
+                if (state.reportDue()) self.lastReport = state.report();
             }});
         }];
         [command commit];
         s.copyMs = elapsedMs(started); // CPU encoding only; GPU completion is asynchronous.
-        self.lastReport = s.report();
+        if (s.reportDue()) self.lastReport = s.report();
         return texture;
     }
 
@@ -479,7 +488,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         s.error = "Metal display copy failed"; return nil;
     }
     recordDisplayCopy(s, command, started, source, targets, pixel);
-    self.lastReport = s.report();
+    if (s.reportDue()) self.lastReport = s.report();
     return texture;
 }
 - (id<MTLSharedEvent>)displayEvent { return state_->displayEvent; }
