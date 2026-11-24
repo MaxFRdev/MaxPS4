@@ -44,6 +44,37 @@ struct PM4DrawStats {
         return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
     }
     void fail(const std::string& message) { ++failed; if (error.empty()) error = message; }
+    // Packets whose effect is not reproduced, by opcode: their draws, dispatches,
+    // commands or copies are lost. Without this count a game using them only
+    // shows a black screen and an empty report.
+    std::array<unsigned, 256> ignored{};
+    static const char* ignoredName(unsigned opcode) {
+        switch (opcode) {
+        case 0x16: return "DISPATCH_INDIRECT";
+        case 0x24: return "DRAW_INDIRECT";
+        case 0x25: return "DRAW_INDEX_INDIRECT";
+        case 0x2c: return "DRAW_INDIRECT_MULTI";
+        case 0x2e: return "DRAW_INDEX_IMMD";
+        case 0x2f: return "NUM_INSTANCES > 1";
+        case 0x30: return "DRAW_INDEX_MULTI_AUTO";
+        case 0x38: return "DRAW_INDEX_INDIRECT_MULTI";
+        case 0x3f: return "INDIRECT_BUFFER";
+        case 0x41: return "CP_DMA";
+        case 0x50: return "DMA_DATA";
+        default: return nullptr;
+        }
+    }
+    // "\nPaquets non gérés : DRAW_INDIRECT ×2, ..." or nothing when none was seen.
+    std::string ignoredReport() const {
+        std::string text;
+        for (unsigned op = 0; op < ignored.size(); ++op) {
+            if (!ignored[op]) continue;
+            char item[64];
+            std::snprintf(item, sizeof item, "%s%s ×%u", text.empty() ? "" : ", ", ignoredName(op), ignored[op]);
+            text += item;
+        }
+        return text.empty() ? text : "\nPaquets non gérés : " + text;
+    }
 };
 struct PM4Draw {
     std::uint64_t vs = 0, ps = 0;                     // program addresses
@@ -174,7 +205,12 @@ public:
                 dispatch(c);
                 break;
             }
-            default: break; // synchronization and prefetch packets: nothing to draw
+            case 0x2f: if (n >= 1 && data[0] > 1) ++stats_.ignored[0x2f]; break; // NUM_INSTANCES: one instance is drawn
+            default:
+                // Synchronization and prefetch packets have nothing to draw. The
+                // others named by ignoredName are lost: count them for the report.
+                if (PM4DrawStats::ignoredName(packet.opcode)) ++stats_.ignored[packet.opcode];
+                break;
             }
         }
     }
