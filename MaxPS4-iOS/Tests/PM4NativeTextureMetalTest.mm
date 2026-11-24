@@ -271,7 +271,8 @@ kernel void compare_samples(device const uchar* mem [[buffer(0)]], constant GCND
 
         // 3. A colour target sampled through a tiled T# (tile mode 13), as
         //    Mortal Kombat composites its menu layer: the target's Metal
-        //    texture is read; a tiled T# no target holds still reads zeros.
+        //    texture is read; a tiled T# no target holds reads guest memory
+        //    (1D micro tiling, here zeros).
         {
             PM4MetalRenderer renderer(device, arena.memory, nil, 0, true);
             const uint32_t linear[12] = {std::uint32_t(image >> 8), 10u << 20, (imageW - 1) | ((imageH - 1) << 14), 0x90800facu,

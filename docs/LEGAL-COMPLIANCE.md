@@ -1,41 +1,41 @@
-# Conformité, licences et attribution — MaxPS4
+# Compliance, licenses and attribution — MaxPS4
 
-**État : préparation du portage, conformité complète non encore auditée.**
+**Status: porting work in progress, full compliance not yet audited.**
 
-## Origine et indépendance
+## Origin and independence
 
-MaxPS4 est un projet expérimental et indépendant sur iOS. Il n'est **ni développé, ni approuvé, ni affilié** à Sony Interactive Entertainment, PlayStation ou à l'équipe officielle shadPS4. Les marques PlayStation, PS4 et Sony appartiennent à leurs propriétaires respectifs.
+MaxPS4 is an experimental, independent project on iOS. It is **not developed, endorsed or affiliated** with Sony Interactive Entertainment, PlayStation or the official shadPS4 team. The PlayStation, PS4 and Sony trademarks belong to their respective owners.
 
-shadPS4 : https://github.com/shadps4-emu/shadPS4 — merci à ses auteurs et contributeurs.
+shadPS4: https://github.com/shadps4-emu/shadPS4 — thanks to its authors and contributors.
 
-AetherPS4 : https://github.com/Leviidev/AetherPS4 — ses auteurs conservent les droits et mentions applicables à leurs contributions.
+AetherPS4: https://github.com/Leviidev/AetherPS4 — its authors keep the rights and notices applicable to their contributions.
 
-Le dépôt MaxPS4 contient une interface Swift, des prototypes ELF/CPU et des ponts natifs. La CI récupère des sources AetherPS4 pour compiler des composants réels (dont le moteur invité avec les en-têtes FEXCore Darwin), mais leur liaison complète à l'application reste bloquée. La récupération des sources complètes shadPS4 est proposée dans la PR #83 ; elle ne constitue pas à elle seule un portage du noyau ou du GPU. **Aucun jeu PS4 n'est actuellement jouable** et le JIT sur iPhone n'est pas validé. Il ne faut présenter aucun de ces projets comme un portage complet.
+The MaxPS4 repository contains a Swift interface, ELF/CPU components and native bridges. CI fetches AetherPS4 and FEX sources to build real components (including the guest engine with the Darwin FEXCore headers). Fetching the complete shadPS4 sources was proposed in PR #83; that alone is not a port of the kernel or the GPU. A few games are playable on iPhone (see the [README](../README.md#compatibility)), and the iPhone JIT has only been validated in individual user tests. None of these projects should be presented as a complete port.
 
-## Licence et redistribution
+## License and redistribution
 
-MaxPS4 inclut le texte de la GNU GPL version 2 dans son fichier [LICENSE](../LICENSE). shadPS4 est distribué sous GPL-2.0. Avant toute incorporation de son code source et redistribution d'une application dérivée, il faut :
-- conserver les mentions de copyright, licences et avis requis par les auteurs ;
-- identifier les fichiers modifiés et documenter leurs modifications ;
-- assurer l'accès au code source correspondant et respecter les obligations de distribution de la GPL applicables aux binaires ;
-- examiner **toutes les dépendances et ressources** (y compris leurs licences propres), et vérifier la compatibilité de l'ensemble, notamment avec les conditions de signature/distribution iOS ;
-- ne pas reprendre sans autorisation les logos, marques ou œuvres d'autrui lorsqu'elles ne sont pas couvertes par une licence adaptée.
+MaxPS4 includes the text of the GNU GPL version 2 in its [LICENSE](../LICENSE) file. shadPS4 is distributed under GPL-2.0. Before incorporating its source code and redistributing a derived application, you must:
+- keep the copyright notices, licenses and notices required by the authors;
+- identify modified files and document their changes;
+- provide access to the corresponding source code and meet the GPL distribution obligations that apply to binaries;
+- review **all dependencies and resources** (including their own licenses), and check that the whole is compatible, in particular with iOS signing/distribution terms;
+- not reuse logos, trademarks or other people's works without permission when they are not covered by a suitable license.
 
-Le présent document **ne constitue pas une certification juridique**. Un audit du code réellement intégré et de chaque mode de distribution est nécessaire avant de présenter MaxPS4 comme entièrement conforme.
+This document **is not a legal certification**. An audit of the code actually integrated and of each distribution method is needed before presenting MaxPS4 as fully compliant.
 
-## Jeux, firmware et données
+## Games, firmware and data
 
-Aucun jeu commercial, PKG, clé, fichier de firmware PS4 ou contenu protégé de Sony n'est fourni par MaxPS4. Les utilisateurs doivent disposer des droits nécessaires sur leurs propres fichiers. La possession d'un jeu ne règle pas automatiquement toutes les questions légales concernant le déchiffrement, les mesures techniques de protection ou l'extraction selon le droit applicable. Ne pas distribuer de moyens de contournement ni promettre une légalité universelle.
+MaxPS4 provides no commercial game, PKG, key, PS4 firmware file or Sony protected content. Users must hold the necessary rights to their own files. Owning a game does not automatically settle every legal question about decryption, technical protection measures or extraction under applicable law. Do not distribute circumvention tools or promise universal legality.
 
-## Distribution de développement hors App Store
+## Development distribution outside the App Store
 
-Le projet privilégie actuellement les tests par IPA hors App Store. Cela n'exempte **pas** les distributions des obligations de licence, d'attribution, d'accès aux sources correspondantes, de signature ou des restrictions de sécurité d'iOS. Un abonnement Apple Developer ne confère pas automatiquement le droit ou la capacité d'exécuter du JIT sur les appareils iOS. La conformité du produit complet n'est pas certifiée.
+The project currently favors IPA testing outside the App Store. This does **not** exempt distributions from license, attribution, corresponding-source, signing obligations or iOS security restrictions. An Apple Developer membership does not automatically grant the right or the ability to run a JIT on iOS devices. Compliance of the complete product is not certified.
 
-## Limites techniques et transparence
+## Technical limits and transparency
 
-Une compilation iOS réussie n'implique pas que l'émulation soit opérationnelle. Les écrans de scan PKG et les tests ELF/CPU ne prouvent pas qu'un jeu PS4 peut démarrer. L'exécution x86-64 sur ARM64, les services PS4 et le moteur graphique restent à développer et à tester.
+A successful iOS build does not mean emulation works. PKG scan screens and ELF/CPU tests do not prove a PS4 game can start. x86-64 execution on ARM64, PS4 services and the graphics engine are still being developed and tested.
 
-Références :
+References:
 - https://github.com/shadps4-emu/shadPS4
 - https://github.com/Leviidev/AetherPS4
 - https://github.com/shadps4-emu/shadPS4/blob/main/LICENSE

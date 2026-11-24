@@ -238,6 +238,8 @@ constexpr Binding bindings[] = {
     {"pthread_rwlock_unlock", "EgmLo6EWgso", PS4KernelService::rwlock_unlock},
     {"pthread_setname_np", "cB4rMoKU4UI", PS4KernelService::succeed},
     {"pthread_set_name_np", "oxMp8uPqa+U", PS4KernelService::succeed},
+    // Mortal Kombat Trilogy (CUSA53178) names its threads with it once at boot.
+    {"scePthreadRename", "GBUY7ywdULE", PS4KernelService::succeed},
     {"pthread_once", "Z4QosVuAsA0", PS4KernelService::once, "libkernel", false, false, 0, once_code, sizeof(once_code)},
     {"sched_yield", "6XG4B33N09g", PS4KernelService::yield, "libkernel", true},
     {"pthread_yield", "T72hz6ffq08", PS4KernelService::yield, "libkernel", true},
@@ -1594,9 +1596,18 @@ int64_t PS4Libkernel::rtc(PS4KernelService service, const PS4KernelCall& c) {
 Error PS4Libkernel::resolve(uint64_t address, size_t& mount, char* relative) const {
     char path[PS4KernelPath::max_path];
     if (!memory_.read_cstring(address, path, sizeof(path))) return fault;
-    // Absolute virtual paths only; no "." or ".." components, no "//", no
-    // control characters or backslashes, no trailing "/" (except a mount root).
-    if (path[0] != '/') return inval;
+    // A relative path is relative to the process's working directory, /app0
+    // (Mortal Kombat Trilogy stats "pancake/SLUS_003.30.hle"). Then absolute
+    // virtual paths only; no "." or ".." components, no "//", no control
+    // characters or backslashes, no trailing "/" (except a mount root).
+    if (!path[0]) return noent;
+    if (path[0] != '/') {
+        constexpr char cwd[] = "/app0/";
+        const size_t given = std::strlen(path);
+        if (given + sizeof(cwd) > sizeof(path)) return nametoolong;
+        std::memmove(path + sizeof(cwd) - 1, path, given + 1);
+        std::memcpy(path, cwd, sizeof(cwd) - 1);
+    }
     size_t length = std::strlen(path);
     for (size_t i = 1; i < length; ++i) {
         const unsigned char byte = static_cast<unsigned char>(path[i]);
@@ -2865,7 +2876,25 @@ int64_t PS4Libkernel::memory_service(PS4KernelService service, const PS4KernelCa
             return kernel_error(inval);
         uint64_t mapped = 0;
         const Error e = dynamic_->place(hint, c.rsi, std::max<uint64_t>(c.r9, page), protection, (c.rcx & 0x10) != 0, mapped);
-        if (e) return kernel_error(e);
+        if (e) {
+            // Diagnostic only: preserve the guest-visible error and memory state.
+            // A failed 2 GiB mapping may be a host VA-space constraint rather
+            // than a missing PS4 direct-memory allocation.
+            std::fprintf(stderr,
+                "[MaxPS4 direct_map] place failed: error=%d hint=0x%llx length=0x%llx "
+                "physical=0x%llx owner=0x%llx owner_size=0x%llx offset=0x%llx "
+                "alignment=0x%llx protection=0x%x flags=0x%llx fixed=%d\n",
+                int(e), static_cast<unsigned long long>(hint),
+                static_cast<unsigned long long>(c.rsi),
+                static_cast<unsigned long long>(c.r8),
+                static_cast<unsigned long long>(owner->first),
+                static_cast<unsigned long long>(owner->second),
+                static_cast<unsigned long long>(offset),
+                static_cast<unsigned long long>(std::max<uint64_t>(c.r9, page)),
+                protection, static_cast<unsigned long long>(c.rcx),
+                (c.rcx & 0x10) != 0);
+            return kernel_error(e);
+        }
         return write_pointer(c.rdi, mapped) ? 0 : (dynamic_->unmap(mapped, c.rsi), kernel_error(fault));
     }
     // sceKernelMapNamedFlexibleMemory(void** address, length, protection, flags, name).

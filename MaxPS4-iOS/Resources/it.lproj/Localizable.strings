@@ -182,3 +182,22 @@
 "Mode développeur désactivé." = "Modalità sviluppatore disattivata.";
 "Contenus additionnels" = "Contenuti aggiuntivi";
 "Afficher les images par seconde" = "Mostra fotogrammi al secondo";
+"URL StikDebug invalide : activation JIT refusée." = "URL di StikDebug non valido: attivazione del JIT rifiutata.";
+"Identifiant du processus absent. Dans LiveContainer, active Use LiveContainer's Bundle ID. Activation refusée." = "Identificatore del processo mancante. In LiveContainer, attiva Use LiveContainer's Bundle ID. Attivazione rifiutata.";
+"Impossible d’identifier le processus MaxPS4 : activation JIT refusée." = "Impossibile identificare il processo MaxPS4: attivazione del JIT rifiutata.";
+"iOS n’a pas ouvert StikDebug. Vérifie sa configuration dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID. JIT indisponible." = "iOS non ha aperto StikDebug. Controlla la configurazione in LiveContainer, il JIT enabler e Use LiveContainer's Bundle ID. JIT non disponibile.";
+
+"Select, pavé tactile" = "Select, touchpad";
+"Start, Options" = "Start, Opzioni";
+"Autorisations iOS" = "Autorizzazioni iOS";
+"Actif" = "Attivo";
+"Absent" = "Assente";
+"Inconnu" = "Sconosciuto";
+"Débogage (JIT)" = "Debug (JIT)";
+"Permet à StikDebug d’activer le JIT." = "Permette a StikDebug di attivare il JIT.";
+"Adressage mémoire étendu" = "Indirizzamento di memoria esteso";
+"Plus d’espace pour la mémoire de la PS4." = "Più spazio per la memoria della PS4.";
+"Mémoire augmentée" = "Memoria aumentata";
+"iOS laisse le jeu utiliser plus de RAM." = "iOS lascia che il gioco usi più RAM.";
+"Mémoire disponible pour l’app : %@" = "Memoria disponibile per l’app: %@";
+"Lu dans la signature installée : SideStore ou LiveContainer peuvent retirer ou remplacer des autorisations." = "Letto dalla firma installata: SideStore o LiveContainer possono rimuovere o sostituire autorizzazioni.";

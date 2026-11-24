@@ -1,7 +1,7 @@
 #pragma once
 // Graphics PM4 register state and the draws it describes. Each draw packet
 // becomes a self-contained PM4Draw: programs and user SGPRs, PS inputs,
-// primitive and resolved indices, viewport, scissor, colour target 0, the
+// primitive and resolved indices, viewport, scissor, colour targets 0-7 (MRT), the
 // depth buffer and face culling.
 // The software renderer (CPU) and the Metal renderer execute the same
 // PM4Draw, so both see one interpretation of the registers. Draws this
@@ -27,13 +27,21 @@ struct PM4DrawStats {
     std::string lastSkipped, lastDispatch;
     // Diagnostics: draws with a depth test, those writing depth, those with
     // no colour, culled faces, the last depth state.
-    unsigned depthTested = 0, depthWritten = 0, depthOnly = 0, cullFront = 0, cullBack = 0;
+    unsigned depthTested = 0, depthWritten = 0, depthOnly = 0, cullFront = 0, cullBack = 0, stencilTested = 0;
+    // Colour targets 1-7 drawn with target 0, and those left out (another size or format).
+    unsigned extraTargets = 0, extraTargetsDropped = 0;
     std::string lastDepth;
     std::string depthReport() const {
-        char text[160];
-        std::snprintf(text, sizeof text, "\nProfondeur : %u dessins testés, %u écrivent, %u sans couleur · culling : %u avant, %u arrière",
-                      depthTested, depthWritten, depthOnly, cullFront, cullBack);
-        return text + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
+        char text[200];
+        std::snprintf(text, sizeof text, "\nProfondeur : %u dessins testés, %u écrivent, %u sans couleur, %u avec stencil · culling : %u avant, %u arrière",
+                      depthTested, depthWritten, depthOnly, stencilTested, cullFront, cullBack);
+        std::string more;
+        if (extraTargets || extraTargetsDropped) {
+            char line[96];
+            std::snprintf(line, sizeof line, " · MRT : %u cibles en plus, %u écartées", extraTargets, extraTargetsDropped);
+            more = line;
+        }
+        return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
     }
     void fail(const std::string& message) { ++failed; if (error.empty()) error = message; }
 };
@@ -56,6 +64,10 @@ struct PM4Draw {
     unsigned pitch = 0, height = 0;                   // pixels
     unsigned swap = 0, mask = 0;                      // CB COMP_SWAP, CB_TARGET_MASK RGBA
     std::uint32_t blend = 0;                          // CB_BLEND0_CONTROL
+    // Colour targets 1-7 (MRT), drawn with target 0 when CB_TARGET_MASK enables
+    // them and they share its size: more[k - 1] for slot k, base 0 when unused.
+    struct ColourTarget { std::uint64_t base = 0; unsigned format = 0xa, number = 0, swap = 0, mask = 0; std::uint32_t blend = 0; };
+    ColourTarget more[7];
     float blendConstant[4] = {};                     // CB_BLEND_RED/GREEN/BLUE/ALPHA
     // False: a depth-only draw (no colour target, or mask 0); target is then 0
     // and pitch/height are the depth buffer's.
@@ -70,6 +82,16 @@ struct PM4Draw {
     // DB_RENDER_CONTROL DEPTH_CLEAR_ENABLE: the draw's pixels get DB_DEPTH_CLEAR.
     bool depthClear = false;
     float depthClearValue = 1;
+    // Stencil (DB_DEPTH_CONTROL STENCIL_ENABLE, DB_STENCIL_INFO, DB_STENCIL_CONTROL,
+    // DB_STENCILREFMASK(_BF)): kept with the depth buffer, in the same texture.
+    // Faces [0] front, [1] back (the front's unless BACKFACE_ENABLE). Functions
+    // use ZFUNC's codes; operations are GCN's STENCILFAIL/ZPASS/ZFAIL codes.
+    struct StencilFace { unsigned func = 7, fail = 0, zpass = 0, zfail = 0, ref = 0, mask = 0xff, writeMask = 0xff, opValue = 0; };
+    bool stencilTest = false;
+    StencilFace stencil[2];
+    // DB_RENDER_CONTROL STENCIL_CLEAR_ENABLE: the draw's pixels get DB_STENCIL_CLEAR.
+    bool stencilClear = false;
+    unsigned stencilClearValue = 0;
     unsigned cull = 0;                                // PA_SU_SC_MODE_CNTL: bit 0 front, bit 1 back
     bool frontClockwise = false;                      // FACE: front faces are clockwise on screen
 };
@@ -182,6 +204,7 @@ private:
         const std::uint32_t control = context_[0x200], mode = context_[0x205];
         if (mode & 1) ++stats_.cullFront;
         if (mode & 2) ++stats_.cullBack;
+        if ((control & 1) && (context_[0x11] & 1)) ++stats_.stencilTested;
         if (!(control & 2) || !(context_[0x10] & 3)) return;
         const bool writes = control & 4;
         ++stats_.depthTested;
@@ -206,9 +229,30 @@ private:
         d.depthFunc = (control >> 4) & 7;
         d.depthClear = context_[0x00] & 1;
         d.depthClearValue = std::clamp(f(context_[0x0b]), 0.0f, 1.0f);
-        const std::uint64_t base = std::uint64_t(context_[0x14] ? context_[0x14] : context_[0x12]) << 8;
-        if (!(context_[0x10] & 3) || !base || !(d.depthTest || d.depthClear)) {
-            d.depthTest = d.depthWrite = d.depthClear = false;
+        // DB_STENCIL_INFO FORMAT 1: an 8-bit stencil buffer beside the depth one.
+        const bool stencilBuffer = context_[0x11] & 1, depthBuffer = context_[0x10] & 3;
+        if (!depthBuffer) d.depthTest = d.depthWrite = d.depthClear = false;
+        if (stencilBuffer) {
+            d.stencilTest = control & 1;
+            d.stencilClear = context_[0x00] & 2;
+            d.stencilClearValue = context_[0x0a] & 0xff;
+            const std::uint32_t ops = context_[0x10b], refs[2] = {context_[0x10c], context_[0x10d]};
+            const bool back = control & 0x80;
+            for (unsigned k = 0; k < 2; ++k) {
+                const unsigned face = back ? k : 0;
+                auto& s = d.stencil[k];
+                s.func = (control >> (face ? 20 : 8)) & 7;
+                s.fail = (ops >> (face ? 12 : 0)) & 15; s.zpass = (ops >> (face ? 16 : 4)) & 15; s.zfail = (ops >> (face ? 20 : 8)) & 15;
+                s.ref = refs[face] & 0xff; s.mask = (refs[face] >> 8) & 0xff;
+                s.writeMask = (refs[face] >> 16) & 0xff; s.opValue = refs[face] >> 24;
+            }
+        }
+        // The depth texture's address: the depth buffer's, else the stencil's.
+        const std::uint64_t zBase = std::uint64_t(context_[0x14] ? context_[0x14] : context_[0x12]) << 8;
+        const std::uint64_t sBase = std::uint64_t(context_[0x15] ? context_[0x15] : context_[0x13]) << 8;
+        const std::uint64_t base = depthBuffer && zBase ? zBase : stencilBuffer ? sBase : 0;
+        if (!base || !(d.depthTest || d.depthClear || d.stencilTest || d.stencilClear)) {
+            d.depthTest = d.depthWrite = d.depthClear = d.stencilTest = d.stencilClear = false;
             return;
         }
         d.depthTarget = base;
@@ -221,7 +265,10 @@ private:
         PM4Draw d;
         depthState(d);
         d.colour = (context_[0x8e] & 0xf) && context_[0x318];
-        if (!d.colour && !(depthOnlyDraws && (d.depthWrite || d.depthClear))) {
+        // A stencil write without colour (a mask, a shadow volume) is a depth-only draw too.
+        const bool stencilWrites = d.stencilClear || (d.stencilTest && (d.stencil[0].writeMask || d.stencil[1].writeMask) &&
+            (d.stencil[0].fail | d.stencil[0].zpass | d.stencil[0].zfail | d.stencil[1].fail | d.stencil[1].zpass | d.stencil[1].zfail));
+        if (!d.colour && !(depthOnlyDraws && (d.depthWrite || d.depthClear || stencilWrites))) {
             ++stats_.skipped;
             // CB_TARGET_MASK, CB_COLOR0/1 BASE and INFO format, CB_COLOR_CONTROL,
             // DB_Z_INFO, PS program.
@@ -305,6 +352,22 @@ private:
             d.swap = (info >> 11) & 3;
             d.mask = context_[0x8e] & 0xf;
             d.blend = context_[0x1e0];
+            for (unsigned k = 1; k < 8; ++k) {
+                const unsigned mask = (context_[0x8e] >> (4 * k)) & 0xf, at = 0x318 + 15 * k;
+                if (!mask || !context_[at]) continue;
+                const std::uint32_t moreInfo = context_[at + 4];
+                const unsigned pitch = ((context_[at + 1] & 0x7ff) + 1) * 8;
+                const unsigned height = unsigned((std::uint64_t((context_[at + 2] & 0x3fffff) + 1) * 64) / pitch);
+                PM4Draw::ColourTarget t;
+                t.base = std::uint64_t(context_[at]) << 8;
+                t.format = (moreInfo >> 2) & 0x1f; t.number = (moreInfo >> 8) & 7; t.swap = (moreInfo >> 11) & 3;
+                t.mask = mask; t.blend = context_[0x1e0 + k];
+                // Metal draws its attachments at one size.
+                if (pitch != d.pitch || height != d.height || t.base == d.target ||
+                    (!otherTargetFormats && (t.format != 0xa || t.number != 0))) { ++stats_.extraTargetsDropped; continue; }
+                d.more[k - 1] = t;
+                ++stats_.extraTargets;
+            }
         } else {
             d.pitch = d.depthWidth;
             d.height = d.depthHeight;

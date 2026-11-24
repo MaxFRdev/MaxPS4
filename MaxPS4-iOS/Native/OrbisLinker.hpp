@@ -292,6 +292,13 @@ private:
             // defined, it binds nothing, like a local; a weak undefined one stays
             // 0, as an unresolved weak symbol does, and so do undefined section
             // bounds (__start_X/__stop_X both 0: an empty range).
+            // _GLOBAL_OFFSET_TABLE_ left undefined (Call of Duty: Modern Warfare
+            // Remastered's libc.prx) is the module's own GOT: its SCE PLTGOT.
+            if (!s.defined && name == "_GLOBAL_OFFSET_TABLE_") {
+                const auto got = tags.count(0x61000027) ? tags.find(0x61000027)->second : tags.count(3) ? tags.find(3)->second : 0;
+                require(got && m.image.translate(got, 8, 4), "_GLOBAL_OFFSET_TABLE_ without a readable PLTGOT");
+                s.defined = true; s.value = got;
+            }
             if (!s.local && name.find('#') == std::string::npos) {
                 const bool bound = name.rfind("__start_", 0) == 0 || name.rfind("__stop_", 0) == 0;
                 require(s.defined || bind == 2 || bound, "undefined non-NID symbol: " + name);
@@ -678,7 +685,9 @@ private:
             std::set<uint64_t> targets;
             auto& m = out.modules[i];
             for (const auto& r : dynamic[i].relas) {
-                const auto type = uint32_t(r.info); const auto symbol = r.info >> 32;
+                // RELATIVE is B+A and ignores its symbol index, which some PRXs set
+                // (Call of Duty: Modern Warfare Remastered's libc.prx).
+                const auto type = uint32_t(r.info); const auto rawSymbol = r.info >> 32, symbol = type == 8 ? 0 : rawSymbol;
                 // AMD64 R_X86_64_NONE has no effect: neither the target nor the
                 // symbol/addend is used, and it cannot overlap a real write.
                 if (type == 0) { ++report.ignoredRelocations; continue; }
@@ -687,7 +696,7 @@ private:
                         "unsupported x86-64 relocation " + std::to_string(type));
                 const bool tlsRelocation = type >= 16;
                 // TLS relocations may use symbol 0 (local-dynamic: this module, offset = A).
-                require(symbol < resolved[i].size() && (type != 8 || symbol == 0) && (type == 8 || tlsRelocation || symbol != 0),
+                require(rawSymbol < resolved[i].size() && (type == 8 || tlsRelocation || symbol != 0),
                         "invalid relocation symbol");
                 // An undefined local STT_SECTION symbol in a TLS relocation names this
                 // module's TLS block (local-dynamic model), like symbol 0.

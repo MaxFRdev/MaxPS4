@@ -4,10 +4,11 @@
 // cross-lane swizzles and helper lanes behave as on hardware. Code, scalar
 // and buffer data are read from guest memory through callbacks while the
 // program runs (a fetch shader called with s_swappc_b64 just works).
-// Textures must be linear (tile mode 8); tiled surfaces are refused with an
-// error rather than read as garbage. It is a correctness reference for the
+// Textures must be linear (tile mode 8) or 1D micro-tiled (GCNTiling.hpp);
+// other tilings are refused with an error rather than read as garbage. It is a correctness reference for the
 // renderer, not a fast path.
 #include "GCNDecoder.hpp"
+#include "GCNTiling.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -777,16 +778,16 @@ private:
         }
     }
     static std::uint64_t imageSize(const Image& t, unsigned bytes) {
-        return (t.dfmt >= 35 && t.dfmt <= 39) ? std::uint64_t((t.pitch + 3) / 4) * ((t.height + 3) / 4) * bytes :
-                              std::uint64_t(t.pitch) * t.height * bytes;
+        return (t.dfmt >= 35 && t.dfmt <= 39) ? gcnSurfaceBytes(t.tiling, (t.pitch + 3) / 4, (t.height + 3) / 4, bytes) :
+                              gcnSurfaceBytes(t.tiling, t.pitch, t.height, bytes);
     }
     bool texel(const Image& t, int x, int y, float out[4]) {
         unsigned bytes = 0;
         imageBytes(t.dfmt, bytes);
         std::uint8_t data[16] = {};
         const std::uint64_t offset = (t.dfmt >= 35 && t.dfmt <= 39) ?
-            (std::uint64_t(std::uint32_t(y) / 4) * ((t.pitch + 3) / 4) + std::uint32_t(x) / 4) * bytes :
-            (std::uint64_t(std::uint32_t(y)) * t.pitch + std::uint32_t(x)) * bytes;
+            gcnElementOffset(t.tiling, std::uint32_t(x) / 4, std::uint32_t(y) / 4, (t.pitch + 3) / 4, bytes) :
+            gcnElementOffset(t.tiling, std::uint32_t(x), std::uint32_t(y), t.pitch, bytes);
         const std::vector<std::uint8_t>* surface = nullptr;
         if (images) {
             // Whole level 0 read once per cache lifetime (one draw).
@@ -917,7 +918,9 @@ private:
         // be interpreted by this CPU-side resource scan. The renderer uses
         // this to refuse unsupported writes instead of silently dropping them.
         if (i.opcode == 8 && stored) stored(t.base, 1);
-        if (t.tiling != 8) {
+        // 1D micro tiling is read like linear images, through gcnElementOffset;
+        // stores stay linear only.
+        if (!gcnTilingReadable(t.tiling) || (i.opcode == 8 && t.tiling != 8)) {
             // Still named to imageResource: a tiled T# is often a colour target
             // the Metal renderer holds as a texture.
             if (imageResource) {

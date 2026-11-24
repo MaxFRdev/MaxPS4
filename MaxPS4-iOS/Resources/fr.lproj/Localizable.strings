@@ -3,3 +3,7 @@
 "Dans StikDebug, importe le même fichier d’appairage que pour SideStore. Active aussi le VPN si StikDebug le demande." = "Dans StikDebug, importe le même fichier d’appairage que pour SideStore. Active aussi le VPN si StikDebug le demande.";
 "Reviens ici, touche « Activer avec StikDebug », puis attends la fin de son script avant de vérifier le JIT." = "Reviens ici, touche « Activer avec StikDebug », puis attends la fin de son script avant de vérifier le JIT.";
 "Le PairingFile est propre à ton iPhone : garde-le privé et ne le joins pas aux rapports MaxPS4." = "Le PairingFile est propre à ton iPhone : garde-le privé et ne le joins pas aux rapports MaxPS4.";
+"URL StikDebug invalide : activation JIT refusée." = "URL StikDebug invalide : activation JIT refusée.";
+"Identifiant du processus absent. Dans LiveContainer, active Use LiveContainer's Bundle ID. Activation refusée." = "Identifiant du processus absent. Dans LiveContainer, active Use LiveContainer's Bundle ID. Activation refusée.";
+"Impossible d’identifier le processus MaxPS4 : activation JIT refusée." = "Impossible d’identifier le processus MaxPS4 : activation JIT refusée.";
+"iOS n’a pas ouvert StikDebug. Vérifie sa configuration dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID. JIT indisponible." = "iOS n’a pas ouvert StikDebug. Vérifie sa configuration dans LiveContainer, le JIT enabler et Use LiveContainer's Bundle ID. JIT indisponible.";

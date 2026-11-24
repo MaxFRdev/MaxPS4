@@ -8,7 +8,7 @@
 // across draws (any format targetFormat() accepts). Pipelines are cached by program addresses, the fetch-shader
 // SGPR pair (s[0:1]), PS inputs, formats and blend. Limits as the software
 // renderer: colour target 0 only, instance 0. Each depth buffer address owns
-// a Depth32Float texture (any DB_Z_INFO format, no stencil), kept across draws
+// a Depth32Float_Stencil8 texture (any DB_Z_INFO format, 8-bit stencil), kept across draws
 // at the size of the targets it is drawn with; draws test and write it as
 // DB_DEPTH_CONTROL says, depth clears write DB_DEPTH_CLEAR, and faces are
 // culled as PA_SU_SC_MODE_CNTL says (not rect lists). Depth-only draws
@@ -27,6 +27,7 @@
 #import <Metal/Metal.h>
 #include "PM4DrawCollector.hpp"
 #include "PM4ResourceScan.hpp"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -102,6 +103,10 @@ public:
     // Draws given a depth buffer, of which without colour; draws whose faces
     // were all culled (front and back); depth textures resized with a copy.
     unsigned depthDraws = 0, depthOnlyDraws = 0, culledDraws = 0, depthResized = 0;
+    // Draws with a stencil test or clear; those whose GCN stencil operations
+    // Metal has no exact equivalent for (logic ops, a step other than 1, an
+    // operation value other than the reference).
+    unsigned stencilDraws = 0, stencilApproximated = 0, mrtDraws = 0;
     unsigned embeddedDepthDraws = 0; // Colourless draws with Gnm's embedded VS: not drawn.
     std::string depthReport() const;
     // The Metal format of a colour target (CB_COLOR0_INFO FORMAT, NUMBER_TYPE,
@@ -156,9 +161,12 @@ private:
     struct Target { id<MTLTexture> texture; bool fresh; unsigned format = 0xa; };
     std::map<std::uint64_t, Target> depthTargets_;
     std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.
-    // By compare function (0-7) and write: 16 states at most.
-    std::map<unsigned, id<MTLDepthStencilState>> depthStates_;
+    std::map<std::uint64_t, unsigned> stencilClearTo_; // The same for stencil.
+    // By depth function and write, then stencil faces (see depthState).
+    std::map<std::array<std::uint32_t, 5>, id<MTLDepthStencilState>> depthStates_;
     id<MTLDepthStencilState> depthState(unsigned function, bool write);
+    // The draw's depth and stencil state; its stencil reference values in `ref`.
+    id<MTLDepthStencilState> depthStencilState(const PM4Draw& d, unsigned ref[2]);
     // The depth texture for `d` (d.pitch x d.height), copied from a texture of
     // another size when the buffer was drawn with other targets before.
     Target* depthTexture(const PM4Draw& d, id<MTLCommandBuffer> commands);
@@ -228,6 +236,8 @@ private:
     id<MTLRenderCommandEncoder> encoder_ = nil;
     id<MTLCommandBuffer> commands_ = nil;
     id<MTLTexture> attachment_ = nil;
+    id<MTLTexture> moreAttachments_[7] = {}; // colour targets 1-7 of the open encoder
+    id<MTLTexture> drawingMore_[7] = {};     // colour targets 1-7 of the draw being encoded
     struct Upload { id<MTLBuffer> buffer; id<MTLCommandBuffer> owner; };
     std::vector<Upload> uploads_;
     std::uint64_t pooledBytes_ = 0;

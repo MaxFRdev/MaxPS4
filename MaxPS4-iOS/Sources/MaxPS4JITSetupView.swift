@@ -13,7 +13,16 @@ private struct MaxPS4JITReadiness: Sendable {
         defer { maxps4_fex_engine_close(opened) }
         let initialized = maxps4_fex_engine_initialize(opened)
         guard initialized == 0 else {
-            return Self(ready: false, detail: "Préparation du JIT : \(initialized)\nÉtat mémoire : \(maxps4_jit_state())\nErreur mémoire : \(maxps4_jit_error())\nÉtape : \(maxps4_jit_failure_stage())\nCode Mach : \(maxps4_jit_failure_mach())")
+            let state = maxps4_jit_state()
+            let error = maxps4_jit_error()
+            let stage = maxps4_jit_failure_stage()
+            let mach = maxps4_jit_failure_mach()
+            let region = maxps4_jit_failure_region()
+            let mailbox = maxps4_jit_mailbox_diagnostic()
+            let liveContainer = MaxPS4StikEnvironment.isLiveContainer(environment: ProcessInfo.processInfo.environment)
+            let explanation = MaxPS4JITFailureDiagnostic.explanation(initializationStatus: initialized,
+                memoryState: state, isLiveContainer: liveContainer)
+            return Self(ready: false, detail: "Préparation du JIT : \(initialized)\nÉtat mémoire : \(state)\nErreur mémoire : \(error)\nÉtape : \(stage)\nCode Mach : \(mach)\nRégion : \(region)\nDiagnostic mailbox : \(mailbox)\n\(explanation)")
         }
         var value: UInt64 = 0
         var backend: UInt32 = 0
@@ -62,6 +71,12 @@ struct MaxPS4JITSetupView: View {
                             requested = true
                             detail = MaxPS4StikActivation.begin { result in detail = result; message = result }
                             message = detail
+#if MAXPS4_FEX_APP
+                            // Persist the PID only when this process actually has a pending JIT request.
+                            if maxps4_jit_state() == 1 {
+                                MaxPS4JITRequestRecord.remember(pid: getpid())
+                            }
+#endif
                         } label: {
                             Label("Activer avec StikDebug", systemImage: "arrow.up.right.square")
                                 .frame(maxWidth: .infinity).padding(.vertical, 8)
@@ -111,6 +126,17 @@ struct MaxPS4JITSetupView: View {
                 MaxPS4FEXMetalExecution.queue.async { continuation.resume(returning: MaxPS4JITReadiness.check()) }
             }
             ready = result.ready; detail = result.detail; checking = false
+#if MAXPS4_FEX_APP
+            // A missing in-process request explains -13 with memory state 0.
+            // PID comparison is diagnostic, not proof of a particular user action.
+            if !ready, let cause = MaxPS4JITRequestRecord.explain(
+                state: maxps4_jit_state(),
+                requestPID: MaxPS4JITRequestRecord.requestPID(),
+                currentPID: getpid()
+            ) {
+                detail += "\n" + cause
+            }
+#endif
             message = ready ? String(localized: "L’activation est vérifiée. Tu peux lancer ton jeu.", bundle: .maxps4) : String(localized: "Le JIT n’est pas encore prêt. Termine l’activation dans StikDebug, puis réessaie.", bundle: .maxps4)
         }
     }

@@ -285,7 +285,9 @@ int main() {
         uint64_t window=0, windowBytes=0;
         CHECK(image.heap(window,windowBytes) && windowBytes>=maxps4::GuestELF::generalHeap);
         bool listed=false;
-        for (const auto size : maxps4::GuestELF::generalHeapSizes) listed=listed || windowBytes==size;
+        // A listed size plus the reclaimed thread slots' space (under 16 x 6 MiB).
+        for (const auto size : maxps4::GuestELF::generalHeapSizes)
+            listed=listed || (windowBytes>size && windowBytes-size<maxps4::GuestELF::generalReclaimedThreads*(uint64_t{6}<<20));
         CHECK(listed);
         CHECK(window>=low+bytes+4096 && window%0x4000==0 && !image.translate(window,1,4));
         {
@@ -302,7 +304,13 @@ int main() {
             CHECK(vm.map(0,0x4000,3,0x1002,-1,0,first)==maxps4::ps4::ok && first==window);
             CHECK(!vm.translate(first,1,4)[0]); // Unmapped pages come back zeroed.
             uint64_t tooLarge=0;
-            CHECK(vm.map(0,windowBytes,3,0x1002,-1,0,tooLarge)==maxps4::ps4::nomem);
+            // The window, partly used, cannot hold it: the host may place it
+            // outside (macOS grants it; Linux CI refuses to commit that much).
+            {
+                const auto e=vm.map(0,windowBytes,3,0x1002,-1,0,tooLarge);
+                CHECK(e==maxps4::ps4::nomem || (e==maxps4::ps4::ok && (tooLarge+windowBytes<=window || tooLarge>=window+windowBytes)));
+                if (e==maxps4::ps4::ok) CHECK(vm.unmap(tooLarge,windowBytes)==maxps4::ps4::ok);
+            }
             // Host pages: a hint is a search start, MAP_FIXED replaces what the
             // span held, alignment holds, and a span unmapped inside a region
             // can be mapped again.
@@ -344,6 +352,26 @@ int main() {
             CHECK(vm.place(stackPage,0x4000,0,3,true,relocated)==ok && relocated>=window && relocated<window+windowBytes);
             CHECK(image.translate(stackPage,1,6) && vm.unmap(relocated,0x4000)==ok);
             CHECK(vm.place(0,0x4000,0x3000,3,false,unused)==maxps4::ps4::inval);
+            {
+                // Larger than the whole window (MK Trilogy's 2 GiB direct map
+                // in a 3 GiB window): the host places it outside, aligned,
+                // and the session report records the move (status -2).
+                const uint64_t beyond=windowBytes+0x200000;
+                uint64_t large=0;
+                // No access at first: Linux test hosts refuse to commit a
+                // window-sized writable span; one page is made writable after.
+                CHECK(vm.place(0,beyond,0x200000,0,false,large)==ok);
+                CHECK(large%0x200000==0 && (large+beyond<=window || large>=window+windowBytes));
+                uint64_t qs=0, qe=0; uint32_t qp=9;
+                CHECK(vm.query(large,false,qs,qe,qp) && qs==large && qe==large+beyond && qp==0);
+                CHECK(vm.protect(large+beyond-0x4000,0x4000,3)==ok && vm.translate(large+beyond-16,16,2));
+                const_cast<uint8_t*>(vm.translate(large+beyond-16,16,2))[15]=0x5a;
+                std::array<maxps4::PS4VirtualMemory::Moved,maxps4::PS4VirtualMemory::moved_limit> moved{};
+                size_t count=0;
+                vm.moved(moved,count);
+                CHECK(count && moved[count-1].result==large && moved[count-1].status==-2 && !moved[count-1].host_free);
+                CHECK(vm.unmap(large,beyond)==ok && !vm.translate(large,1,4));
+            }
             vm.reset();
             CHECK(!vm.translate(first,1,4) && !vm.allocated());
         }

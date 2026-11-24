@@ -1074,10 +1074,11 @@ public:
         const auto slot = std::find_if(threads.begin(), threads.end(), [](const Thread& t) { return !t.used; });
         if (slot == threads.end()) return kernel_error(again);
         // FEX does not check the reservation of the new thread's lookup cache
-        // and crashes on it: refuse the thread while that space is missing.
-        if (void* spare = ::mmap(nullptr, size_t(maxps4::GuestELF::fexLookupCacheBytes), PROT_NONE,
-                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); spare != MAP_FAILED)
-            ::munmap(spare, size_t(maxps4::GuestELF::fexLookupCacheBytes));
+        // and crashes on it: refuse the thread while that space is missing,
+        // with room for a code buffer to grow (FEX allocates it unchecked too).
+        constexpr size_t needed = size_t(maxps4::GuestELF::fexLookupCacheBytes) + 32 * 1024 * 1024;
+        if (void* spare = ::mmap(nullptr, needed, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); spare != MAP_FAILED)
+            ::munmap(spare, needed);
         else
             return kernel_error(again);
         uint64_t top = 0, tp = 0;
@@ -2408,11 +2409,15 @@ extern "C" int32_t maxps4_fex_engine_moved_mappings(maxps4_fex_engine* engine, c
     size_t count = 0;
     const size_t total = engine->dynamic_ps4.moved(moved, count);
     std::string out;
-    char line[128];
+    char line[192];
     for (size_t i = 0; i < count; ++i) {
-        std::snprintf(line, sizeof(line), "0x%llx + 0x%llx -> 0x%llx (code %d)\n",
+        int used = std::snprintf(line, sizeof(line), "0x%llx + 0x%llx -> 0x%llx (code %d)",
             (unsigned long long)moved[i].hint, (unsigned long long)moved[i].size,
             (unsigned long long)moved[i].result, moved[i].status);
+        if (moved[i].window_free || moved[i].host_free)
+            used += std::snprintf(line + used, sizeof(line) - size_t(used), " · plus grand trou fenetre %llu Mio, iOS %llu Mio",
+                (unsigned long long)(moved[i].window_free >> 20), (unsigned long long)(moved[i].host_free >> 20));
+        std::snprintf(line + used, sizeof(line) - size_t(used), "\n");
         if (out.size() + std::strlen(line) >= capacity) break;
         out += line;
     }
