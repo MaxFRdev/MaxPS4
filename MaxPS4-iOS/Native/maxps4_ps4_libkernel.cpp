@@ -465,6 +465,9 @@ constexpr Binding bindings[] = {
     {"sceSaveDataSetupSaveDataMemory", "v7AAAMo0Lz4", PS4KernelService::save_memory_setup, "libSceSaveData"},
     {"sceSaveDataGetSaveDataMemory", "7Bt5pBC-Aco", PS4KernelService::save_memory_get, "libSceSaveData"},
     {"sceSaveDataSetSaveDataMemory", "h3YURzXGSVQ", PS4KernelService::save_memory_set, "libSceSaveData"},
+    {"sceSaveDataSetupSaveDataMemory2", "oQySEUfgXRA", PS4KernelService::save_memory_setup2, "libSceSaveData"},
+    {"sceSaveDataGetSaveDataMemory2", "QwOO7vegnV8", PS4KernelService::save_memory_get2, "libSceSaveData"},
+    {"sceSaveDataSetSaveDataMemory2", "cduy9v4YmT4", PS4KernelService::save_memory_set2, "libSceSaveData"},
     {"sceSaveDataInitialize", "ZkZhskCPXFw", PS4KernelService::save_init, "libSceSaveData"},
     {"sceSaveDataInitialize2", "l1NmDeDpNGU", PS4KernelService::save_init, "libSceSaveData"},
     {"sceSaveDataGetEventResult", "j8xKtiFj0SY", PS4KernelService::save_event, "libSceSaveData"},
@@ -1171,6 +1174,34 @@ int64_t PS4Libkernel::save_service(PS4KernelService service, const PS4KernelCall
         if (!std::filesystem::is_directory(path, error)) return save_error(save_not_found);
         std::filesystem::remove_all(path, error);
         return error ? kernel_error(io) : 0;
+    }
+    // Save data memory (v2), on the v1 file (slot 0; parameters and icons
+    // ignored). CoD keeps its options there. Setup2(const Setup2*, Result*):
+    // memorySize at +8, existedMemorySize at Result+0. Get2(Get2*) and
+    // Set2(const Set2*): MemoryData* at +8 ({buf, bufSize, offset}, 64 bytes
+    // each), Set2's dataNum at +32.
+    case S::save_memory_setup2: case S::save_memory_get2: case S::save_memory_set2: {
+        if (!c.rdi) return save_error(save_parameter);
+        PS4KernelCall v1 = c;
+        if (service == S::save_memory_setup2) {
+            uint64_t size = 0;
+            if (!memory_.read(c.rdi + 8, &size, 8)) return save_error(save_parameter);
+            v1.rsi = size; v1.rdx = c.rsi;
+            return save_service(S::save_memory_setup, v1);
+        }
+        uint64_t data = 0;
+        uint32_t count = 1;
+        if (!memory_.read(c.rdi + 8, &data, 8)) return save_error(save_parameter);
+        if (service == S::save_memory_set2 && !memory_.read(c.rdi + 32, &count, 4)) return save_error(save_parameter);
+        if (!data) return 0; // only parameters or an icon
+        for (uint32_t n = 0; n < count && n < 64; ++n) {
+            uint64_t entry[3] = {};
+            if (!memory_.read(data + uint64_t(n) * 64, entry, sizeof entry)) return save_error(save_parameter);
+            v1.rsi = entry[0]; v1.rdx = entry[1]; v1.rcx = entry[2];
+            const int64_t done = save_service(service == S::save_memory_get2 ? S::save_memory_get : S::save_memory_set, v1);
+            if (done) return done;
+        }
+        return 0;
     }
     // Save data memory (v1): SetupSaveDataMemory(userId, size, size_t* existed),
     // Get/SetSaveDataMemory(userId, buffer, size, offset): one file per game.
@@ -2394,6 +2425,7 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
     case S::save_mount1: case S::save_umount2: case S::save_search: case S::save_set_param: case S::save_get_param:
     case S::save_save_icon: case S::save_load_icon: case S::save_delete: case S::save_mount_info: case S::save_event:
     case S::save_progress: case S::save_memory_setup: case S::save_memory_get: case S::save_memory_set:
+    case S::save_memory_setup2: case S::save_memory_get2: case S::save_memory_set2:
         return save_service(service, c);
     case S::save_term: save_umount(0); return 0;
     case S::save_mount2: return save_mount(c.rdi, c.rsi);
