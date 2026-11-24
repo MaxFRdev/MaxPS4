@@ -39,6 +39,7 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace maxps4::gpu {
 class PM4MetalRenderer {
@@ -212,6 +213,14 @@ private:
         }
         std::string lastError;
         double slowest = 0; // Seconds the slowest finished build took.
+        // Libraries by source (hash, length, optimisation): many pipelines
+        // differ only in state and share one program pair, and CoD's are up
+        // to 370 KB of Metal; each is compiled once. Waiters of a compile in
+        // flight are called when it finishes.
+        using LibraryKey = std::tuple<std::size_t, std::size_t, bool>;
+        std::map<LibraryKey, id<MTLLibrary>> libraries;
+        std::map<LibraryKey, std::vector<std::function<void(id<MTLLibrary>, NSError*)>>> compiling;
+        unsigned librariesShared = 0, librariesCompiled = 0;
     };
     std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
     bool deferred_ = false; // the last pipeline() call left its draw to a pending build
