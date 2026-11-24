@@ -6,6 +6,7 @@
 #include "maxps4_ps4_user_service.h"
 #include "maxps4_ps4_pad.h"
 #include "maxps4_ps4_audio_out.h"
+#include "maxps4_ps4_ajm.h"
 #include "maxps4_ps4_gnm.h"
 #include "maxps4_ps4_gnm_queue.h"
 #include <algorithm>
@@ -79,6 +80,8 @@ enum class PS4KernelService : uint32_t {
     save_mount1, save_umount2, save_search, save_set_param, save_get_param, save_save_icon, save_load_icon,
     save_delete, save_mount_info, save_event, save_progress, save_memory_setup, save_memory_get, save_memory_set,
     save_memory_setup2, save_memory_get2, save_memory_set2,
+    ajm_initialize, ajm_finalize, ajm_module_register, ajm_module_unregister, ajm_instance_create,
+    ajm_instance_destroy, ajm_job_control, ajm_job_run, ajm_batch_start, ajm_batch_wait,
     sema_create, sema_delete, sema_wait, sema_poll, sema_signal, sema_cancel,
     flag_create, flag_delete, flag_set, flag_clear, flag_wait, flag_poll, flag_cancel,
     process_counter, counter_frequency, kernel_sleep,
@@ -227,6 +230,7 @@ public:
     PS4VideoOut& videoout() { return videoout_; }
     PS4Pad& pad() { return pad_; }
     PS4AudioOut& audio() { return audio_; }
+    PS4Ajm& ajm() { return ajm_; }
     PS4GnmQueue& graphics() { return graphics_; }
     // The last console_limit bytes the game wrote to its stdout and stderr.
     std::string console() { std::lock_guard<std::mutex> guard(lock_); return std::string(console_.begin(), console_.end()); }
@@ -254,6 +258,7 @@ private:
     PS4UserService user_service_;
     PS4Pad pad_;
     PS4AudioOut audio_;
+    PS4Ajm ajm_;
     PS4Gnm gnm_;
     PS4GnmQueue graphics_;
     uint64_t errno_table_ = 0, errno_table_size_ = 0, process_param_ = 0;

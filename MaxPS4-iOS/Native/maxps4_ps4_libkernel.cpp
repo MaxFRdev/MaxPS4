@@ -1,3 +1,7 @@
+// libSceAjm's MP3 decoder (maxps4_ps4_ajm.h), compiled here once.
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_NO_SIMD
+#include "minimp3.h"
 #include "maxps4_ps4_libkernel.h"
 #include "maxps4_fex_runtime.h"
 #include "maxps4_ps4_kernel_path.h"
@@ -465,6 +469,16 @@ constexpr Binding bindings[] = {
     {"sceSaveDataSetupSaveDataMemory", "v7AAAMo0Lz4", PS4KernelService::save_memory_setup, "libSceSaveData"},
     {"sceSaveDataGetSaveDataMemory", "7Bt5pBC-Aco", PS4KernelService::save_memory_get, "libSceSaveData"},
     {"sceSaveDataSetSaveDataMemory", "h3YURzXGSVQ", PS4KernelService::save_memory_set, "libSceSaveData"},
+    {"sceAjmInitialize", "dl+4eHSzUu4", PS4KernelService::ajm_initialize, "libSceAjm"},
+    {"sceAjmFinalize", "MHur6qCsUus", PS4KernelService::ajm_finalize, "libSceAjm"},
+    {"sceAjmModuleRegister", "Q3dyFuwGn64", PS4KernelService::ajm_module_register, "libSceAjm"},
+    {"sceAjmModuleUnregister", "Wi7DtlLV+KI", PS4KernelService::ajm_module_unregister, "libSceAjm"},
+    {"sceAjmInstanceCreate", "AxoDrINp4J8", PS4KernelService::ajm_instance_create, "libSceAjm"},
+    {"sceAjmInstanceDestroy", "RbLbuKv8zho", PS4KernelService::ajm_instance_destroy, "libSceAjm"},
+    {"sceAjmBatchJobControlBufferRa", "dmDybN--Fn8", PS4KernelService::ajm_job_control, "libSceAjm"},
+    {"sceAjmBatchJobRunBufferRa", "ElslOCpOIns", PS4KernelService::ajm_job_run, "libSceAjm"},
+    {"sceAjmBatchStartBuffer", "fFFkk0xfGWs", PS4KernelService::ajm_batch_start, "libSceAjm"},
+    {"sceAjmBatchWait", "-qLsfDAywIY", PS4KernelService::ajm_batch_wait, "libSceAjm"},
     {"sceSaveDataSetupSaveDataMemory2", "oQySEUfgXRA", PS4KernelService::save_memory_setup2, "libSceSaveData"},
     {"sceSaveDataGetSaveDataMemory2", "QwOO7vegnV8", PS4KernelService::save_memory_get2, "libSceSaveData"},
     {"sceSaveDataSetSaveDataMemory2", "cduy9v4YmT4", PS4KernelService::save_memory_set2, "libSceSaveData"},
@@ -919,7 +933,7 @@ PS4KernelService resolve_libkernel(std::string_view symbol, std::string_view lib
     return PS4KernelService::unresolved;
 }
 PS4Libkernel::PS4Libkernel(PS4GuestMemory& memory, PS4VirtualMemory* dynamic)
-    : memory_(memory), dynamic_(dynamic), threads_(memory), videoout_(memory, threads_), user_service_(memory), pad_(memory), audio_(memory, threads_), gnm_(memory), graphics_(memory), started_us_(monotonic_us()) {}
+    : memory_(memory), dynamic_(dynamic), threads_(memory), videoout_(memory, threads_), user_service_(memory), pad_(memory), audio_(memory, threads_), ajm_(memory), gnm_(memory), graphics_(memory), started_us_(monotonic_us()) {}
 PS4Libkernel::~PS4Libkernel() {
     reset();
 }
@@ -2427,6 +2441,23 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
     case S::save_progress: case S::save_memory_setup: case S::save_memory_get: case S::save_memory_set:
     case S::save_memory_setup2: case S::save_memory_get2: case S::save_memory_set2:
         return save_service(service, c);
+    // libSceAjm (MP3, maxps4_ps4_ajm.h). The Ra job helpers take their last
+    // arguments on the stack (7th at RSP+8) and return the batch's new end.
+    case S::ajm_initialize: return ajm_.initialize(c.rsi);
+    case S::ajm_finalize: ajm_.reset(); return 0;
+    case S::ajm_module_register: case S::ajm_module_unregister: return 0;
+    case S::ajm_instance_create: return ajm_.instance_create(uint32_t(c.rsi), c.rdx, c.rcx);
+    case S::ajm_instance_destroy: return ajm_.instance_destroy(uint32_t(c.rsi));
+    case S::ajm_job_control: case S::ajm_job_run: {
+        uint64_t stack[4] = {};
+        const size_t words = service == S::ajm_job_run ? 4 : 2;
+        if (!c.rsp || !memory_.read(c.rsp + 8, stack, words * 8)) return 0;
+        if (service == S::ajm_job_control)
+            return int64_t(ajm_.job_control(c.rdi, uint32_t(c.rsi), c.rdx, c.rcx, c.r8, c.r9, stack[0]));
+        return int64_t(ajm_.job_run(c.rdi, uint32_t(c.rsi), c.rdx, c.rcx, c.r8, c.r9, stack[0], stack[1], stack[2]));
+    }
+    case S::ajm_batch_start: return ajm_.batch_start(c.rsi, c.rdx, c.r9);
+    case S::ajm_batch_wait: return 0;
     case S::save_term: save_umount(0); return 0;
     case S::save_mount2: return save_mount(c.rdi, c.rsi);
     case S::save_umount: return save_umount(c.rdi);

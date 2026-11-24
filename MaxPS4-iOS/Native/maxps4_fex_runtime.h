@@ -138,6 +138,8 @@ int32_t maxps4_fex_engine_audio_read(maxps4_fex_engine* engine, float* samples, 
 // AudioOut counters (any pointer may be null): Output calls, frames written,
 // frames dropped (ring full, no reader), silent frames read, open ports,
 // written frames with a non-zero sample.
+// libSceAjm jobs run and MP3 samples (per channel) decoded.
+int32_t maxps4_fex_engine_ajm_status(maxps4_fex_engine* engine, uint64_t* jobs, uint64_t* samples);
 int32_t maxps4_fex_engine_audio_status(maxps4_fex_engine* engine, uint64_t* outputs,
     uint64_t* written, uint64_t* dropped, uint64_t* silent, uint32_t* ports, uint64_t* audible);
 // Owned linear VideoOut frame (raw RGBA/BGRA bytes, including row padding).

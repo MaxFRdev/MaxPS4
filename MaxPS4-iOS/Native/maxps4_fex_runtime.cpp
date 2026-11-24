@@ -2958,6 +2958,11 @@ extern "C" int32_t maxps4_fex_engine_audio_read(maxps4_fex_engine* engine, float
     if (!engine || !samples || frames > 16384) return -EINVAL;
     return int32_t(engine->libkernel.audio().read(samples, frames));
 }
+extern "C" int32_t maxps4_fex_engine_ajm_status(maxps4_fex_engine* engine, uint64_t* jobs, uint64_t* samples) {
+    if (!engine || !jobs || !samples) return -EINVAL;
+    *jobs = engine->libkernel.ajm().jobs(); *samples = engine->libkernel.ajm().samples();
+    return 0;
+}
 extern "C" int32_t maxps4_fex_engine_audio_status(maxps4_fex_engine* engine, uint64_t* outputs,
     uint64_t* written, uint64_t* dropped, uint64_t* silent, uint32_t* ports, uint64_t* audible) {
     if (!engine) return -EINVAL;
