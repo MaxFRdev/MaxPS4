@@ -852,7 +852,9 @@ private:
             body_ += "if (" + E + ") { L.color[" + std::to_string(target) + "] = " + value + "; L.colorWritten |= " +
                      std::to_string(1u << target) + "u; }";
             if (done) body_ += " else L.killed = true;";
-        } else if (target == 9) {
+        } else if (target == 8 || target == 9) {
+            // MRTZ (8): a depth/stencil export, approximated by the
+            // rasterized depth; like NULL (9) it still ends the pixel.
             if (done) body_ += "if (!" + E + ") L.killed = true;";
         } else if (target == 12) { out_.position = true; body_ += "L.pos = " + value + ";"; }
         else if (target >= 32 && target < 64) {
