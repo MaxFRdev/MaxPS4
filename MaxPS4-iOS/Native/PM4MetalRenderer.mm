@@ -73,6 +73,8 @@ unsigned colourSlots(const PM4Draw& d) {
 id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format, MTLPixelFormat depth) {
     const PipelineKey key{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
                           (d.blend >> 30) & 1 ? d.blend : 0u, d.mask, unsigned(depth)};
+    untranslated_ = false;
+    if (untranslatedPrograms_.count({d.vs, d.ps})) { untranslated_ = true; return nil; }
     if (asyncPipelines) {
         std::lock_guard<std::mutex> lock(async_->mutex);
         const auto ready = async_->ready.find(key);
@@ -108,8 +110,16 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     if (d.ps || d.colour) ps = translateGCN(code_, d.ps, psOptions);
     else ps.source = "GCN_FN void ps_program(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) { (void)L; (void)M; (void)Q; }\n";
     compiling = 0;
-    if (!vs) { fail("VS translation: " + vs.error); return nil; }
-    if (!ps) { fail("PS translation: " + ps.error); return nil; }
+    // A program MaxPS4 cannot translate yet: its draws are left out and the
+    // game goes on (CoD's missions met a new instruction every few minutes).
+    if (!vs || !ps) {
+        char where[96];
+        std::snprintf(where, sizeof where, " (VS 0x%llx, PS 0x%llx)", (unsigned long long)d.vs, (unsigned long long)d.ps);
+        lastUntranslated = (!vs ? "VS : " + vs.error : "PS : " + ps.error) + where;
+        untranslatedPrograms_.insert({d.vs, d.ps});
+        untranslated_ = true;
+        return nil;
+    }
     {
         ScalarSites& sites = scalarSites_[d.ps];
         sites.list = ps.sites; sites.words = ps.siteWords;
@@ -955,6 +965,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     deferred_ = false;
     id<MTLRenderPipelineState> state = pipeline(d, format, depthFormat);
     if (!state && deferred_) { ++drawsDeferred; return true; } // its pipeline is still being built
+    if (!state && untranslated_) { ++untranslatedDraws; return true; }
     if (!state) return false;
     DrawState drawState{};
     id<MTLBuffer> memory = guest_;

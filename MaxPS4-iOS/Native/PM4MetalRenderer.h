@@ -128,6 +128,10 @@ public:
     // in drawsDeferred) until ready, instead of blocking the submission.
     bool asyncPipelines = false;
     unsigned drawsDeferred = 0;
+    // Draws left out because a program of theirs could not be translated
+    // (the run goes on); the latest reason.
+    unsigned untranslatedDraws = 0;
+    std::string lastUntranslated;
     unsigned pipelinesPending() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->pending.size()); }
     unsigned pipelinesRefused() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->refused.size()); }
     std::string pipelineError() const { std::lock_guard<std::mutex> lock(async_->mutex); return async_->lastError; }
@@ -211,6 +215,8 @@ private:
     };
     std::shared_ptr<AsyncPipelines> async_ = std::make_shared<AsyncPipelines>();
     bool deferred_ = false; // the last pipeline() call left its draw to a pending build
+    bool untranslated_ = false; // the last pipeline() call met a program it cannot translate
+    std::set<std::pair<std::uint64_t, std::uint64_t>> untranslatedPrograms_; // (VS, PS)
     std::string lastDispatchNote_;
     struct PendingGuestWrite { std::uint64_t address, size, offset; id<MTLBuffer> buffer; };
     std::vector<PendingGuestWrite> pendingGuestWrites_;
