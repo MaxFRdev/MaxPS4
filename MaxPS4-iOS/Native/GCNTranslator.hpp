@@ -752,15 +752,22 @@ private:
         const std::uint32_t w = i.word0, w1 = i.word1;
         const unsigned vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff;
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
-        const unsigned op = i.opcode;
+        const unsigned raw = i.opcode;
+        // image_gather4* (64-95) address like the matching image_sample*
+        // (32-63); image_sample_cd* (104-111) like image_sample_d*.
+        const bool gather = raw >= 64 && raw < 96;
+        unsigned op = gather ? raw - 32 : raw;
+        if (raw >= 104 && raw < 112) op = 34 + ((raw & 2) ? 8 : 0) + (raw >= 108 ? 16 : 0);
         unsigned first = 0;
-        // Address order: offset (_O), bias (_B), depth reference (_C), coordinates.
+        // Address order: offset (_O), bias (_B), depth reference (_C),
+        // derivatives (_D, 2D: four), coordinates.
         const bool compare = (op >= 40 && op < 48) || (op >= 56 && op < 64);
         const unsigned base = op & ~16u;
         if (base == 37 || base == 38 || base == 45 || base == 46) first = 1;
         if (op >= 48 && op < 64) first += 1;
         const unsigned reference = first;
         if (compare) first += 1;
+        if (base == 34 || base == 35 || base == 42 || base == 43) first += 4;
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
         std::string call;
@@ -773,8 +780,16 @@ private:
                    v(vaddr + first + 1) + "))";
             if (compare)
                 call = "gcn_depth_compare(" + call + ", gf(" + v(vaddr + reference) + "), (" + s(samp) + " >> 12) & 7u)";
-        } else if (op == 0 || op == 1) {
+        } else if (op == 0 || op == 1 || op == 2) {
+            // image_load_mip reads level 0 like image_load.
             call = "gcn_image_load(M, t, " + v(vaddr) + ", " + v(vaddr + 1) + ")";
+        } else if (op == 96) {
+            // image_get_lod: level 0 (MaxPS4 textures have no mip chain).
+            body_ += "if (" + std::string(ex()) + ") { ";
+            for (unsigned n = 0, out = 0; n < 4; ++n)
+                if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = 0u; ";
+            body_ += "}";
+            return out_.error.empty();
         } else if (op == 8 || op == 9) {
             // image_store(_mip): the enabled components, in order, from vdata.
             if (options_.stage != GCNStage::compute) return fail("image store outside a compute program");
@@ -793,10 +808,18 @@ private:
             body_ += "}";
             sregs_.insert(126);
             return out_.error.empty();
-        } else return fail("unsupported image access " + in.name);
+        } else return fail("unsupported image access " + in.name + " (opcode " + std::to_string(raw) + ")");
         body_ += "if (" + std::string(ex()) + ") { " + res + "float4 c = " + call + "; ";
-        for (unsigned n = 0, out = 0; n < 4; ++n)
-            if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(c[" + std::to_string(n) + "]); ";
+        if (gather) {
+            // image_gather4: the dmask component of the 2x2 footprint, in four
+            // registers. Approximated by the filtered sample, four times.
+            unsigned component = 0;
+            while (component < 3 && !((dmask >> component) & 1)) ++component;
+            for (unsigned n = 0; n < 4; ++n) body_ += v(vdata + n) + " = gu(c[" + std::to_string(component) + "]); ";
+        } else {
+            for (unsigned n = 0, out = 0; n < 4; ++n)
+                if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(c[" + std::to_string(n) + "]); ";
+        }
         body_ += "}";
         sregs_.insert(126);
         return out_.error.empty();
