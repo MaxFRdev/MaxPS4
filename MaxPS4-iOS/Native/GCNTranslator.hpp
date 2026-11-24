@@ -275,6 +275,7 @@ private:
         case GCNEncoding::vintrp: return vintrp(in);
         case GCNEncoding::ds: return ds(in);
         case GCNEncoding::mubuf: return mubuf(in);
+        case GCNEncoding::mtbuf: return mubuf(in);
         case GCNEncoding::mimg: return mimg(in);
         case GCNEncoding::exp: return exportOp(in);
         default: return false;
@@ -715,7 +716,13 @@ private:
         else if (op == 13 || op == 29) count = 2; else if (op == 14 || op == 30) count = 4; else if (op == 15 || op == 31) count = 3;
         else return fail("unsupported buffer access");
         if (store && options_.stage != GCNStage::compute) return fail("buffer store outside a compute program");
-        const std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + s(rsrc + 3) + "}}; ";
+        // tbuffer_*_format (MTBUF, opcodes 0-7 like MUBUF's format ones): the
+        // instruction's DFMT (bits 19-22) and NFMT (23-25) replace the V#'s
+        // NUM_FORMAT (word 3 bits 12-14) and DATA_FORMAT (15-18).
+        std::string word3 = s(rsrc + 3);
+        if (i.encoding == GCNEncoding::mtbuf)
+            word3 = "((" + word3 + " & ~0x7f000u) | " + std::to_string(((w >> 23) & 7) << 12 | ((w >> 19) & 15) << 15) + "u)";
+        const std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + word3 + "}}; ";
         const std::string index = idxen ? v(vaddr) : "0u", voffset = offen ? v(vaddr + (idxen ? 1 : 0)) : "0u";
         const std::string args = index + ", " + voffset + ", " + scalar(w1 >> 24, i) + ", " + std::to_string(w & 0xfff) + "u, " +
                                  (idxen ? "true" : "false") + ", " + (offen ? "true" : "false");
