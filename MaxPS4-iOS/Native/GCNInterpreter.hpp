@@ -956,10 +956,11 @@ private:
             std::copy_n(d, 8, descriptor.begin()); imageResource(descriptor);
         }
         const unsigned op = i.opcode;
-        // Address layout: [offset][bias][compare] coordinates [lod/clamp].
+        // Address layout: [offset][bias][compare][derivatives] coordinates [lod/clamp].
         unsigned first = 0;
         if (op == 37 || op == 38 || op == 53 || op == 54) first = 1;      // bias variants
         if (op >= 48 && op < 64) first += 1;                              // _o: offsets first
+        if (op == 34 || op == 35 || op == 50 || op == 51) first += 4;      // _d: ds/dx, dt/dx, ds/dy, dt/dy
         if ((op >= 40 && op < 48) || (op >= 56 && op < 64)) return fail("depth-compare sampling");
         const bool sampleOp = op >= 32 && op < 64, load = op == 0 || op == 1, store = op == 8;
         if (!sampleOp && !load && !store) return false;
