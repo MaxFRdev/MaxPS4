@@ -99,8 +99,16 @@ final class MaxPS4GameSource: @unchecked Sendable {
         guard let engine else { return current }
         var activity = [CChar](repeating: 0, count: 4096)
         _ = maxps4_fex_engine_thread_activity(engine, &activity, activity.count)
-        return current + "\n" + String(cString: activity)
+        // A stop that does not end: threads stuck outside HLE cannot be told
+        // to stop. Where each one is in host code, read every 5 s.
+        if stopStacksAt.map({ Date().timeIntervalSince($0) >= 5 }) ?? true {
+            var stacks = [CChar](repeating: 0, count: 16384)
+            stopStacks = maxps4_fex_engine_host_stacks(engine, &stacks, stacks.count) == 0 ? String(cString: stacks) : ""
+            stopStacksAt = Date()
+        }
+        return current + "\n" + String(cString: activity) + stopStacks
     }
+    private var stopStacks = "", stopStacksAt: Date?
     // What the last run left for the player, set before run() returns.
     struct Outcome { var missing: [String] = []; var crashed = false; var report: URL? }
     // What the last run's sceSystemServiceLoadExec asked for: the /app0
