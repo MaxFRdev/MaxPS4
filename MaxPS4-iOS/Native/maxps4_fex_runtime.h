@@ -188,6 +188,8 @@ typedef struct maxps4_fex_thread_sample {
     uint32_t rip_count;
 } maxps4_fex_thread_sample;
 int32_t maxps4_fex_engine_sample_main_thread(maxps4_fex_engine *engine, maxps4_fex_thread_sample *sample);
+// Host call stacks of every live guest thread, for a frozen run (Apple only).
+int32_t maxps4_fex_engine_host_stacks(maxps4_fex_engine *engine, char *text, size_t capacity);
 // CPU profile of the main guest thread for the next run (diagnostic, off by
 // default; Apple devices only): sampled every 5 ms through Mach suspension.
 int32_t maxps4_fex_engine_set_profiling(maxps4_fex_engine *engine, uint32_t enabled);

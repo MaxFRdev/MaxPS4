@@ -338,6 +338,12 @@ final class MaxPS4GameSource: @unchecked Sendable {
         lines.append("Registres hôte : " + registers.joined(separator: " "))
         let frames = text(sample.backtrace)
         if !frames.isEmpty { lines.append("Pile thread 1 : " + frames) }
+        // Thread 1 frozen outside HLE: where every other thread is stuck too.
+        var stacks = [CChar](repeating: 0, count: 16384)
+        if maxps4_fex_engine_host_stacks(engine, &stacks, stacks.count) == 0 {
+            let all = String(cString: stacks).trimmingCharacters(in: .newlines)
+            if !all.isEmpty { lines.append(all) }
+        }
         return lines.joined(separator: "\n")
     }
 

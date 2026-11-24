@@ -84,6 +84,7 @@ class GuestThreads;
 // scePthreadCreate/Join/Exit and the entry's exit function for a general run
 // (see GuestThreads), defined once GuestThreads is complete.
 bool guest_thread_ending(const GuestThreads& threads);
+std::string guest_thread_host_stacks(GuestThreads& threads);
 int64_t guest_thread_service(GuestThreads& threads, maxps4::PS4KernelService service,
                              const maxps4::PS4KernelCall& call);
 // First exported name of an HLE service, for the boot probe's trace.
@@ -1336,6 +1337,65 @@ public:
         out = first_fault;
         return first_fault.signal != 0;
     }
+    // The host call stack of every live guest thread (main included), read
+    // through Mach for a frozen run: each is suspended only while its
+    // registers and frame chain are copied; symbols are named after resume.
+    std::string host_stacks() {
+        std::string out;
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__)) && !defined(VIXL_SIMULATOR)
+        std::vector<std::pair<uint64_t, pthread_t>> list;
+        {
+            std::lock_guard guard(lock);
+            list.emplace_back(1, main_thread);
+            for (auto& thread : threads)
+                if (thread.used && !thread.finished && thread.host.joinable())
+                    list.emplace_back(thread.id, const_cast<std::thread&>(thread.host).native_handle());
+        }
+        auto strip = [](uint64_t address) {
+#if __has_feature(ptrauth_calls)
+            return uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(address), ptrauth_key_return_address)));
+#else
+            return address;
+#endif
+        };
+        for (const auto& [id, host] : list) {
+            if (::pthread_equal(host, ::pthread_self())) continue;
+            const thread_act_t port = ::pthread_mach_thread_np(host);
+            const auto top = reinterpret_cast<uintptr_t>(::pthread_get_stackaddr_np(host));
+            const uintptr_t low = top - ::pthread_get_stacksize_np(host);
+            std::array<uint64_t, 8> frames {};
+            size_t depth = 0;
+            arm_thread_state64_t state {};
+            mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+            if (::thread_suspend(port) != KERN_SUCCESS) continue;
+            const bool read = ::thread_get_state(port, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state), &count) == KERN_SUCCESS;
+            if (read) {
+                frames[depth++] = strip(arm_thread_state64_get_pc(state));
+                uintptr_t fp = arm_thread_state64_get_fp(state);
+                while (depth < frames.size() && fp >= low && fp % 16 == 0 && fp <= top - 16) {
+                    const auto* frame = reinterpret_cast<const uint64_t*>(fp);
+                    if (frame[1]) frames[depth++] = strip(frame[1]);
+                    if (frame[0] <= fp) break;
+                    fp = frame[0];
+                }
+            }
+            ::thread_resume(port);
+            if (!read) continue;
+            out += "Pile hôte thread " + std::to_string(id) + " :";
+            for (size_t i = 0; i < depth; ++i) {
+                Dl_info info {};
+                char symbol[160];
+                if (::dladdr(reinterpret_cast<void*>(frames[i]), &info) && info.dli_sname)
+                    std::snprintf(symbol, sizeof symbol, "%s %s+0x%llx", i ? " <" : "", info.dli_sname,
+                                  (unsigned long long)(frames[i] - reinterpret_cast<uintptr_t>(info.dli_saddr)));
+                else std::snprintf(symbol, sizeof symbol, "%s 0x%llx", i ? " <" : "", (unsigned long long)frames[i]);
+                out += symbol;
+            }
+            out += "\n";
+        }
+#endif
+        return out;
+    }
 private:
     struct Thread {
         bool used = false, joining = false, finished = false, ends_process = false, detached = false;
@@ -1421,6 +1481,7 @@ private:
     std::atomic<bool> ending_ {false};
 };
 bool guest_thread_ending(const GuestThreads& threads) { return threads.ending(); }
+std::string guest_thread_host_stacks(GuestThreads& threads) { return threads.host_stacks(); }
 int64_t guest_thread_service(GuestThreads& threads, maxps4::PS4KernelService service,
                              const maxps4::PS4KernelCall& call) {
     using maxps4::PS4KernelService;
@@ -3042,6 +3103,16 @@ extern "C" int32_t maxps4_fex_engine_sample_main_thread(maxps4_fex_engine* engin
     out->host_pc = sample.pc; out->host_lr = sample.lr; out->guest_rip = sample.rip; out->location = sample.where;
     name(sample.pc, out->symbol, sizeof out->symbol);
     name(sample.lr, out->caller, sizeof out->caller);
+    return 0;
+}
+extern "C" int32_t maxps4_fex_engine_host_stacks(maxps4_fex_engine* engine, char* text, size_t capacity) {
+    if (!engine || !text || !capacity) return -EINVAL;
+    text[0] = 0;
+    std::lock_guard lock(engine->sample_lock);
+    auto* threads = engine->probe.threads;
+    if (!threads) return -ESRCH;
+    const std::string stacks = guest_thread_host_stacks(*threads);
+    std::snprintf(text, capacity, "%s", stacks.c_str());
     return 0;
 }
 extern "C" int32_t maxps4_fex_engine_set_profiling(maxps4_fex_engine* engine, uint32_t enabled) {
