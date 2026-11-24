@@ -129,6 +129,10 @@ public:
     // in drawsDeferred) until ready, instead of blocking the submission.
     bool asyncPipelines = false;
     unsigned drawsDeferred = 0;
+    // GCN translations reused (same program and user SGPRs, another render
+    // state), and new pipelines put off to keep the frame within its budget.
+    unsigned translationsReused = 0, translationsPutOff = 0;
+    double translateMs = 0; // GCN translation time on the submission thread, in all
     // Draws left out because a program of theirs could not be translated
     // (the run goes on); the latest reason.
     unsigned untranslatedDraws = 0;
@@ -190,6 +194,13 @@ private:
     struct ScalarSites { std::vector<GCNScalarSite> list; std::size_t words = 0; };
     std::map<std::uint64_t, ScalarSites> scalarSites_;
     std::vector<std::uint32_t> siteTable_;
+    // Translations by program and options (translationKey); emptied past 48 MB.
+    std::map<std::string, GCNTranslation> translations_;
+    std::size_t translationBytes_ = 0;
+    GCNTranslation translateCached(std::uint64_t address, const GCNTranslateOptions& options);
+    // Translation time spent in the current 16 ms window (asyncPipelines).
+    std::chrono::steady_clock::time_point translateWindow_{};
+    double translateWindowMs_ = 0;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
     struct AsyncPipelines {
         struct Pending { std::chrono::steady_clock::time_point since; const char* stage; std::string programs; };

@@ -96,6 +96,22 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         std::lock_guard<std::mutex> lock(async_->mutex);
         if (async_->pending.count(key) || async_->refused.count(key)) { deferred_ = true; return nil; }
     }
+    // A mission's first frames met hundreds of new pipelines, each translated
+    // here on the game's submission thread (some programs make 372 KB of MSL):
+    // 1-2 images/s. Past 6 ms of translation in a 16 ms window, the draw waits
+    // for a later frame, like a pipeline Metal is still building.
+    const auto translateStart = std::chrono::steady_clock::now();
+    if (asyncPipelines) {
+        if (translateStart - translateWindow_ > std::chrono::milliseconds(16)) { translateWindow_ = translateStart; translateWindowMs_ = 0; }
+        if (translateWindowMs_ > 6.0) { ++translationsPutOff; deferred_ = true; return nil; }
+    }
+    struct Spent {
+        PM4MetalRenderer& r; std::chrono::steady_clock::time_point since;
+        ~Spent() {
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count();
+            r.translateMs += ms; r.translateWindowMs_ += ms;
+        }
+    } spent{*this, translateStart};
     GCNTranslateOptions vsOptions;
     vsOptions.stage = GCNStage::vertex; vsOptions.name = "vs_program"; vsOptions.userCount = d.vsUserCount;
     for (unsigned k = 0; k < 16; ++k) vsOptions.userData[k] = d.vsUser[k];
@@ -104,10 +120,10 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     psOptions.directLoads = native_ || !guest_; // Each draw is scanned: its table is complete.
     for (unsigned k = 0; k < 16; ++k) psOptions.userData[k] = d.psUser[k];
     compiling = 3;
-    const auto vs = translateGCN(code_, d.vs, vsOptions);
+    const auto vs = translateCached(d.vs, vsOptions);
     // A depth-only draw may have no pixel program (Gnm's null PS): an empty one.
     GCNTranslation ps;
-    if (d.ps || d.colour) ps = translateGCN(code_, d.ps, psOptions);
+    if (d.ps || d.colour) ps = translateCached(d.ps, psOptions);
     else ps.source = "GCN_FN void ps_program(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) { (void)L; (void)M; (void)Q; }\n";
     compiling = 0;
     // A program MaxPS4 cannot translate yet: its draws are left out and the
@@ -284,6 +300,28 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     ++pipelinesBuilt;
     pipelines_[key] = state;
     return state;
+}
+
+// One program draws with many render states (targets, blends, depth): each
+// state is a pipeline, but the program's translation is the same.
+GCNTranslation PM4MetalRenderer::translateCached(std::uint64_t address, const GCNTranslateOptions& options) {
+    std::string key(reinterpret_cast<const char*>(&address), sizeof address);
+    const std::uint32_t flags[3] = {std::uint32_t(options.stage), options.userCount, options.directLoads};
+    key.append(reinterpret_cast<const char*>(flags), sizeof flags);
+    key.append(reinterpret_cast<const char*>(options.userData), sizeof options.userData);
+    key += options.name;
+    // The program's memory may hold another program later (a level loaded):
+    // its first words are part of the key.
+    std::uint32_t words[8] = {};
+    for (unsigned k = 0; k < 8 && code_.read(address + 4 * k, &words[k], 4); ++k) {}
+    key.append(reinterpret_cast<const char*>(words), sizeof words);
+    const auto found = translations_.find(key);
+    if (found != translations_.end()) { ++translationsReused; return found->second; }
+    GCNTranslation made = translateGCN(code_, address, options);
+    if (translationBytes_ > (48u << 20)) { translations_.clear(); translationBytes_ = 0; }
+    translationBytes_ += made.source.size() + key.size();
+    translations_.emplace(std::move(key), made);
+    return made;
 }
 
 // The words of a program, to study a slow pipeline: up to the first

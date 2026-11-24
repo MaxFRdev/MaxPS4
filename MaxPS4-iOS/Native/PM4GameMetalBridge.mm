@@ -134,8 +134,9 @@ struct GameMetalState {
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
         const std::string refusal = renderer.pipelineError();
         const std::string pending = renderer.pipelineStatus();
-        native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés · lectures directes %u sur %u%s%s%s%@",
+        native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés · traduction GCN %.0f ms, %u réutilisées, %u remises à plus tard · lectures directes %u sur %u%s%s%s%@",
             renderer.pipelinesBuilt, renderer.pipelinesReplaced, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
+            renderer.translateMs, renderer.translationsReused, renderer.translationsPutOff,
             renderer.scalarLoadsDirect, renderer.scalarLoadsAll,
             refusal.empty() ? "" : " · dernier refus : ", refusal.c_str(), pending.c_str(), native];
         if (renderer.untranslatedDraws)
