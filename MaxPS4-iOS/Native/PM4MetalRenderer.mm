@@ -539,6 +539,9 @@ bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> c
         target->fresh = false;
         ++dispatchesEncoded;
         ++targetsSynced;
+        char line[96];
+        std::snprintf(line, sizeof line, "\n  - remplissage 0x%08x, %llu octets", value, (unsigned long long)bytes);
+        noteInto(address, line);
     } else {
         std::uint64_t failedAddress = address;
         if (writeGuest_(address, fill->second.contents, bytes, &failedAddress) != 0) return false;
@@ -705,6 +708,10 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
                    toTexture:target.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
         target.fresh = false;
         ++targetsSynced;
+        char line[160];
+        std::snprintf(line, sizeof line, "\n  - calcul programme 0x%llx, groupes %ux%ux%u", (unsigned long long)c.program,
+                      c.groups[0], c.groups[1], c.groups[2]);
+        noteInto(address, line);
     }
     [blit endEncoding];
     std::uint64_t written = 0;
@@ -1420,6 +1427,25 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         batchDraws += text;
         std::snprintf(text, sizeof text, ", entrees PS 0x%x (attr0 0x%x, attr1 0x%x)", d.psInputAddr, d.inputCntl[0], d.inputCntl[1]);
         batchDraws += text;
+        if (d.colour) {
+            std::string line;
+            std::snprintf(text, sizeof text, "\n  - dessin PS 0x%llx, %zu sommets, primitive %u, masque 0x%x, blend 0x%x, format %u/%u, profondeur %s%s",
+                          (unsigned long long)d.ps, d.indices.size(), d.primitive, d.mask, d.blend, d.format, d.number,
+                          d.depthTarget ? (d.depthTest ? "testée" : "effacée") : "aucune", scanner_.pixelError().empty() ? "" : ", PS interprété : ");
+            line = text + (scanner_.pixelError().empty() ? std::string() : scanner_.pixelError());
+            std::snprintf(text, sizeof text, ", natives %u sur %zu", nativeBound_, scanner_.images().size());
+            line += text;
+            unsigned shown = 0;
+            for (const auto& t : scanner_.images()) {
+                if (shown++ == 4) break;
+                const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
+                std::snprintf(text, sizeof text, ", texture dfmt %u nfmt %u %ux%u tuilage %u 0x%llx%s", (t[1] >> 20) & 63, (t[1] >> 26) & 15,
+                              (t[2] & 0x3fff) + 1, ((t[2] >> 14) & 0x3fff) + 1, (t[3] >> 20) & 31, (unsigned long long)base,
+                              targets_.count(base) ? " (rendue GPU)" : "");
+                line += text;
+            }
+            noteInto(d.target, std::move(line));
+        }
         listProgram("VS", d.vs, d.vsUser, d.vsUserCount);
         if (d.vsUserCount >= 2) listProgram("Fetch", std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32, d.vsUser, 0);
         listProgram("PS", d.ps, d.psUser, d.psUserCount, listed_.size() < 20); // every pixel program of the batch (menus)
@@ -1497,6 +1523,21 @@ unsigned PM4MetalRenderer::bytesPerPixel(MTLPixelFormat format) {
     case MTLPixelFormatInvalid: return 0;
     default: return 4; // 8_8_8_8 in any order or number, RG16, R32, RGB10A2, RG11B10.
     }
+}
+
+void PM4MetalRenderer::noteInto(std::uint64_t address, std::string line) {
+    if (!into_.count(address) && into_.size() >= 32) into_.erase(into_.begin());
+    auto& lines = into_[address];
+    lines.push_back(std::move(line));
+    if (lines.size() > 6) lines.pop_front();
+}
+
+std::string PM4MetalRenderer::drawsInto(std::uint64_t address) const {
+    const auto found = into_.find(address);
+    if (found == into_.end()) return " aucun relevé";
+    std::string out;
+    for (const auto& line : found->second) out += line;
+    return out;
 }
 
 id<MTLTexture> PM4MetalRenderer::depthTarget(std::uint64_t address) const {

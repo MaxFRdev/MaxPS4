@@ -111,6 +111,9 @@ public:
     unsigned stencilDraws = 0, stencilApproximated = 0, mrtDraws = 0;
     unsigned embeddedDepthDraws = 0; // Colourless draws with Gnm's embedded VS: not drawn.
     std::string depthReport() const;
+    // The last draws and compute stores into colour target `address`, newest
+    // last (recorded on detailed batches): what made the image shown.
+    std::string drawsInto(std::uint64_t address) const;
     // The Metal format of a colour target (CB_COLOR0_INFO FORMAT, NUMBER_TYPE,
     // COMP_SWAP), MTLPixelFormatInvalid when unsupported: 8_8_8_8 UNORM/SRGB
     // (swap 0 or 1) or SNORM, 16_16_16_16 and 16_16 and 16 FLOAT/UNORM/SNORM,
@@ -174,6 +177,8 @@ private:
     // `format`: CB FORMAT (also its T# data format) of a colour target.
     struct Target { id<MTLTexture> texture; bool fresh; unsigned format = 0xa; };
     std::map<std::uint64_t, Target> depthTargets_;
+    std::map<std::uint64_t, std::deque<std::string>> into_; // drawsInto(), 6 per target, 32 targets.
+    void noteInto(std::uint64_t address, std::string line);
     std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.
     std::map<std::uint64_t, unsigned> stencilClearTo_; // The same for stencil.
     // By depth function and write, then stencil faces (see depthState).
