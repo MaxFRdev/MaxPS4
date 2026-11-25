@@ -2963,6 +2963,12 @@ extern "C" int32_t maxps4_fex_engine_ajm_status(maxps4_fex_engine* engine, uint6
     *jobs = engine->libkernel.ajm().jobs(); *samples = engine->libkernel.ajm().samples();
     return 0;
 }
+extern "C" int32_t maxps4_fex_engine_ajm_note(maxps4_fex_engine* engine, char* text, size_t size) {
+    if (!engine || !text || !size) return -EINVAL;
+    const std::string note = engine->libkernel.ajm().note();
+    std::snprintf(text, size, "%s", note.c_str());
+    return 0;
+}
 extern "C" int32_t maxps4_fex_engine_audio_status(maxps4_fex_engine* engine, uint64_t* outputs,
     uint64_t* written, uint64_t* dropped, uint64_t* silent, uint32_t* ports, uint64_t* audible) {
     if (!engine) return -EINVAL;

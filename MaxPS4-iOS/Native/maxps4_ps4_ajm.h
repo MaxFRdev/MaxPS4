@@ -22,7 +22,9 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <cstdio>
 #include <mutex>
+#include <string>
 #include <vector>
 
 // The decoder's code is compiled once, in maxps4_ps4_libkernel.cpp.
@@ -106,6 +108,16 @@ public:
     // Decoded so far, for the report.
     uint64_t jobs() const { return jobs_; }
     uint64_t samples() const { return samples_; }
+    // How runs ended, and the last one's sizes, for the report.
+    std::string note() {
+        std::lock_guard g(lock_);
+        char text[320];
+        std::snprintf(text, sizeof text, "%llu lancements, %llu sans trame (%llu place insuffisante, %llu entrée partielle, %llu instance inconnue), %llu contrôles · dernier : entrée %u octets, sortie %u octets, %u trames, %u canaux, %u Hz, format %u, drapeaux 0x%llx, résultat 0x%x",
+                      (unsigned long long)runs_, (unsigned long long)empty_, (unsigned long long)room_, (unsigned long long)partial_,
+                      (unsigned long long)unknown_, (unsigned long long)controls_, last_.input_size, last_.output_size, last_.frames,
+                      last_.channels, last_.rate, last_.format, (unsigned long long)last_.flags, unsigned(last_.result));
+        return text;
+    }
 
 private:
     static constexpr uint32_t magic = 0x414a4d00u, kind_run = 1, kind_control = 2;
@@ -153,6 +165,7 @@ private:
         if (!out.empty()) memory_.write(address, out.data(), out.size());
     }
     void control(const ControlRecord& r) {
+        ++controls_;
         Sideband s;
         auto found = instances_.find(r.instance);
         if (found == instances_.end()) s.result = result_not_initialized;
@@ -166,8 +179,9 @@ private:
     }
     void run(const RunRecord& r) {
         Sideband s;
+        ++runs_;
         auto found = instances_.find(r.instance);
-        if (found == instances_.end()) { s.result = result_not_initialized; write_sideband(r.sideband, r.sideband_size, r.flags, s); return; }
+        if (found == instances_.end()) { ++unknown_; ++empty_; s.result = result_not_initialized; write_sideband(r.sideband, r.sideband_size, r.flags, s); return; }
         Instance& in = *found->second;
         const bool multiple = r.flags >> 12 & 1;
         const size_t input_size = std::min<size_t>(r.input_size, 16u << 20), output_size = std::min<size_t>(r.output_size, 64u << 20);
@@ -179,11 +193,18 @@ private:
         const size_t worst = MINIMP3_MAX_SAMPLES_PER_FRAME * sample_bytes; // both channels of one frame
         std::vector<uint8_t> output;
         output.reserve(std::min(output_size, worst * 16));
+        mp3dec_frame_info_t peek{};
         size_t consumed = 0;
         mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
         for (;;) {
             if (consumed >= input_size) { if (!s.frames) s.result |= result_partial_input; break; }
-            if (output.size() + worst > output_size) { s.result |= result_not_enough_room; break; }
+            // Room for this frame as it is (mono, or MPEG-2's 576 samples, need
+            // less than the worst case): the header says, without decoding.
+            peek = {};
+            const int frame_samples = mp3dec_decode_frame(&in.decoder, input.data() + consumed, int(input_size - consumed), nullptr, &peek);
+            if (!peek.frame_bytes) { s.result |= result_partial_input; break; } // needs more input
+            const size_t frame_bytes_out = size_t(std::max(frame_samples, 0)) * size_t(std::max(peek.channels, 1)) * sample_bytes;
+            if (output.size() + std::min(frame_bytes_out, worst) > output_size) { s.result |= result_not_enough_room; break; }
             mp3dec_frame_info_t info{};
             const int samples = mp3dec_decode_frame(&in.decoder, input.data() + consumed, int(input_size - consumed), pcm, &info);
             if (!info.frame_bytes) { s.result |= result_partial_input; break; } // needs more input
@@ -210,6 +231,12 @@ private:
         s.consumed = int32_t(consumed); s.written = int32_t(output.size()); s.total = in.total;
         s.channels = in.last_channels; s.rate = in.last_rate; s.bitrate = in.last_bitrate; s.format = in.format;
         write_sideband(r.sideband, r.sideband_size, r.flags, s);
+        if (!s.frames) {
+            ++empty_;
+            if (s.result & result_not_enough_room) ++room_;
+            else if (s.result & result_partial_input) ++partial_;
+        }
+        last_ = {r.input_size, r.output_size, s.frames, s.channels, s.rate, s.format, r.flags, s.result};
     }
 
     PS4GuestMemory& memory_;
@@ -217,6 +244,8 @@ private:
     std::map<uint32_t, std::unique_ptr<Instance>> instances_;
     uint32_t next_ = 0, batches_ = 0;
     uint64_t jobs_ = 0, samples_ = 0;
+    uint64_t runs_ = 0, empty_ = 0, room_ = 0, partial_ = 0, unknown_ = 0, controls_ = 0;
+    struct Last { uint32_t input_size, output_size, frames, channels, rate, format; uint64_t flags; int32_t result; } last_{};
 };
 
 } // namespace maxps4

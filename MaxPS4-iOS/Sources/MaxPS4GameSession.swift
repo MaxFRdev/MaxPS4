@@ -307,7 +307,9 @@ final class MaxPS4GameSource: @unchecked Sendable {
         _ = maxps4_fex_engine_audio_status(engine, &outputs, &written, &dropped, &silent, &ports, &audible)
         var jobs: UInt64 = 0, decoded: UInt64 = 0
         _ = maxps4_fex_engine_ajm_status(engine, &jobs, &decoded)
-        return "Audio : \(ports) ports · \(outputs) appels Output · \(written) trames écrites (\(audible) non muettes) · \(dropped) perdues · \(silent) silencieuses · décodeur AJM : \(jobs) tâches, \(decoded) échantillons MP3"
+        var note = [CChar](repeating: 0, count: 512)
+        _ = maxps4_fex_engine_ajm_note(engine, &note, note.count)
+        return "Audio : \(ports) ports · \(outputs) appels Output · \(written) trames écrites (\(audible) non muettes) · \(dropped) perdues · \(silent) silencieuses · décodeur AJM : \(jobs) tâches, \(decoded) échantillons MP3 · \(String(cString: note))"
     }
     // The CPU profile since the run started; empty unless profiling was asked.
     private func profile(_ engine: OpaquePointer) -> String {
