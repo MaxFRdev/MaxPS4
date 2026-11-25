@@ -424,6 +424,13 @@ private:
             else resource(address, 4ull * count);
         }
         std::uint32_t words[16];
+        // One read for the whole load when it is within its limit (a read goes
+        // through the game's memory lock: one per word cost resource scans dearly).
+        if (offset + 4ull * count <= limit && memory_.read(address, words, 4ull * count)) {
+            for (unsigned n = 0; n < count; ++n) setScalar(d + n, words[n]);
+            if (scalarLoad) scalarLoad(4ull * i.word, address, words, count);
+            return true;
+        }
         for (unsigned n = 0; n < count; ++n) {
             std::uint32_t value = 0;
             if (offset + 4 * n + 4 <= limit && !memory_.read(address + 4 * n, &value, 4)) return fail("unreadable scalar load");
