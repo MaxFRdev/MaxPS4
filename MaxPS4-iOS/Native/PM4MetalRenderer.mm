@@ -155,7 +155,14 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                                gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_, colourSlots(d));
     // Tests: a sample Metal's sampler refuses reads as zero instead of filtering in
     // software, which shows whether a draw really takes the native path.
-    if (native_ && nativeSamplesOnly) {
+    // Programs with many samples get the same: each inlined gcn_sample carries
+    // the whole software sampler (every format, tiling, BC blocks), and CoD's
+    // final composite (19 samples of colour targets, always native) never
+    // finished its pipeline on the iPhone, so the menu never reached the screen.
+    std::size_t sampleSites = 0;
+    for (std::size_t at = 0; (at = ps.source.find("gcn_sample(M", at)) != std::string::npos; ++at) ++sampleSites;
+    if (native_ && (nativeSamplesOnly || sampleSites >= manySamples)) {
+        if (!nativeSamplesOnly) ++nativeOnlyPrograms;
         const std::string sample = "if (gcn_native_sample(M, t, s, unorm, u, v, filtered)) return gcn_texture_swizzle(t, filtered);";
         const auto at = source.find(sample);
         if (at != std::string::npos) source.insert(at + sample.size(), "\n    if (true) return float4(0.0f, 0.0f, 0.0f, 0.0f);");

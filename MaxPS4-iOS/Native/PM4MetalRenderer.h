@@ -70,6 +70,9 @@ public:
     unsigned pipelinesReplaced = 0; // Size builds replaced by their default build.
     unsigned scalarLoadsDirect = 0, scalarLoadsAll = 0; // Pixel programs translated so far.
     bool nativeSamplesOnly = false; // Tests only: no software filtering, see the pipeline source.
+    // Pixel programs with this many samples or more sample native textures only (see pipeline()).
+    static constexpr std::size_t manySamples = 8;
+    unsigned nativeOnlyPrograms = 0;
     void listCostly(std::uint64_t address); // Adds a program's words to programListings, once.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
     bool hasPendingGuestWrites() const { return !pendingGuestWrites_.empty(); }

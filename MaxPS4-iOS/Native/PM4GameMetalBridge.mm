@@ -153,6 +153,9 @@ struct GameMetalState {
             programCosts.empty() ? "" : "\nGPU par programme, un lot :", programCosts.c_str(), native];
         native = [NSString stringWithFormat:@"\nDerniers dessins dans l'image affichée 0x%llx :%s%@",
             (unsigned long long)lastShown, renderer.drawsInto(lastShown).c_str(), native];
+        if (renderer.nativeOnlyPrograms)
+            native = [NSString stringWithFormat:@"\nProgrammes sans échantillonnage logiciel (%zu échantillons ou plus) : %u%@",
+                renderer.manySamples, renderer.nativeOnlyPrograms, native];
         if (const std::string probes = renderer.gpuProbes(); !probes.empty())
             native = [NSString stringWithFormat:@"\nPixel central lu sur le GPU après chaque dessin (octets de la texture) :%s%@", probes.c_str(), native];
         if (!renderer.fades.empty()) {
