@@ -1437,11 +1437,30 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             line += text;
             // The first vertex as interpreted: position and parameters 0-1
             // (a fade quad's colour and alpha).
+            float pos[4] = {0, 0, 0, 0}, colour[4] = {-1, -1, -1, -1};
             for (const auto& e : scanner_.vertexExports()) {
                 if (e[0] != 12 && e[0] != 32 && e[0] != 33) continue;
                 std::snprintf(text, sizeof text, ", %s (%g %g %g %g)", e[0] == 12 ? "pos" : e[0] == 32 ? "param0" : "param1",
                               gcn_detail::f32(e[1]), gcn_detail::f32(e[2]), gcn_detail::f32(e[3]), gcn_detail::f32(e[4]));
                 line += text;
+                float* into = e[0] == 12 ? pos : e[0] == 32 ? colour : nullptr;
+                if (into) for (unsigned k = 0; k < 4; ++k) into[k] = gcn_detail::f32(e[1 + k]);
+            }
+            // Full-screen quads over time: a fade's colour and alpha, to see
+            // whether it moves on or stays put.
+            if (d.indices.size() == 6 && pos[0] <= -0.99f && pos[1] <= -0.99f) {
+                const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
+                auto& last = fadeLast_[d.ps];
+                bool moved = now - last.first > 10;
+                for (unsigned k = 0; k < 4; ++k) moved |= std::fabs(colour[k] - last.second[k]) > 0.02f;
+                if (moved) {
+                    last.first = now;
+                    for (unsigned k = 0; k < 4; ++k) last.second[k] = colour[k];
+                    std::snprintf(text, sizeof text, "\n  - %.1f s : PS 0x%llx dans 0x%llx, param0 (%.3g %.3g %.3g %.3g), blend 0x%x", now,
+                                  (unsigned long long)d.ps, (unsigned long long)d.target, colour[0], colour[1], colour[2], colour[3], d.blend);
+                    fades.push_back(text);
+                    if (fades.size() > 24) fades.pop_front();
+                }
             }
             unsigned shown = 0;
             for (const auto& t : scanner_.images()) {

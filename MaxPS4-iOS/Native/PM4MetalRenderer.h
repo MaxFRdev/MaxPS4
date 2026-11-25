@@ -114,6 +114,8 @@ public:
     // The last draws and compute stores into colour target `address`, newest
     // last (recorded on detailed batches): what made the image shown.
     std::string drawsInto(std::uint64_t address) const;
+    // Full-screen quads whose first vertex changed colour (or every 10 s), with the time.
+    std::deque<std::string> fades;
     // The Metal format of a colour target (CB_COLOR0_INFO FORMAT, NUMBER_TYPE,
     // COMP_SWAP), MTLPixelFormatInvalid when unsupported: 8_8_8_8 UNORM/SRGB
     // (swap 0 or 1) or SNORM, 16_16_16_16 and 16_16 and 16 FLOAT/UNORM/SNORM,
@@ -180,6 +182,8 @@ private:
     // drawsInto(): per target (32 at most), the last 10 runs of writes by the same
     // program or fill, each with its first line and how many writes it holds.
     std::map<std::uint64_t, std::deque<std::pair<std::string, unsigned>>> into_;
+    std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
+    std::map<std::uint64_t, std::pair<double, std::array<float, 4>>> fadeLast_; // per pixel program
     void noteInto(std::uint64_t address, std::string line);
     std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.
     std::map<std::uint64_t, unsigned> stencilClearTo_; // The same for stencil.

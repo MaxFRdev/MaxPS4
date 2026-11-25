@@ -153,6 +153,11 @@ struct GameMetalState {
             programCosts.empty() ? "" : "\nGPU par programme, un lot :", programCosts.c_str(), native];
         native = [NSString stringWithFormat:@"\nDerniers dessins dans l'image affichée 0x%llx :%s%@",
             (unsigned long long)lastShown, renderer.drawsInto(lastShown).c_str(), native];
+        if (!renderer.fades.empty()) {
+            std::string fades;
+            for (const auto& line : renderer.fades) fades += line;
+            native = [NSString stringWithFormat:@"\nQuads plein écran au fil du temps :%s%@", fades.c_str(), native];
+        }
         if (otherShown)
             native = [NSString stringWithFormat:@"\nDerniers dessins dans l'image affichée avant 0x%llx :%s%@",
                 (unsigned long long)otherShown, renderer.drawsInto(otherShown).c_str(), native];
