@@ -1435,14 +1435,41 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             line = text + (scanner_.pixelError().empty() ? std::string() : scanner_.pixelError());
             std::snprintf(text, sizeof text, ", natives %u sur %zu", nativeBound_, scanner_.images().size());
             line += text;
+            // The first vertex as interpreted: position and parameters 0-1
+            // (a fade quad's colour and alpha).
+            for (const auto& e : scanner_.vertexExports()) {
+                if (e[0] != 12 && e[0] != 32 && e[0] != 33) continue;
+                std::snprintf(text, sizeof text, ", %s (%g %g %g %g)", e[0] == 12 ? "pos" : e[0] == 32 ? "param0" : "param1",
+                              gcn_detail::f32(e[1]), gcn_detail::f32(e[2]), gcn_detail::f32(e[3]), gcn_detail::f32(e[4]));
+                line += text;
+            }
             unsigned shown = 0;
             for (const auto& t : scanner_.images()) {
                 if (shown++ == 4) break;
                 const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
-                std::snprintf(text, sizeof text, ", texture dfmt %u nfmt %u %ux%u tuilage %u 0x%llx%s", (t[1] >> 20) & 63, (t[1] >> 26) & 15,
-                              (t[2] & 0x3fff) + 1, ((t[2] >> 14) & 0x3fff) + 1, (t[3] >> 20) & 31, (unsigned long long)base,
-                              targets_.count(base) ? " (rendue GPU)" : "");
+                const unsigned dfmt = (t[1] >> 20) & 63, tiling = (t[3] >> 20) & 31;
+                const unsigned w = (t[2] & 0x3fff) + 1, h = ((t[2] >> 14) & 0x3fff) + 1, pitch = ((t[4] >> 13) & 0x3fff) + 1;
+                std::snprintf(text, sizeof text, ", texture dfmt %u nfmt %u %ux%u tuilage %u 0x%llx%s", dfmt, (t[1] >> 26) & 15,
+                              w, h, tiling, (unsigned long long)base, targets_.count(base) ? " (rendue GPU)" : "");
                 line += text;
+                // Its memory at the centre, and the mean of 256 samples, for linear 8 and 8_8_8_8
+                // textures the GPU did not render (a video plane, a fade's white texel).
+                const unsigned bpp = dfmt == 1 ? 1 : dfmt == 10 ? 4 : 0;
+                if (bpp && (tiling == 8 || (w == 1 && h == 1)) && !targets_.count(base)) {
+                    std::uint8_t px[4] = {};
+                    const std::uint64_t centre = base + (std::uint64_t(h / 2) * pitch + w / 2) * bpp;
+                    if (code_.read(centre, px, bpp)) {
+                        unsigned sum = 0, read = 0;
+                        for (unsigned k = 0; k < 256; ++k) {
+                            std::uint8_t b = 0;
+                            const std::uint64_t at = base + (std::uint64_t(h) * k / 256 * pitch + std::uint64_t(w) * (k * 37 % 256) / 256) * bpp;
+                            if (code_.read(at, &b, 1)) { sum += b; ++read; }
+                        }
+                        std::snprintf(text, sizeof text, " (memoire : centre %u %u %u %u, moyenne %u)", px[0], px[1], px[2], px[3],
+                                      read ? sum / read : 0);
+                        line += text;
+                    } else line += " (memoire illisible)";
+                }
             }
             noteInto(d.target, std::move(line));
         }
