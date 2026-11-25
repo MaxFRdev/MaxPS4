@@ -541,6 +541,11 @@ bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> c
         ++targetsSynced;
         char line[96];
         std::snprintf(line, sizeof line, "\n  - remplissage 0x%08x, %llu octets", value, (unsigned long long)bytes);
+        if (shown_.count(address)) {
+            char probeLine[128];
+            std::snprintf(probeLine, sizeof probeLine, "\n  - 0x%llx apres remplissage 0x%08x :", (unsigned long long)address, value);
+            probe(target->texture, address, probeLine, commands);
+        }
         noteInto(address, line);
     } else {
         std::uint64_t failedAddress = address;
@@ -1408,6 +1413,21 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     [encoder drawPrimitives:d.primitive == 6 ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count];
     if (counted) [encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
     if (!batching_) [encoder endEncoding];
+    // The GPU's own result: a flipped buffer's centre pixel right after each
+    // draw into it. The pass ends here (the next draw reopens it, loading what
+    // is there) and a blit copies the pixel to a ring the report reads.
+    if (d.colour && shown_.count(d.target) && target.texture && commands) {
+        float pos[4] = {0, 0, 0, 0}, colour[4] = {-1, -1, -1, -1};
+        for (const auto& e : scanner_.vertexExports()) {
+            float* into = e[0] == 12 ? pos : e[0] == 32 ? colour : nullptr;
+            if (into) for (unsigned k = 0; k < 4; ++k) into[k] = gcn_detail::f32(e[1 + k]);
+        }
+        char line[200];
+        std::snprintf(line, sizeof line, "\n  - 0x%llx apres PS 0x%llx (%zu sommets, blend 0x%x, pos %.3g %.3g, param0 %.3g %.3g %.3g %.3g) :",
+                      (unsigned long long)d.target, (unsigned long long)d.ps, d.indices.size(), d.blend, pos[0], pos[1],
+                      colour[0], colour[1], colour[2], colour[3]);
+        probe(target.texture, d.target, line, commands);
+    }
     if (details_ && batchDraws.size() < 20000) {
         char text[256];
         std::snprintf(text, sizeof text, "\n  - cible 0x%llx %ux%u (swap %u, masque 0x%x, blend 0x%x), %zu sommets, ciseaux %u,%u-%u,%u, PS 0x%llx",
@@ -1490,27 +1510,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                     } else line += " (memoire illisible)";
                 }
             }
-            // The GPU's own result: the target's centre pixel right after this
-            // draw, for a flipped buffer. The pass ends here (the next draw
-            // reopens it, loading what is there) and a blit copies the pixel.
-            if (shown_.count(d.target) && target.texture && commands) {
-                if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
-                id<MTLBuffer> pixel = [device_ newBufferWithLength:16 options:MTLResourceStorageModeShared];
-                id<MTLBlitCommandEncoder> blit = pixel ? [commands blitCommandEncoder] : nil;
-                if (blit) {
-                    std::memset(pixel.contents, 0xee, 16);
-                    const std::size_t bpp = bytesPerPixel(target.texture.pixelFormat);
-                    [blit copyFromTexture:target.texture sourceSlice:0 sourceLevel:0
-                             sourceOrigin:MTLOriginMake(target.texture.width / 2, target.texture.height / 2, 0) sourceSize:MTLSizeMake(1, 1, 1)
-                                 toBuffer:pixel destinationOffset:0 destinationBytesPerRow:bpp ? bpp : 4 destinationBytesPerImage:bpp ? bpp : 4];
-                    [blit endEncoding];
-                    std::snprintf(text, sizeof text, "\n  - 0x%llx apres PS 0x%llx (%zu sommets, blend 0x%x, param0 %.3g %.3g %.3g %.3g) :",
-                                  (unsigned long long)d.target, (unsigned long long)d.ps, d.indices.size(), d.blend,
-                                  colour[0], colour[1], colour[2], colour[3]);
-                    probes_.push_back({pixel, text});
-                    if (probes_.size() > 40) probes_.pop_front();
-                }
-            }
+            noteInto(d.target, std::move(line));
         }
         listProgram("VS", d.vs, d.vsUser, d.vsUserCount);
         if (d.vsUserCount >= 2) listProgram("Fetch", std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32, d.vsUser, 0);
@@ -1603,16 +1603,47 @@ void PM4MetalRenderer::noteInto(std::uint64_t address, std::string line) {
     if (runs.size() > 10) runs.pop_front();
 }
 
-std::string PM4MetalRenderer::gpuProbes() const {
-    std::string out;
-    for (const auto& [pixel, line] : probes_) {
-        const auto* b = static_cast<const std::uint8_t*>(pixel.contents);
-        char text[48];
-        if (b[0] == 0xee && b[1] == 0xee && b[2] == 0xee && b[3] == 0xee) std::snprintf(text, sizeof text, " pas encore lu");
-        else std::snprintf(text, sizeof text, " %u %u %u %u", b[0], b[1], b[2], b[3]);
-        out += line + text;
+void PM4MetalRenderer::probe(id<MTLTexture> texture, std::uint64_t address, std::string line, id<MTLCommandBuffer> commands) {
+    if (!probeRing_) {
+        probeRing_ = [device_ newBufferWithLength:16 * probeSlots options:MTLResourceStorageModeShared];
+        if (!probeRing_) return;
+        std::memset(probeRing_.contents, 0xee, 16 * probeSlots);
     }
-    return out;
+    if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (!blit) return;
+    const unsigned slot = unsigned(probeNext_++ % probeSlots);
+    std::memset(static_cast<std::uint8_t*>(probeRing_.contents) + 16 * slot, 0xee, 16);
+    const std::size_t bpp = bytesPerPixel(texture.pixelFormat);
+    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(texture.width / 2, texture.height / 2, 0)
+               sourceSize:MTLSizeMake(1, 1, 1) toBuffer:probeRing_ destinationOffset:16 * slot
+   destinationBytesPerRow:bpp ? bpp : 4 destinationBytesPerImage:bpp ? bpp : 4];
+    [blit endEncoding];
+    probes_.push_back({slot, address, std::move(line)});
+    if (probes_.size() > probeSlots - 8) probes_.pop_front();
+}
+
+std::string PM4MetalRenderer::gpuProbes() const {
+    // Only the readings where a buffer's pixel changed (and its first one):
+    // what turned it from one colour to another.
+    std::deque<std::string> changes; // the last 60
+    std::map<std::uint64_t, std::uint32_t> last;
+    for (const auto& p : probes_) {
+        const auto* b = static_cast<const std::uint8_t*>(probeRing_.contents) + 16 * p.slot;
+        std::uint32_t value; std::memcpy(&value, b, 4);
+        if (value == 0xeeeeeeeeu) continue; // not run yet
+        const auto found = last.find(p.address);
+        if (found != last.end() && found->second == value) continue;
+        last[p.address] = value;
+        char text[40];
+        std::snprintf(text, sizeof text, " %u %u %u %u", b[0], b[1], b[2], b[3]);
+        changes.push_back(p.line + text);
+        if (changes.size() > 60) changes.pop_front();
+    }
+    std::string out;
+    for (const auto& change : changes) out += change;
+    std::snprintf(text_, sizeof text_, "\n  (%zu lectures, les 60 derniers changements au plus)", probes_.size());
+    return out + text_;
 }
 
 std::string PM4MetalRenderer::drawsInto(std::uint64_t address) const {

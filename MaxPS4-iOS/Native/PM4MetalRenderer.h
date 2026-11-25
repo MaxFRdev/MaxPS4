@@ -115,7 +115,7 @@ public:
     // last (recorded on detailed batches): what made the image shown.
     std::string drawsInto(std::uint64_t address) const;
     // Flipped buffers (the bridge says), whose centre pixel is read back after
-    // each detailed draw: the last 40 readings, bytes in texture order.
+    // each draw or fill into them: the readings that changed it, bytes in texture order.
     void noteShown(std::uint64_t address) { if (shown_.size() < 8) shown_.insert(address); }
     std::string gpuProbes() const;
     // Full-screen quads whose first vertex changed colour (or every 10 s), with the time.
@@ -188,7 +188,13 @@ private:
     std::map<std::uint64_t, std::deque<std::pair<std::string, unsigned>>> into_;
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
     std::set<std::uint64_t> shown_;
-    std::deque<std::pair<id<MTLBuffer>, std::string>> probes_;
+    static constexpr unsigned probeSlots = 512;
+    id<MTLBuffer> probeRing_ = nil;
+    std::uint64_t probeNext_ = 0;
+    struct Probe { unsigned slot; std::uint64_t address; std::string line; };
+    std::deque<Probe> probes_;
+    mutable char text_[64] = {};
+    void probe(id<MTLTexture> texture, std::uint64_t address, std::string line, id<MTLCommandBuffer> commands);
     std::map<std::uint64_t, std::pair<double, std::array<float, 4>>> fadeLast_; // per pixel program
     void noteInto(std::uint64_t address, std::string line);
     std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.
