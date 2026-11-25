@@ -263,7 +263,8 @@ private:
     static MTLCompileOptions* compileOptions();
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
-    bool fillProgram(std::uint64_t address);
+    // 0: not a fill; 1: Gnmx's table fill; 2: a fill with one value from a constant buffer.
+    int fillProgram(std::uint64_t address);
     bool fillDispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     id<MTLLibrary> library(const std::string& source);
     std::map<std::uint64_t, Target> targets_;
@@ -303,7 +304,7 @@ private:
     id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt, bool snorm = false);
     id<MTLTexture> thinTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt);
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
-    std::map<std::uint64_t, bool> fillPrograms_;
+    std::map<std::uint64_t, int> fillPrograms_;
     std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.
     id<MTLCommandBuffer> sharedOwner_ = nil;
     Shared sharedRange(std::uint64_t base, std::uint64_t size, bool texture, id<MTLCommandBuffer> commands);

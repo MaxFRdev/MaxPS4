@@ -421,35 +421,51 @@ id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
     return state;
 }
 
-// Gnmx's buffer fill (cs_set_uint): out[i] = table[i & mask] below a count.
-bool PM4MetalRenderer::fillProgram(std::uint64_t address) {
+// Gnmx's buffer fill (cs_set_uint): out[i] = table[i & mask] below a count (1).
+// CoD's clear: out[i] = constant buffer's first word below out's record count (2).
+int PM4MetalRenderer::fillProgram(std::uint64_t address) {
     const auto known = fillPrograms_.find(address);
     if (known != fillPrograms_.end()) return known->second;
-    static const char* const expected[] = {
+    static const char* const table[] = {
         "s_mov_b32 vcc_hi, 0xd", "s_lshl_b32 vcc_lo, s12, 6", "s_buffer_load_dword s12, s[8:11], 0x0",
         "v_add_i32 v0, vcc, vcc_lo, v0", "s_waitcnt lgkmcnt(0)", "v_cmpx_gt_u32 vcc, s12, v0", "s_cbranch_execz 18",
         "s_buffer_load_dword s8, s[8:11], 0x1", "s_waitcnt lgkmcnt(0)", "v_and_b32 v1, s8, v0",
         "buffer_load_format_x v1, v1, s[0:3], 0 idxen", "v_cmpx_gt_u32 s[0:1], s6, v0", "s_waitcnt vmcnt(0) lgkmcnt(15)",
-        "buffer_store_format_x v1, v0, s[4:7], 0 idxen", "s_endpgm"};
+        "buffer_store_format_x v1, v0, s[4:7], 0 idxen", "s_endpgm", nullptr};
+    // CoD's missions ran it about 75 times a second, each a GPU wait and 2.3 MiB
+    // copied in and out (22 s of waiting in 80 s, 2 images/s).
+    static const char* const constant[] = {
+        "s_mov_b32 vcc_hi, 0x9", "s_buffer_load_dword s4, s[4:7], 0x0", "s_mul_i32 vcc_lo, s8, 64",
+        "v_sad_u32 v0, vcc_lo, 0, v0", "s_waitcnt lgkmcnt(0)", "v_mov_b32 v1, s4", "v_cmpx_gt_u32 s[4:5], s2, v0",
+        "buffer_store_format_x v1, v0, s[0:3], 0 idxen", "s_endpgm", nullptr};
     std::uint32_t words[32] = {};
-    bool same = code_.read(address, words, sizeof words);
-    std::size_t at = 0;
-    for (const char* line : expected) {
-        GCNInstruction i;
-        if (!same || decodeGCNInstruction(words + at, 32 - at, at, i) != GCNError::none) { same = false; break; }
-        const std::string text = gcnDisassemble(i);
-        // Sonic Mania's compiler multiplies where Mortal Kombat's shifts.
-        if (text != line && !(line == expected[1] && text == "s_mul_i32 vcc_lo, s12, 64")) { same = false; break; }
-        at += i.size;
-    }
-    return fillPrograms_[address] = same;
+    const bool readable = code_.read(address, words, sizeof words);
+    auto matches = [&](const char* const* expected, const char* shifted, const char* multiplied) {
+        if (!readable) return false;
+        std::size_t at = 0;
+        for (const char* const* line = expected; *line; ++line) {
+            GCNInstruction i;
+            if (decodeGCNInstruction(words + at, 32 - at, at, i) != GCNError::none) return false;
+            const std::string text = gcnDisassemble(i);
+            // Sonic Mania's compiler multiplies where Mortal Kombat's shifts.
+            if (text != *line && !(std::string(*line) == shifted && text == multiplied) &&
+                !(std::string(*line) == multiplied && text == shifted)) return false;
+            at += i.size;
+        }
+        return true;
+    };
+    int kind = matches(table, "s_lshl_b32 vcc_lo, s12, 6", "s_mul_i32 vcc_lo, s12, 64") ? 1
+             : matches(constant, "s_lshl_b32 vcc_lo, s8, 6", "s_mul_i32 vcc_lo, s8, 64") ? 2 : 0;
+    return fillPrograms_[address] = kind;
 }
 
 // A fill without its kernel, whose lanes cost far more than the stores: a blit
 // into a target, or a write to guest memory. False: run it as any dispatch.
 bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> commands) {
-    if (c.userCount != 12 || (c.rsrc2 & 0x380) != 0x80 || c.threads[0] != 64 || c.threads[1] != 1 || c.threads[2] != 1 ||
-        c.groups[1] != 1 || c.groups[2] != 1 || !fillProgram(c.program)) return false;
+    if ((c.rsrc2 & 0x380) != 0x80 || c.threads[0] != 64 || c.threads[1] != 1 || c.threads[2] != 1 ||
+        c.groups[1] != 1 || c.groups[2] != 1) return false;
+    const int kind = fillProgram(c.program);
+    if (!kind || c.userCount != (kind == 1 ? 12u : 8u)) return false;
     // A fill that goes to its kernel costs a GPU wait: the report says why.
     auto refuse = [&](const char* why, std::uint64_t at = 0, std::uint64_t length = 0) {
         ++fillsRefused;
@@ -464,12 +480,21 @@ bool PM4MetalRenderer::fillDispatch(const PM4Dispatch& c, id<MTLCommandBuffer> c
                ((c.user[k + 3] >> 12) & 7) == 4 && ((c.user[k + 3] >> 15) & 15) == 4;
     };
     std::uint32_t limits[2], value = 0; // Count and mask.
-    if (!dwords(0) || !dwords(4)) return refuse("format", base(4));
-    if (!c.user[10] || !code_.read(base(8), limits, sizeof limits)) return refuse("limites illisibles", base(8));
-    if (limits[1]) return refuse("motif de plusieurs valeurs", base(4), limits[1]);
-    if (c.user[2] && !code_.read(base(0), &value, 4)) return refuse("valeur illisible", base(0));
-    const std::uint64_t bytes = 4 * std::min<std::uint64_t>({std::uint64_t(c.groups[0]) * 64, limits[0], c.user[6]});
-    const std::uint64_t address = base(4);
+    std::uint64_t bytes = 0, address = 0;
+    if (kind == 1) {
+        if (!dwords(0) || !dwords(4)) return refuse("format", base(4));
+        if (!c.user[10] || !code_.read(base(8), limits, sizeof limits)) return refuse("limites illisibles", base(8));
+        if (limits[1]) return refuse("motif de plusieurs valeurs", base(4), limits[1]);
+        if (c.user[2] && !code_.read(base(0), &value, 4)) return refuse("valeur illisible", base(0));
+        bytes = 4 * std::min<std::uint64_t>({std::uint64_t(c.groups[0]) * 64, limits[0], c.user[6]});
+        address = base(4);
+    } else {
+        // s[0:3]: the buffer written, its record count the limit; s[4:7]: the value's constant buffer.
+        if (!dwords(0)) return refuse("format", base(0));
+        if (!c.user[6] || !code_.read(base(4), &value, 4)) return refuse("valeur illisible", base(4));
+        bytes = 4 * std::min<std::uint64_t>(std::uint64_t(c.groups[0]) * 64, c.user[2]);
+        address = base(0);
+    }
     if (!bytes || bytes > (256ull << 20)) return refuse("taille", address, bytes);
     auto overlaps = [&](std::uint64_t at, std::uint64_t length) { return address < at + length && at < address + bytes; };
     Target* target = nullptr;
