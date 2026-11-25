@@ -303,9 +303,18 @@ private:
     std::map<std::pair<std::uint64_t, std::uint64_t>, Shared> shared_;
     std::set<std::pair<std::uint64_t, std::uint64_t>> inPlace_; // Guest ranges the GPU reads directly.
     std::set<std::uint64_t> costly_;
-    struct Decoded { id<MTLTexture> texture; std::uint64_t mark, batch; };
+    // `checked`: when its guest memory was last sampled for changes; `bytes`: its decoded size.
+    struct Decoded { id<MTLTexture> texture; std::uint64_t mark, batch; std::chrono::steady_clock::time_point checked; std::uint64_t bytes; };
     std::uint64_t batchSerial_ = 0;
-    std::map<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>, Decoded> bc7Textures_;
+    using DecodedKey = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
+    std::map<DecodedKey, Decoded> bc7Textures_;
+    std::uint64_t decodedBytes_ = 0;
+    // A decoded texture still current (nil otherwise, with its memory's mark).
+    id<MTLTexture> decodedTexture(const DecodedKey& key, std::uint64_t base, std::uint64_t bytes, std::uint64_t& mark);
+    void keepDecoded(const DecodedKey& key, id<MTLTexture> texture, std::uint64_t mark, std::uint64_t bytes);
+public:
+    double textureMs = 0; unsigned texturesDecoded = 0;
+private:
     id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt, bool snorm = false);
     id<MTLTexture> thinTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt);
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.

@@ -865,6 +865,44 @@ void decodeBC4Signed(const std::uint8_t* block, std::uint8_t* out, int pitch, in
 }
 }
 
+// Decoded textures stay until 512 MB of them, least recently used first out
+// (a mission uses many more than the 32 kept before: each was decoded again
+// on the CPU, batches of 400 ms). A game fills its atlases as it loads: 16
+// bytes of every 4 KiB tell whether any part has changed since the decode,
+// sampled at most every 250 ms.
+id<MTLTexture> PM4MetalRenderer::decodedTexture(const DecodedKey& key, std::uint64_t base, std::uint64_t bytes, std::uint64_t& mark) {
+    const auto found = bc7Textures_.find(key);
+    const auto now = std::chrono::steady_clock::now();
+    if (found != bc7Textures_.end()) {
+        if (found->second.batch == batchSerial_) return found->second.texture;
+        if (now - found->second.checked < std::chrono::milliseconds(250)) { found->second.batch = batchSerial_; return found->second.texture; }
+    }
+    mark = 1469598103934665603ull;
+    for (std::uint64_t at = 0; at < bytes; at += 4096) {
+        std::uint8_t sample[16] = {};
+        copyGuest(base + at, sample, std::min<std::uint64_t>(bytes - at, sizeof sample));
+        for (const std::uint8_t byte : sample) mark = (mark ^ byte) * 1099511628211ull;
+    }
+    if (found != bc7Textures_.end() && found->second.mark == mark) {
+        found->second.batch = batchSerial_; found->second.checked = now;
+        return found->second.texture;
+    }
+    return nil;
+}
+
+void PM4MetalRenderer::keepDecoded(const DecodedKey& key, id<MTLTexture> texture, std::uint64_t mark, std::uint64_t bytes) {
+    if (const auto old = bc7Textures_.find(key); old != bc7Textures_.end()) { decodedBytes_ -= old->second.bytes; bc7Textures_.erase(old); }
+    constexpr std::uint64_t budget = 512ull << 20;
+    while (!bc7Textures_.empty() && decodedBytes_ + bytes > budget) {
+        auto oldest = bc7Textures_.begin();
+        for (auto at = bc7Textures_.begin(); at != bc7Textures_.end(); ++at) if (at->second.batch < oldest->second.batch) oldest = at;
+        decodedBytes_ -= oldest->second.bytes;
+        bc7Textures_.erase(oldest);
+    }
+    bc7Textures_[key] = {texture, mark, batchSerial_, std::chrono::steady_clock::now(), bytes};
+    decodedBytes_ += bytes;
+}
+
 id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt, bool snorm) {
     const std::uint64_t blockBytes = dfmt == 35 || dfmt == 38 ? 8 : 16;
     // BC4 decodes to one channel, BC5 to two, the others to RGBA8.
@@ -873,18 +911,11 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     const std::uint64_t tilesWide = (blocksWide + 7) / 8, tilesHigh = (blocksHigh + 7) / 8;
     const std::uint64_t bytes = tilesWide * tilesHigh * 64 * blockBytes;
     if (!bytes || bytes > (64ull << 20)) return nil;
-    const auto key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32 | std::uint64_t(snorm) << 40, height);
-    const auto found = bc7Textures_.find(key);
-    if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
-    // A game fills its atlases as it loads: 16 bytes of every 4 KiB, once a
-    // batch, tell whether any part has changed since it was decoded.
-    std::uint64_t mark = 1469598103934665603ull;
-    for (std::uint64_t at = 0; at < bytes; at += 4096) {
-        std::uint8_t sample[16] = {};
-        copyGuest(base + at, sample, std::min<std::uint64_t>(bytes - at, sizeof sample));
-        for (const std::uint8_t byte : sample) mark = (mark ^ byte) * 1099511628211ull;
-    }
-    if (found != bc7Textures_.end() && found->second.mark == mark) { found->second.batch = batchSerial_; return found->second.texture; }
+    const DecodedKey key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32 | std::uint64_t(snorm) << 40, height);
+    std::uint64_t mark = 0;
+    if (id<MTLTexture> kept = decodedTexture(key, base, bytes, mark)) return kept;
+    Stopwatch watch{textureMs};
+    ++texturesDecoded;
     std::vector<std::uint8_t> blocks(bytes);
     copyGuest(base, blocks.data(), bytes);
     const std::uint64_t rowBytes = blocksWide * 4 * pixelBytes;
@@ -915,8 +946,7 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
     if (!texture) return nil;
     [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
-    if (bc7Textures_.size() >= 32) bc7Textures_.clear();
-    bc7Textures_[key] = {texture, mark, batchSerial_};
+    keepDecoded(key, texture, mark, pixels.size());
     return texture;
 }
 
@@ -927,16 +957,11 @@ id<MTLTexture> PM4MetalRenderer::thinTexture(std::uint64_t base, std::uint64_t w
     const std::uint64_t tilesWide = (pitch + 7) / 8, tilesHigh = (height + 7) / 8;
     const std::uint64_t bytes = tilesWide * tilesHigh * 64 * pixelBytes;
     if (!bytes || bytes > (64ull << 20) || width > pitch) return nil;
-    const auto key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32, height);
-    const auto found = bc7Textures_.find(key);
-    if (found != bc7Textures_.end() && found->second.batch == batchSerial_) return found->second.texture;
-    std::uint64_t mark = 1469598103934665603ull;
-    for (std::uint64_t at = 0; at < bytes; at += 4096) {
-        std::uint8_t sample[16] = {};
-        copyGuest(base + at, sample, std::min<std::uint64_t>(bytes - at, sizeof sample));
-        for (const std::uint8_t byte : sample) mark = (mark ^ byte) * 1099511628211ull;
-    }
-    if (found != bc7Textures_.end() && found->second.mark == mark) { found->second.batch = batchSerial_; return found->second.texture; }
+    const DecodedKey key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32, height);
+    std::uint64_t mark = 0;
+    if (id<MTLTexture> kept = decodedTexture(key, base, bytes, mark)) return kept;
+    Stopwatch watch{textureMs};
+    ++texturesDecoded;
     std::vector<std::uint8_t> tiled(bytes);
     copyGuest(base, tiled.data(), bytes);
     const std::uint64_t rowBytes = width * pixelBytes;
@@ -952,8 +977,7 @@ id<MTLTexture> PM4MetalRenderer::thinTexture(std::uint64_t base, std::uint64_t w
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
     if (!texture) return nil;
     [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:rowBytes];
-    if (bc7Textures_.size() >= 32) bc7Textures_.clear();
-    bc7Textures_[key] = {texture, mark, batchSerial_};
+    keepDecoded(key, texture, mark, pixels.size());
     return texture;
 }
 
