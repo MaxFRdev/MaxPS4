@@ -177,7 +177,9 @@ private:
     // `format`: CB FORMAT (also its T# data format) of a colour target.
     struct Target { id<MTLTexture> texture; bool fresh; unsigned format = 0xa; };
     std::map<std::uint64_t, Target> depthTargets_;
-    std::map<std::uint64_t, std::deque<std::string>> into_; // drawsInto(), 6 per target, 32 targets.
+    // drawsInto(): per target (32 at most), the last 10 runs of writes by the same
+    // program or fill, each with its first line and how many writes it holds.
+    std::map<std::uint64_t, std::deque<std::pair<std::string, unsigned>>> into_;
     void noteInto(std::uint64_t address, std::string line);
     std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.
     std::map<std::uint64_t, unsigned> stencilClearTo_; // The same for stencil.

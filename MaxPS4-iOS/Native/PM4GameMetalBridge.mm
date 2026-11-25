@@ -86,7 +86,7 @@ struct GameMetalState {
     // Display copies: flipped buffers found among the colour targets or not
     // (then what the game shows was never drawn by Metal), and the last one.
     unsigned shown = 0, absent = 0;
-    uint64_t lastShown = 0;
+    uint64_t lastShown = 0, otherShown = 0; // The last flipped buffer, and the one before it.
     // Compute dispatches run as kernels, or refused (and skipped) with the last reason.
     unsigned computeRun = 0, computeRefused = 0;
     // Waits for compute results inside submissions, and how long batches took.
@@ -153,6 +153,9 @@ struct GameMetalState {
             programCosts.empty() ? "" : "\nGPU par programme, un lot :", programCosts.c_str(), native];
         native = [NSString stringWithFormat:@"\nDerniers dessins dans l'image affichée 0x%llx :%s%@",
             (unsigned long long)lastShown, renderer.drawsInto(lastShown).c_str(), native];
+        if (otherShown)
+            native = [NSString stringWithFormat:@"\nDerniers dessins dans l'image affichée avant 0x%llx :%s%@",
+                (unsigned long long)otherShown, renderer.drawsInto(otherShown).c_str(), native];
         return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés, %u grandes zones partagées (%u lues sans copie)\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées · dernier : %s\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nÉchantillons dessinés par dessin (dernier lot) :%s\nDessins du dernier lot :%s\nProgrammes des premiers dessins :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused, renderer.rangesShared, renderer.rangesMapped,
             stats.skipped, renderer.targetCount(), stats.dispatches, computeRun - renderer.dispatchesWithoutEffect,
@@ -425,6 +428,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
     std::unique_lock<std::mutex> lock(s.mutex);
     if (!s.error.empty() || !width || !height || width > 1920 || height > 1080) return nil;
     id<MTLTexture> source = s.renderer.target(address);
+    if (s.lastShown != address) s.otherShown = s.lastShown;
     s.lastShown = address;
     if (!source || source.width < width || source.height < height) {
         ++s.absent;

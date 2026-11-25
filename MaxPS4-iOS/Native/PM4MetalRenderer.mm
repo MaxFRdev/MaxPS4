@@ -1554,16 +1554,24 @@ unsigned PM4MetalRenderer::bytesPerPixel(MTLPixelFormat format) {
 
 void PM4MetalRenderer::noteInto(std::uint64_t address, std::string line) {
     if (!into_.count(address) && into_.size() >= 32) into_.erase(into_.begin());
-    auto& lines = into_[address];
-    lines.push_back(std::move(line));
-    if (lines.size() > 6) lines.pop_front();
+    auto& runs = into_[address];
+    // A run is writes whose line starts alike up to the first comma (same pixel
+    // program, same fill value): text drawn glyph by glyph then leaves room for
+    // what drew the background before it.
+    const auto key = [](const std::string& s) { return s.substr(0, s.find(',')); };
+    if (!runs.empty() && key(runs.back().first) == key(line)) { ++runs.back().second; return; }
+    runs.emplace_back(std::move(line), 1u);
+    if (runs.size() > 10) runs.pop_front();
 }
 
 std::string PM4MetalRenderer::drawsInto(std::uint64_t address) const {
     const auto found = into_.find(address);
     if (found == into_.end()) return " aucun relevé";
     std::string out;
-    for (const auto& line : found->second) out += line;
+    for (const auto& [line, count] : found->second) {
+        out += line;
+        if (count > 1) out += " (x" + std::to_string(count) + ")";
+    }
     return out;
 }
 
