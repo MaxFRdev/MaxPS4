@@ -1490,7 +1490,27 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                     } else line += " (memoire illisible)";
                 }
             }
-            noteInto(d.target, std::move(line));
+            // The GPU's own result: the target's centre pixel right after this
+            // draw, for a flipped buffer. The pass ends here (the next draw
+            // reopens it, loading what is there) and a blit copies the pixel.
+            if (shown_.count(d.target) && target.texture && commands) {
+                if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
+                id<MTLBuffer> pixel = [device_ newBufferWithLength:16 options:MTLResourceStorageModeShared];
+                id<MTLBlitCommandEncoder> blit = pixel ? [commands blitCommandEncoder] : nil;
+                if (blit) {
+                    std::memset(pixel.contents, 0xee, 16);
+                    const std::size_t bpp = bytesPerPixel(target.texture.pixelFormat);
+                    [blit copyFromTexture:target.texture sourceSlice:0 sourceLevel:0
+                             sourceOrigin:MTLOriginMake(target.texture.width / 2, target.texture.height / 2, 0) sourceSize:MTLSizeMake(1, 1, 1)
+                                 toBuffer:pixel destinationOffset:0 destinationBytesPerRow:bpp ? bpp : 4 destinationBytesPerImage:bpp ? bpp : 4];
+                    [blit endEncoding];
+                    std::snprintf(text, sizeof text, "\n  - 0x%llx apres PS 0x%llx (%zu sommets, blend 0x%x, param0 %.3g %.3g %.3g %.3g) :",
+                                  (unsigned long long)d.target, (unsigned long long)d.ps, d.indices.size(), d.blend,
+                                  colour[0], colour[1], colour[2], colour[3]);
+                    probes_.push_back({pixel, text});
+                    if (probes_.size() > 40) probes_.pop_front();
+                }
+            }
         }
         listProgram("VS", d.vs, d.vsUser, d.vsUserCount);
         if (d.vsUserCount >= 2) listProgram("Fetch", std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32, d.vsUser, 0);
@@ -1581,6 +1601,18 @@ void PM4MetalRenderer::noteInto(std::uint64_t address, std::string line) {
     if (!runs.empty() && key(runs.back().first) == key(line)) { ++runs.back().second; return; }
     runs.emplace_back(std::move(line), 1u);
     if (runs.size() > 10) runs.pop_front();
+}
+
+std::string PM4MetalRenderer::gpuProbes() const {
+    std::string out;
+    for (const auto& [pixel, line] : probes_) {
+        const auto* b = static_cast<const std::uint8_t*>(pixel.contents);
+        char text[48];
+        if (b[0] == 0xee && b[1] == 0xee && b[2] == 0xee && b[3] == 0xee) std::snprintf(text, sizeof text, " pas encore lu");
+        else std::snprintf(text, sizeof text, " %u %u %u %u", b[0], b[1], b[2], b[3]);
+        out += line + text;
+    }
+    return out;
 }
 
 std::string PM4MetalRenderer::drawsInto(std::uint64_t address) const {

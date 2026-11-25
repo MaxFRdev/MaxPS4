@@ -114,6 +114,10 @@ public:
     // The last draws and compute stores into colour target `address`, newest
     // last (recorded on detailed batches): what made the image shown.
     std::string drawsInto(std::uint64_t address) const;
+    // Flipped buffers (the bridge says), whose centre pixel is read back after
+    // each detailed draw: the last 40 readings, bytes in texture order.
+    void noteShown(std::uint64_t address) { if (shown_.size() < 8) shown_.insert(address); }
+    std::string gpuProbes() const;
     // Full-screen quads whose first vertex changed colour (or every 10 s), with the time.
     std::deque<std::string> fades;
     // The Metal format of a colour target (CB_COLOR0_INFO FORMAT, NUMBER_TYPE,
@@ -183,6 +187,8 @@ private:
     // program or fill, each with its first line and how many writes it holds.
     std::map<std::uint64_t, std::deque<std::pair<std::string, unsigned>>> into_;
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
+    std::set<std::uint64_t> shown_;
+    std::deque<std::pair<id<MTLBuffer>, std::string>> probes_;
     std::map<std::uint64_t, std::pair<double, std::array<float, 4>>> fadeLast_; // per pixel program
     void noteInto(std::uint64_t address, std::string line);
     std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.

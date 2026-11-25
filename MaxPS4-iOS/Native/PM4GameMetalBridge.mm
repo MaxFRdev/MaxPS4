@@ -153,6 +153,8 @@ struct GameMetalState {
             programCosts.empty() ? "" : "\nGPU par programme, un lot :", programCosts.c_str(), native];
         native = [NSString stringWithFormat:@"\nDerniers dessins dans l'image affichée 0x%llx :%s%@",
             (unsigned long long)lastShown, renderer.drawsInto(lastShown).c_str(), native];
+        if (const std::string probes = renderer.gpuProbes(); !probes.empty())
+            native = [NSString stringWithFormat:@"\nPixel central lu sur le GPU après chaque dessin (octets de la texture) :%s%@", probes.c_str(), native];
         if (!renderer.fades.empty()) {
             std::string fades;
             for (const auto& line : renderer.fades) fades += line;
@@ -433,6 +435,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
     std::unique_lock<std::mutex> lock(s.mutex);
     if (!s.error.empty() || !width || !height || width > 1920 || height > 1080) return nil;
     id<MTLTexture> source = s.renderer.target(address);
+    s.renderer.noteShown(address);
     if (s.lastShown != address) s.otherShown = s.lastShown;
     s.lastShown = address;
     if (!source || source.width < width || source.height < height) {
