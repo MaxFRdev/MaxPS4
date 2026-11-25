@@ -3,6 +3,7 @@
 #include "maxps4_ps4_abi.h"
 #include "maxps4_ps4_guest_memory.h"
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -108,6 +109,10 @@ public:
     // `poll`: EBUSY instead of waiting.
     ps4::Error sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll);
     ps4::Error sema_signal(uint64_t handle, int32_t count);
+    // POSIX sem_timedwait: one unit, until `deadline` (CLOCK_REALTIME).
+    ps4::Error sema_wait_until(uint64_t handle, std::chrono::system_clock::time_point deadline);
+    // POSIX sem_getvalue: the count now.
+    ps4::Error sema_value(uint64_t handle, int32_t& value);
     ps4::Error sema_cancel(uint64_t handle, int32_t count, uint64_t waiters);
     // Wait modes: and 1, or 2, then clear all 0x10 or the waited bits 0x20.
     // Attribute 0x10 (single): a second concurrent waiter gets EPERM.

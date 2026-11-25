@@ -727,6 +727,9 @@ constexpr Binding bindings[] = {
     {"sem_destroy", "cDW233RAwWo", PS4KernelService::sem_destroy, "libkernel", true},
     {"sem_wait", "YCV5dGGBcCo", PS4KernelService::sem_wait, "libkernel", true},
     {"sem_post", "IKP8typ0QUk", PS4KernelService::sem_post, "libkernel", true},
+    {"sem_timedwait", "w5IHyvahg-o", PS4KernelService::sem_timedwait, "libkernel", true},
+    {"sem_trywait", "WBWzsRifCEA", PS4KernelService::sem_trywait, "libkernel", true},
+    {"sem_getvalue", "Bq+LRV-N6Hk", PS4KernelService::sem_getvalue, "libkernel", true},
     {"recvmsg", "hI7oVeOluPM", PS4KernelService::net_unavailable, "libkernel", true},
     {"sendmsg", "aNeavPDNKzA", PS4KernelService::net_unavailable, "libkernel", true},
     {"inet_ntop", "5jRCs2axtr4", PS4KernelService::net_ntop, "libkernel", true},
@@ -2246,12 +2249,41 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         if (c.rsi) return kernel_error(notsup); // Shared between processes.
         if (c.rdx > uint64_t(INT32_MAX)) return kernel_error(inval);
         return kernel_error(threads_.sema_create(c.rdi, 0, signed32(c.rdx), INT32_MAX));
-    case S::sem_destroy: case S::sem_wait: case S::sem_post: {
+    case S::sem_destroy: case S::sem_wait: case S::sem_post:
+    case S::sem_timedwait: case S::sem_trywait: case S::sem_getvalue: {
         uint8_t cell[8];
         if (!c.rdi || !memory_.read(c.rdi, cell, sizeof(cell))) return kernel_error(inval);
         const uint64_t handle = get_le(cell, 8);
         if (service == S::sem_destroy) return kernel_error(threads_.sema_delete(handle));
         if (service == S::sem_post) return kernel_error(threads_.sema_signal(handle, 1));
+        // sem_trywait: EAGAIN when the count is 0.
+        if (service == S::sem_trywait) {
+            const Error e = threads_.sema_wait(handle, 1, 0, true);
+            return kernel_error(e == busy ? again : e);
+        }
+        // sem_getvalue(sem, int*).
+        if (service == S::sem_getvalue) {
+            int32_t value = 0;
+            if (const Error e = threads_.sema_value(handle, value)) return kernel_error(e);
+            uint8_t wire[4];
+            put_le(wire, 0, uint32_t(value), 4);
+            return c.rsi && memory_.write(c.rsi, wire, 4) ? 0 : kernel_error(fault);
+        }
+        // sem_timedwait(sem, const struct timespec* abstime): CLOCK_REALTIME.
+        if (service == S::sem_timedwait) {
+            uint8_t spec[16];
+            if (!c.rsi || !memory_.read(c.rsi, spec, sizeof(spec))) return kernel_error(fault);
+            const int64_t seconds = int64_t(get_le(spec, 8)), nanos = int64_t(get_le(spec + 8, 8));
+            if (nanos < 0 || nanos >= 1000000000) return kernel_error(inval);
+            // Far deadlines (a game passing INT64_MAX) are capped to a day from now.
+            const auto now = std::chrono::system_clock::now();
+            const auto cap = now + std::chrono::hours(24);
+            const int64_t capSeconds = std::chrono::duration_cast<std::chrono::seconds>(cap.time_since_epoch()).count();
+            const auto deadline = seconds < 0 ? now : seconds >= capSeconds ? cap :
+                std::chrono::system_clock::time_point(std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    std::chrono::seconds(seconds) + std::chrono::nanoseconds(nanos)));
+            return kernel_error(threads_.sema_wait_until(handle, deadline));
+        }
         return kernel_error(threads_.sema_wait(handle, 1, 0, false));
     }
     // sceKernelUuidCreate(SceKernelUuid*): a random version 4 UUID.

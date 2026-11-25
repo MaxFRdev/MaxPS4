@@ -2,6 +2,7 @@
 #include "../Native/maxps4_fex_runtime.h"
 #include "GuestELFFixture.h"
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -157,6 +158,31 @@ int main() {
     assert(call(S::sem_init, 0x11100, 0, 1) == 0);
     assert(call(S::sem_wait, 0x11100) == 0 && call(S::sem_post, 0x11100) == 0 && call(S::sem_wait, 0x11100) == 0);
     assert(call(S::sem_init, 0x11108, 1, 0) == kernel_error(notsup));
+    // sem_trywait, sem_getvalue and sem_timedwait (CoD MWR calls the last
+    // 187 thousand times): a count of 0 makes trywait EAGAIN and a past
+    // deadline ETIMEDOUT; a posted unit is taken at once.
+    {
+        uint8_t value[4] = {}, spec[16] = {};
+        assert(call(S::sem_getvalue, 0x11100, 0x11400) == 0 && memory.read(0x11400, value, 4) && value[0] == 0);
+        assert(call(S::sem_trywait, 0x11100) == kernel_error(again));
+        assert(memory.write(0x11410, spec, sizeof(spec))); // 1970: long past
+        assert(call(S::sem_timedwait, 0x11100, 0x11410) == kernel_error(timedout));
+        assert(call(S::sem_post, 0x11100) == 0 && call(S::sem_post, 0x11100) == 0);
+        assert(call(S::sem_getvalue, 0x11100, 0x11400) == 0 && memory.read(0x11400, value, 4) && value[0] == 2);
+        assert(call(S::sem_timedwait, 0x11100, 0x11410) == 0 && call(S::sem_trywait, 0x11100) == 0);
+        spec[8] = 0xff; spec[9] = 0xff; spec[10] = 0xff; spec[11] = 0xff; // tv_nsec out of range
+        assert(memory.write(0x11410, spec, sizeof(spec)));
+        assert(call(S::sem_timedwait, 0x11100, 0x11410) == kernel_error(inval));
+        // A deadline 50 ms ahead times out after waiting.
+        const auto ahead = std::chrono::system_clock::now() + std::chrono::milliseconds(50);
+        const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(ahead.time_since_epoch()).count();
+        const int64_t parts[2] = {ns / 1000000000, ns % 1000000000};
+        assert(memory.write(0x11410, parts, sizeof(parts)));
+        const auto started = std::chrono::steady_clock::now();
+        assert(call(S::sem_timedwait, 0x11100, 0x11410) == kernel_error(timedout));
+        assert(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(30));
+        assert(call(S::sem_timedwait, 0x11100, 0) == kernel_error(fault));
+    }
     assert(call(S::sem_destroy, 0x11100) == 0 && call(S::sem_post, 0x11100) == kernel_error(srch));
     assert(call(S::uuid_create, 0x11200) == 0);
     {

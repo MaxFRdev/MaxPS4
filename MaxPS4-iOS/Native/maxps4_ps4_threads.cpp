@@ -826,6 +826,30 @@ Error PS4Threads::sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bo
     sema.count -= count;
     return ok;
 }
+Error PS4Threads::sema_wait_until(uint64_t handle, std::chrono::system_clock::time_point deadline) {
+    std::unique_lock<std::mutex> lock(guard_);
+    auto found = std::find_if(semas_.begin(), semas_.end(), [&](const Sema& s) { return s.token && s.token == handle; });
+    if (found == semas_.end()) return srch;
+    Sema& sema = *found;
+    if (sema.count >= 1) { --sema.count; return ok; }
+    const uint64_t generation = sema.generation;
+    ++sema.waiters;
+    auto ready = [&] { return interrupted_ || sema.token != handle || sema.generation != generation || sema.count >= 1; };
+    const bool done = changed_.wait_until(lock, deadline, ready);
+    if (sema.token == handle) --sema.waiters;
+    if (interrupted_) return intr;
+    if (sema.token != handle || sema.generation != generation) return canceled;
+    if (!done || sema.count < 1) return timedout;
+    --sema.count;
+    return ok;
+}
+Error PS4Threads::sema_value(uint64_t handle, int32_t& value) {
+    std::lock_guard<std::mutex> lock(guard_);
+    auto found = std::find_if(semas_.begin(), semas_.end(), [&](const Sema& s) { return s.token && s.token == handle; });
+    if (found == semas_.end()) return srch;
+    value = found->count;
+    return ok;
+}
 Error PS4Threads::sema_signal(uint64_t handle, int32_t count) {
     {
         std::lock_guard<std::mutex> lock(guard_);
