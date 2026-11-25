@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <string>
+#include <unordered_map>
 
 namespace maxps4::gpu {
 struct PM4Range { std::uint64_t base = 0, size = 0; };
@@ -30,7 +32,71 @@ public:
     PM4ResourceScanner& operator=(const PM4ResourceScanner&) = delete;
     // Valid until the next scan. Only storage is reused: code, descriptors and
     // guest values are read again on every draw. Not a concurrent scanner.
+    // A draw scanned before with the same programs, user SGPRs, index range and
+    // scissor, whose scalar loads still read the same words, gets the same
+    // result without the interpreter (CoD's missions: 44 us a draw, thousands of
+    // draws a frame). Addresses computed from vector or image data are assumed
+    // stable for those.
     const std::vector<PM4Range>& scan(const PM4Draw& d) {
+        std::uint32_t lowest = d.indices.empty() ? 0 : d.indices[0], highest = lowest;
+        for (const auto i : d.indices) { lowest = std::min(lowest, i); highest = std::max(highest, i); }
+        std::string key;
+        auto add = [&](const void* p, std::size_t n) { key.append(static_cast<const char*>(p), n); };
+        const std::uint32_t first = d.indices.empty() ? 0 : d.indices[0];
+        const std::uint32_t fields[] = {first, lowest, highest, d.vsUserCount, d.psUserCount, d.psInputAddr,
+                                        d.scissor[0] + d.scissor[2], d.scissor[1] + d.scissor[3]};
+        add(&d.vs, sizeof d.vs); add(&d.ps, sizeof d.ps); add(fields, sizeof fields);
+        add(d.vsUser, sizeof d.vsUser); add(d.psUser, sizeof d.psUser);
+        const auto found = memo_.find(key);
+        if (found != memo_.end() && still(found->second)) {
+            ++memoHits;
+            const Memo& m = found->second;
+            merged_ = m.ranges; images_ = m.images; samplers_ = m.samplers; scalarLoads_ = m.scalarLoads;
+            vsExports_ = m.vsExports; vsRan_ = m.vsRan; vsError_ = m.vsError; psError_ = m.psError;
+            std::copy(d.psUser, d.psUser + 16, psUser_.begin());
+            psUserCount_ = d.psUserCount;
+            return merged_;
+        }
+        ++memoMisses;
+        reads_.clear();
+        // The programs themselves: a level may load others at the same addresses.
+        auto code = [&](std::uint64_t address) {
+            if (!address) return;
+            Read r{address, 8, {}};
+            if (memory_.read(address, r.words.data(), 32)) reads_.push_back(r);
+        };
+        code(d.vs); code(d.ps);
+        if (d.vsUserCount >= 2) code(std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32);
+        scanDraw(d);
+        if (memo_.size() >= 8192) memo_.clear();
+        memo_[std::move(key)] = Memo{merged_, images_, samplers_, scalarLoads_, vsExports_, vsRan_, vsError_, psError_, reads_};
+        return merged_;
+    }
+    unsigned memoHits = 0, memoMisses = 0;
+private:
+    struct Read { std::uint64_t address; unsigned count; std::array<std::uint32_t, 16> words; };
+    struct Memo {
+        std::vector<PM4Range> ranges; std::vector<std::array<std::uint32_t, 8>> images;
+        std::vector<std::array<std::uint32_t, 4>> samplers; std::vector<PM4ScalarLoad> scalarLoads;
+        std::vector<std::array<std::uint32_t, 5>> vsExports; bool vsRan; std::string vsError, psError;
+        std::vector<Read> reads;
+    };
+    std::unordered_map<std::string, Memo> memo_;
+    std::vector<Read> reads_;
+    bool still(const Memo& m) const {
+        for (const auto& r : m.reads) {
+            std::array<std::uint32_t, 16> now{};
+            if (!memory_.read(r.address, now.data(), 4ull * r.count) || !std::equal(now.begin(), now.begin() + r.count, r.words.begin()))
+                return false;
+        }
+        return true;
+    }
+    void record(std::uint64_t address, const std::uint32_t* words, unsigned count) {
+        Read r{address, std::min(count, 16u), {}};
+        std::copy(words, words + r.count, r.words.begin());
+        reads_.push_back(r);
+    }
+    const std::vector<PM4Range>& scanDraw(const PM4Draw& d) {
     constexpr std::uint64_t largest = 256ull << 20;
     found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); scalarLoads_.clear();
     auto note = [&](std::uint64_t base, std::uint64_t bytes) {
@@ -61,6 +127,7 @@ public:
         wave.tiledReadsZero = true;
         wave.buffer = oversized(true);
         if (captureImages_) wave.imageResource = [this](const auto& descriptor) { image(descriptor); };
+        wave.scalarLoad = [this](std::uint64_t, std::uint64_t address, const std::uint32_t* words, unsigned count) { record(address, words, count); };
         for (unsigned k = 0; k < d.vsUserCount; ++k) wave.s[k] = d.vsUser[k];
         wave.v(0, 0) = d.indices.empty() ? 0 : d.indices[0];
         vsRan_ = wave.run(d.vs); // a failure keeps what was found before it
@@ -96,6 +163,7 @@ public:
             PM4ScalarLoad load{pc, address, count, {}};
             std::copy(words, words + count, load.words.begin());
             scalarLoads_.push_back(load);
+            record(address, words, count);
         };
         // A depth-only draw may have no pixel program.
         if (d.ps) wave.run(d.ps);
@@ -112,6 +180,7 @@ public:
     }
     return merged_;
     }
+public:
     // A dispatch: one lane (group 0, thread 0) of its program, whose stores
     // are not written; their resources are also given by stored(). Images
     // the program addresses are captured whatever captureImages.

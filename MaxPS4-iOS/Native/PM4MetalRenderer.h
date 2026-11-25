@@ -138,6 +138,8 @@ public:
     // scans (the GCN interpreter), guest copies, new Metal buffers.
     double encodeMs = 0, scanMs = 0, copyMs = 0, allocateMs = 0;
     unsigned encodedDraws = 0;
+    unsigned scansReused() const { return scanner_.memoHits; }
+    unsigned scansRun() const { return scanner_.memoMisses; }
     // Draws left out because a program of theirs could not be translated
     // (the run goes on); the latest reason.
     unsigned untranslatedDraws = 0;

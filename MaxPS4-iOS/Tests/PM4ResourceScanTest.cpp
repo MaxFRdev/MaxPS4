@@ -67,6 +67,12 @@ int main(int argc, char** argv) {
     bool observed = false;
     for (const auto& range : changed) observed |= range.base == 0x18000 && range.size == 48;
     assert(observed); // Re-read resource descriptors and vertex data too.
+    // The same draw again, its loads unchanged: the remembered scan, same ranges.
+    const unsigned hits = reused.memoHits;
+    const std::vector<PM4Range> before(changed.begin(), changed.end());
+    const auto& again = reused.scan(d);
+    assert(reused.memoHits == hits + 1 && again.size() == before.size());
+    for (std::size_t k = 0; k < before.size(); ++k) assert(again[k].base == before[k].base && again[k].size == before[k].size);
     arena.put(vertexTable, 0x10e00);
     check();
     // The pixel program's constant load reaches its table; a site not run stays 0.
