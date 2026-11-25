@@ -70,6 +70,14 @@ unsigned colourSlots(const PM4Draw& d) {
 }
 }
 
+namespace {
+// Adds the time until it goes out of scope to `total`, in milliseconds.
+struct Stopwatch {
+    double& total; std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+    ~Stopwatch() { total += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count(); }
+};
+}
+
 id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format, MTLPixelFormat depth) {
     const PipelineKey key{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
                           (d.blend >> 30) & 1 ? d.blend : 0u, d.mask, unsigned(depth)};
@@ -793,6 +801,7 @@ PM4MetalRenderer::Shared PM4MetalRenderer::sharedRange(std::uint64_t base, std::
         // At its guest address modulo 256, as in a draw's buffer (native texture views).
         shared = {uploadBuffer(size + (base & 255), commands), base & 255};
         if (!shared.buffer) return shared;
+        Stopwatch watch{copyMs};
         copyGuest(base, static_cast<std::uint8_t*>(shared.buffer.contents) + shared.offset, size);
     }
     ++rangesShared;
@@ -803,24 +812,32 @@ PM4MetalRenderer::Shared PM4MetalRenderer::sharedRange(std::uint64_t base, std::
 id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands) {
     // Each draw keeps its own immutable snapshot until its command buffer has
     // finished. In particular, two draws in the same batch cannot share a slot.
+    // Small requests are rounded up to a power of two so that slots match again
+    // (CoD's missions made 126 000 new buffers in 75 s with exact sizes).
+    if (bytes <= (1u << 20)) { std::size_t rounded = 4096; while (rounded < bytes) rounded <<= 1; bytes = rounded; }
     Upload* best = nullptr;
     for (auto& upload : uploads_) {
-        const auto status = upload.owner.status;
-        if ((status == MTLCommandBufferStatusCompleted || status == MTLCommandBufferStatusError) &&
-            upload.buffer.length >= bytes && (!best || upload.buffer.length < best->buffer.length)) best = &upload;
+        if (upload.length < bytes || (best && upload.length >= best->length)) continue;
+        if (!upload.free) {
+            const auto status = upload.owner.status;
+            upload.free = status == MTLCommandBufferStatusCompleted || status == MTLCommandBufferStatusError;
+        }
+        if (upload.free) best = &upload;
     }
     if (best) {
         best->owner = commands;
+        best->free = false;
         ++buffersReused;
         return best->buffer;
     }
+    Stopwatch watch{allocateMs};
     id<MTLBuffer> buffer = [device_ newBufferWithLength:bytes options:MTLResourceStorageModeShared];
     if (buffer) {
         ++buffersBuilt;
         // Shared ranges are atlases of up to 64 MiB: keep a frame's worth or two.
         constexpr std::uint64_t budget = 384ull << 20;
-        if (uploads_.size() < 256 && bytes <= budget - pooledBytes_) {
-            uploads_.push_back({buffer, commands});
+        if (uploads_.size() < 4096 && bytes <= budget - pooledBytes_) {
+            uploads_.push_back({buffer, commands, bytes, false});
             pooledBytes_ += bytes;
         }
     }
@@ -1044,6 +1061,8 @@ id<MTLSamplerState> PM4MetalRenderer::nativeSampler(const std::array<std::uint32
 }
 
 bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
+    Stopwatch watch{encodeMs};
+    ++encodedDraws;
     error.clear();
     if (!d.colour && !d.depthTarget) return fail("draw with neither colour nor depth");
     // Gnm's embedded full-screen VS has no guest code (address 0). A game clears
@@ -1097,13 +1116,13 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     unsigned slotsUsed = 0;
     if (memory) {
         drawState.base = guestBase_; drawState.size = memory.length;
-        if (native_) scanner_.scan(d); // only for its T#s
+        if (native_) { Stopwatch watch{scanMs}; scanner_.scan(d); } // only for its T#s
     } else {
         // Copies of the ranges this draw's programs read. Each starts at a buffer
         // offset congruent to its guest address modulo 256, so guest alignment
         // (up to 256 bytes) holds in the buffer: a T# base inside a merged range
         // stays aligned for a native texture view.
-        const auto& ranges = scanner_.scan(d);
+        const auto& ranges = [&]() -> const auto& { Stopwatch watch{scanMs}; return scanner_.scan(d); }();
         if (ranges.size() > 16) return fail("more than 16 memory ranges");
         // A large range (a texture atlas, a vertex pool) gets a buffer of its
         // own, copied once per submission and shared by every draw reading it;
@@ -1137,7 +1156,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             }
             offset += (ranges[k].base - offset) & 255;
             // An unreadable range stays zero rather than exposing anything else.
-            copyGuest(ranges[k].base, bytes + offset, ranges[k].size);
+            { Stopwatch watch{copyMs}; copyGuest(ranges[k].base, bytes + offset, ranges[k].size); }
             drawState.ranges[3 * k + 2] = offset;
             offset += ranges[k].size;
         }

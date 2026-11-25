@@ -134,6 +134,10 @@ public:
     // state), and new pipelines put off to keep the frame within its budget.
     unsigned translationsReused = 0, translationsPutOff = 0;
     double translateMs = 0; // GCN translation time on the submission thread, in all
+    // CPU time of encode() for the draws it rendered, and of its parts: resource
+    // scans (the GCN interpreter), guest copies, new Metal buffers.
+    double encodeMs = 0, scanMs = 0, copyMs = 0, allocateMs = 0;
+    unsigned encodedDraws = 0;
     // Draws left out because a program of theirs could not be translated
     // (the run goes on); the latest reason.
     unsigned untranslatedDraws = 0;
@@ -285,7 +289,8 @@ private:
     id<MTLTexture> attachment_ = nil;
     id<MTLTexture> moreAttachments_[7] = {}; // colour targets 1-7 of the open encoder
     id<MTLTexture> drawingMore_[7] = {};     // colour targets 1-7 of the draw being encoded
-    struct Upload { id<MTLBuffer> buffer; id<MTLCommandBuffer> owner; };
+    // `free`: its owner completed (checked once, Metal's status is a message send).
+    struct Upload { id<MTLBuffer> buffer; id<MTLCommandBuffer> owner; std::size_t length; bool free; };
     std::vector<Upload> uploads_;
     std::uint64_t pooledBytes_ = 0;
     id<MTLBuffer> uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands);
