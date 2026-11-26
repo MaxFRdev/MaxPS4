@@ -888,10 +888,15 @@ int main() {
         if (![barrier.report containsString:@"remplissages 3 "]) std::printf("FAIL multiplying fill not recognised:\n%s\n", barrier.report.UTF8String);
         assert([barrier.report containsString:@"remplissages 3 "]);
         std::puts("PASS fill dispatches reach guest memory and targets without a kernel");
+        // An unreadable stream is left out and reported; the game keeps running
+        // (40a2d326: CoD's loading screens ended on one unreadable draw).
         const uint32_t bad[]={0};
-        assert([bridge submit:bad count:1]!=0 && bridge.failure);
-        assert([bridge submit:s.words.data() count:s.words.size()]!=0);
-        std::puts("PASS app Metal bridge: persistent submissions, GPU completion, display copies, failure latch");
+        assert([bridge submit:bad count:1]==0 && !bridge.failure);
+        [bridge refreshReport];
+        if (![bridge.report containsString:@"Dernier dessin écarté"]) std::printf("FAIL refusal not reported:\n%s\n", bridge.report.UTF8String);
+        assert([bridge.report containsString:@"Dernier dessin écarté"]);
+        assert([bridge submit:s.words.data() count:s.words.size()]==0 && !bridge.failure);
+        std::puts("PASS app Metal bridge: persistent submissions, GPU completion, display copies, unreadable streams left out");
         // Scene A: green where the second draw's scissor allowed, gradient elsewhere.
         const std::uint8_t* a = arena.bytes.data() + (targetA - Arena::start);
         assert(a[1] == 255 && a[2] == 0 && a[4 * 8 + 2] == 135 && a[4 * 8 + 1] == 0);
