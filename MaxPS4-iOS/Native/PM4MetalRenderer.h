@@ -257,9 +257,10 @@ private:
         double slowest = 0; // Seconds the slowest finished build took.
         // Pipelines the iPhone compiled, kept on disk between launches (a
         // binary archive in Caches): a pipeline found there skips the backend
-        // compile, a minute for some of CoD's. Added to on a serial queue and
-        // written every 16 additions or 30 s.
-        id<MTLBinaryArchive> archive = nil;
+        // compile, a minute for some of CoD's. See openArchive.
+        NSArray<id<MTLBinaryArchive>>* lookups = nil; // earlier launches', read only
+        id<MTLBinaryArchive> building = nil;          // this launch's, on archiveQueue
+        NSURL* buildingURL = nil;
         bool archiveOpened = false;
         dispatch_queue_t archiveQueue = nil;
         unsigned archiveHits = 0, archiveMisses = 0, archiveAdded = 0, archiveUnsaved = 0, archiveSaves = 0;

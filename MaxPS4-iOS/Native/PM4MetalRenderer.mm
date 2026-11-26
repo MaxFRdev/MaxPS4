@@ -17,6 +17,11 @@
 #include <vector>
 
 namespace maxps4::gpu {
+// Where the binary archives of compiled pipelines live (AsyncPipelines::openArchive).
+static NSURL* archiveFolder() {
+    NSURL* caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    return caches ? [caches URLByAppendingPathComponent:@"MaxPS4/metal" isDirectory:YES] : nil;
+}
 namespace {
 // Must match GCNDrawState in gcnMetalPrelude().
 struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; };
@@ -261,14 +266,19 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                         finished(state, failed, fast);
                     }];
                 };
-                id<MTLBinaryArchive> archive = nil;
-                { std::lock_guard<std::mutex> lock(async->mutex); archive = async->archive; }
-                if (!archive) { compile(); return; }
-                // From the archive only: a miss compiles as before, then joins it.
-                own.binaryArchives = @[archive];
+                NSArray<id<MTLBinaryArchive>>* lookups = nil;
+                { std::lock_guard<std::mutex> lock(async->mutex); lookups = async->lookups; }
+                if (!lookups) { compile(); return; }
+                // From earlier launches' archives only: a miss compiles as before.
+                own.binaryArchives = lookups;
                 [device newRenderPipelineStateWithDescriptor:own options:MTLPipelineOptionFailOnBinaryArchiveMiss
                                            completionHandler:^(id<MTLRenderPipelineState> state, MTLRenderPipelineReflection*, NSError*) {
-                    { std::lock_guard<std::mutex> lock(async->mutex); ++(state ? async->archiveHits : async->archiveMisses); }
+                    bool first = false;
+                    { std::lock_guard<std::mutex> lock(async->mutex);
+                      ++(state ? async->archiveHits : async->archiveMisses);
+                      first = state && async->archiveHits == 1; }
+                    // A lookup that worked: this launch got past the archive code.
+                    if (first) [[NSFileManager defaultManager] removeItemAtURL:[archiveFolder() URLByAppendingPathComponent:@"unfinished"] error:nil];
                     if (state) finished(state, nil, fast); else compile();
                 }];
             };
@@ -1807,62 +1817,97 @@ PM4MetalRenderer::Target* PM4MetalRenderer::depthTexture(const PM4Draw& d, id<MT
     return &depth;
 }
 
+
+// Archives from earlier launches are only read (lookups never race with
+// additions); this launch's compiles go to a new archive of its own, touched
+// on archiveQueue only and written to its own file. The newest 8 files are
+// kept. A marker counts launches that did not reach their first write: after
+// two in a row (a crash in the archive code?), the archive is left off.
 void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (archiveOpened) return;
         archiveOpened = true;
     }
-    archiveQueue = dispatch_queue_create("maxps4.metal-archive", DISPATCH_QUEUE_SERIAL);
-    NSURL* caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
-    if (!caches) { std::lock_guard<std::mutex> lock(mutex); archiveState = "pas de dossier Caches"; return; }
-    NSURL* folder = [caches URLByAppendingPathComponent:@"MaxPS4" isDirectory:YES];
-    [[NSFileManager defaultManager] createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil];
-    NSURL* url = [folder URLByAppendingPathComponent:@"metal-pipelines.bin"];
-    MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
-    NSError* error = nil;
-    id<MTLBinaryArchive> made = nil;
+    NSFileManager* files = [NSFileManager defaultManager];
+    NSURL* folder = archiveFolder();
     std::string state;
-    NSNumber* size = nil;
-    [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-    // Over 1 GiB: start again rather than load it (old programs never come back).
-    if (size && size.unsignedLongLongValue > (1ull << 30)) {
-        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-        size = nil;
-    }
-    if (size) {
-        descriptor.url = url;
-        made = [device newBinaryArchiveWithDescriptor:descriptor error:&error];
+    NSMutableArray<id<MTLBinaryArchive>>* found = [NSMutableArray array];
+    id<MTLBinaryArchive> fresh = nil;
+    NSURL* freshURL = nil;
+    @try {
+        if (!folder) { std::lock_guard<std::mutex> lock(mutex); archiveState = "pas de dossier Caches"; return; }
+        [files createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil];
+        // Old single-file archive of the first version: dropped.
+        [files removeItemAtURL:[[folder URLByDeletingLastPathComponent] URLByAppendingPathComponent:@"metal-pipelines.bin"] error:nil];
+        NSURL* marker = [folder URLByAppendingPathComponent:@"unfinished"];
+        const int unfinished = [[NSString stringWithContentsOfURL:marker encoding:NSUTF8StringEncoding error:nil] intValue];
+        if (unfinished >= 2) {
+            for (NSURL* url in [files contentsOfDirectoryAtURL:folder includingPropertiesForKeys:nil options:0 error:nil]) [files removeItemAtURL:url error:nil];
+            std::lock_guard<std::mutex> lock(mutex);
+            archiveState = "coupee (deux lancements arretes avant leur premiere ecriture), effacee";
+            return;
+        }
+        [[NSString stringWithFormat:@"%d", unfinished + 1] writeToURL:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSArray<NSURL*>* listed = [files contentsOfDirectoryAtURL:folder includingPropertiesForKeys:@[NSURLContentModificationDateKey, NSURLFileSizeKey]
+                                                          options:0 error:nil];
+        NSMutableArray<NSURL*>* archives = [NSMutableArray array];
+        for (NSURL* url in listed) if ([url.pathExtension isEqualToString:@"bin"]) [archives addObject:url];
+        [archives sortUsingComparator:^NSComparisonResult(NSURL* x, NSURL* y) {
+            NSDate *dx = nil, *dy = nil;
+            [x getResourceValue:&dx forKey:NSURLContentModificationDateKey error:nil];
+            [y getResourceValue:&dy forKey:NSURLContentModificationDateKey error:nil];
+            return [dy compare:dx ?: [NSDate distantPast]]; // newest first
+        }];
+        unsigned long long total = 0;
+        for (NSUInteger k = 0; k < archives.count; ++k) {
+            NSNumber* size = nil;
+            [archives[k] getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+            total += size.unsignedLongLongValue;
+            if (k >= 8 || total > (1ull << 30)) { [files removeItemAtURL:archives[k] error:nil]; continue; }
+            MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
+            descriptor.url = archives[k];
+            NSError* error = nil;
+            id<MTLBinaryArchive> archive = [device newBinaryArchiveWithDescriptor:descriptor error:&error];
+            if (archive) [found addObject:archive]; else [files removeItemAtURL:archives[k] error:nil];
+        }
         char text[96];
-        std::snprintf(text, sizeof text, made ? "relue (%.1f Mo)" : "illisible, recommencee", size.doubleValue / (1 << 20));
+        std::snprintf(text, sizeof text, "%lu fichiers relus (%.1f Mo)", (unsigned long)found.count, double(total) / (1 << 20));
         state = text;
-        if (!made) [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-    }
-    if (!made) {
-        descriptor.url = nil;
-        made = [device newBinaryArchiveWithDescriptor:descriptor error:&error];
-        if (state.empty()) state = "nouvelle";
+        NSError* error = nil;
+        fresh = [device newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&error];
+        freshURL = [folder URLByAppendingPathComponent:[NSString stringWithFormat:@"%lld.bin", (long long)[NSDate date].timeIntervalSince1970]];
+    } @catch (NSException* exception) {
+        state = std::string("exception a l'ouverture : ") + exception.reason.UTF8String;
+        [found removeAllObjects];
+        fresh = nil;
     }
     std::lock_guard<std::mutex> lock(mutex);
-    archive = made;
+    lookups = found.count ? [found copy] : nil;
+    building = fresh;
+    buildingURL = freshURL;
+    if (fresh) archiveQueue = dispatch_queue_create("maxps4.metal-archive", DISPATCH_QUEUE_SERIAL);
     archiveSavedAt = std::chrono::steady_clock::now();
-    archiveState = made ? state : std::string("indisponible : ") + (error ? error.localizedDescription.UTF8String : "?");
+    archiveState = state;
 }
 
 void PM4MetalRenderer::AsyncPipelines::remember(MTLRenderPipelineDescriptor* descriptor) {
-    id<MTLBinaryArchive> into = nil;
-    { std::lock_guard<std::mutex> lock(mutex); into = archive; }
-    if (!into || !archiveQueue) return;
+    { std::lock_guard<std::mutex> lock(mutex); if (!building || !archiveQueue) return; }
+    MTLRenderPipelineDescriptor* plain = [descriptor copy];
+    plain.binaryArchives = nil;
     // The renderer may go before the queue drains: the block keeps this alive.
     auto self = shared_from_this();
     dispatch_async(archiveQueue, ^{
         NSError* error = nil;
-        const bool added = [into addRenderPipelineFunctionsWithDescriptor:descriptor error:&error];
+        bool added = false;
+        std::string failure;
+        @try { added = [self->building addRenderPipelineFunctionsWithDescriptor:plain error:&error]; }
+        @catch (NSException* exception) { failure = std::string("exception : ") + exception.reason.UTF8String; }
         bool save = false;
         {
             std::lock_guard<std::mutex> lock(self->mutex);
             if (added) { ++self->archiveAdded; ++self->archiveUnsaved; }
-            else self->archiveError = error ? error.localizedDescription.UTF8String : "ajout refuse";
+            else self->archiveError = !failure.empty() ? failure : error ? error.localizedDescription.UTF8String : "ajout refuse";
             save = self->archiveUnsaved >= 16 ||
                 (self->archiveUnsaved && std::chrono::steady_clock::now() - self->archiveSavedAt > std::chrono::seconds(30));
         }
@@ -1871,24 +1916,28 @@ void PM4MetalRenderer::AsyncPipelines::remember(MTLRenderPipelineDescriptor* des
 }
 
 void PM4MetalRenderer::AsyncPipelines::saveArchive() {
-    id<MTLBinaryArchive> from = nil;
-    { std::lock_guard<std::mutex> lock(mutex); from = archive; }
-    NSURL* caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
-    if (!from || !caches) return;
-    NSURL* folder = [caches URLByAppendingPathComponent:@"MaxPS4" isDirectory:YES];
-    NSURL* url = [folder URLByAppendingPathComponent:@"metal-pipelines.bin"];
-    NSURL* partial = [folder URLByAppendingPathComponent:@"metal-pipelines.partial"];
-    [[NSFileManager defaultManager] removeItemAtURL:partial error:nil];
-    // Written beside it, then swapped in: a launch cut short never leaves half a file.
+    NSFileManager* files = [NSFileManager defaultManager];
+    NSURL* folder = archiveFolder();
+    if (!building || !buildingURL || !folder) return;
+    NSURL* partial = [folder URLByAppendingPathComponent:@"partial.tmp"];
     NSError* error = nil;
-    const bool written = [from serializeToURL:partial error:&error] &&
-        [[NSFileManager defaultManager] replaceItemAtURL:url withItemAtURL:partial backupItemName:nil options:0 resultingItemURL:nil error:&error];
+    bool written = false;
+    std::string failure;
+    @try {
+        [files removeItemAtURL:partial error:nil];
+        // Written beside it, then swapped in: a launch cut short never leaves half a file.
+        written = [building serializeToURL:partial error:&error] &&
+            ([files fileExistsAtPath:buildingURL.path]
+                 ? [files replaceItemAtURL:buildingURL withItemAtURL:partial backupItemName:nil options:0 resultingItemURL:nil error:&error]
+                 : [files moveItemAtURL:partial toURL:buildingURL error:&error]);
+        if (written) [files removeItemAtURL:[folder URLByAppendingPathComponent:@"unfinished"] error:nil];
+    } @catch (NSException* exception) { failure = std::string("exception : ") + exception.reason.UTF8String; }
     NSNumber* size = nil;
-    if (written) [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+    if (written) [buildingURL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
     std::lock_guard<std::mutex> lock(mutex);
     archiveSavedAt = std::chrono::steady_clock::now();
     if (written) { archiveUnsaved = 0; ++archiveSaves; archiveBytes = size ? size.unsignedLongLongValue : 0; }
-    else archiveError = error ? error.localizedDescription.UTF8String : "ecriture refusee";
+    else archiveError = !failure.empty() ? failure : error ? error.localizedDescription.UTF8String : "ecriture refusee";
 }
 
 std::string PM4MetalRenderer::AsyncPipelines::archiveReport() const {
