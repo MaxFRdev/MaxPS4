@@ -6,6 +6,27 @@
 using namespace maxps4::gpu;
 using namespace gcn_test;
 int main(int argc, char** argv) {
+    {
+        // 20 ranges of 16 bytes, 4 KiB apart except one pair 64 bytes apart
+        // and one overlapping pair: joined across the smallest gaps to 16.
+        std::vector<PM4Range> many;
+        for (unsigned k = 0; k < 18; ++k) many.push_back({0x100000 + k * 0x1000ull, 16});
+        many.push_back({0x100000 + 5 * 0x1000ull + 80, 16});  // 64 bytes after range 5
+        many.push_back({0x100000 + 9 * 0x1000ull + 8, 16});   // overlaps range 9
+        const auto fit = coalesceRanges(many, 16);
+        assert(fit.size() == 16);
+        for (std::size_t k = 0; k + 1 < fit.size(); ++k) assert(fit[k].base + fit[k].size <= fit[k + 1].base);
+        for (const auto& r : many) {
+            bool covered = false;
+            for (const auto& f : fit) covered = covered || (r.base >= f.base && r.base + r.size <= f.base + f.size);
+            assert(covered);
+        }
+        std::uint64_t total = 0;
+        for (const auto& f : fit) total += f.size;
+        assert(total < 4 * 0x1000 + 18 * 16 + 96); // only the smallest gaps were absorbed
+        assert(coalesceRanges(many, 0).size() == many.size() && coalesceRanges({}, 16).empty());
+        std::puts("PASS memory ranges joined across their smallest gaps to fit a draw's 16");
+    }
     Arena arena;
     loadFetchVS(arena); loadQuadPS(arena);
     PM4Draw d;

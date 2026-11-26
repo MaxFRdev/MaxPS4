@@ -1190,8 +1190,12 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         // offset congruent to its guest address modulo 256, so guest alignment
         // (up to 256 bytes) holds in the buffer: a T# base inside a merged range
         // stays aligned for a native texture view.
-        const auto& ranges = [&]() -> const auto& { Stopwatch watch{scanMs}; return scanner_.scan(d); }();
-        if (ranges.size() > 16) return fail("more than 16 memory ranges");
+        const auto& scanned = [&]() -> const auto& { Stopwatch watch{scanMs}; return scanner_.scan(d); }();
+        // The draw state holds 16 ranges: more are joined across their
+        // smallest gaps (CoD's scene draws read more, and the refusal stopped
+        // the whole renderer). The 256 MiB check below still bounds the copy.
+        const std::vector<PM4Range> ranges = scanned.size() > 16 ? coalesceRanges(scanned, 16) : scanned;
+        if (scanned.size() > 16) ++coalescedDraws;
         // A large range (a texture atlas, a vertex pool) gets a buffer of its
         // own, copied once per submission and shared by every draw reading it;
         // the rest is copied into this draw's buffer.

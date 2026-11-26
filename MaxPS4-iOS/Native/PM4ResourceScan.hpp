@@ -22,6 +22,26 @@
 namespace maxps4::gpu {
 struct PM4Range { std::uint64_t base = 0, size = 0; };
 
+// At most `limit` ranges covering all of `ranges`: the two neighbours with the
+// smallest gap between them are joined (gap included) until few enough are
+// left. A draw's state holds 16 ranges; CoD's scene draws read more.
+inline std::vector<PM4Range> coalesceRanges(std::vector<PM4Range> ranges, std::size_t limit) {
+    std::sort(ranges.begin(), ranges.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
+    while (limit && ranges.size() > limit) {
+        std::size_t best = 0;
+        std::uint64_t bestGap = UINT64_MAX;
+        for (std::size_t k = 0; k + 1 < ranges.size(); ++k) {
+            const std::uint64_t end = ranges[k].base + ranges[k].size;
+            const std::uint64_t gap = ranges[k + 1].base > end ? ranges[k + 1].base - end : 0;
+            if (gap < bestGap) { bestGap = gap; best = k; }
+        }
+        const std::uint64_t end = std::max(ranges[best].base + ranges[best].size, ranges[best + 1].base + ranges[best + 1].size);
+        ranges[best].size = end - ranges[best].base;
+        ranges.erase(ranges.begin() + std::ptrdiff_t(best) + 1);
+    }
+    return ranges;
+}
+
 struct PM4ScalarLoad { std::uint64_t pc, address; std::uint32_t count; std::array<std::uint32_t, 16> words; };
 
 class PM4ResourceScanner {
