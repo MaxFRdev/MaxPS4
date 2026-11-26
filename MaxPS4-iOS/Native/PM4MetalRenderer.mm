@@ -243,6 +243,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
             async->next();
         };
         id<MTLDevice> device = device_;
+        async->openArchive(device);
         NSString* text = [NSString stringWithUTF8String:source.c_str()];
         const std::size_t sourceHash = std::hash<std::string>{}(source), sourceLength = source.size();
         auto build = [=](MTLCompileOptions* options, bool fast) {
@@ -254,8 +255,21 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                 MTLRenderPipelineDescriptor* own = [descriptor copy];
                 own.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
                 own.fragmentFunction = fragment ? [library newFunctionWithName:@"gcn_fragment"] : nil;
-                [device newRenderPipelineStateWithDescriptor:own completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
-                    finished(state, failed, fast);
+                auto compile = [=] {
+                    [device newRenderPipelineStateWithDescriptor:own completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
+                        if (state) async->remember(own);
+                        finished(state, failed, fast);
+                    }];
+                };
+                id<MTLBinaryArchive> archive = nil;
+                { std::lock_guard<std::mutex> lock(async->mutex); archive = async->archive; }
+                if (!archive) { compile(); return; }
+                // From the archive only: a miss compiles as before, then joins it.
+                own.binaryArchives = @[archive];
+                [device newRenderPipelineStateWithDescriptor:own options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                           completionHandler:^(id<MTLRenderPipelineState> state, MTLRenderPipelineReflection*, NSError*) {
+                    { std::lock_guard<std::mutex> lock(async->mutex); ++(state ? async->archiveHits : async->archiveMisses); }
+                    if (state) finished(state, nil, fast); else compile();
                 }];
             };
             const AsyncPipelines::LibraryKey libraryKey{sourceHash, sourceLength, fast};
@@ -367,7 +381,7 @@ std::string PM4MetalRenderer::pipelineStatus() const {
     std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées, %u en compilation, %zu en file", async_->librariesCompiled, async_->librariesShared, async_->compilesRunning, async_->compileQueue.size());
     std::string defaults = queue;
     std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente", async_->later.size());
-    defaults += queue;
+    defaults = async_->archiveReport() + defaults + queue;
     if (async_->running) {
         std::snprintf(queue, sizeof queue, ", PS 0x%llx depuis %.1f s", (unsigned long long)async_->buildingPS,
                       std::chrono::duration<double>(std::chrono::steady_clock::now() - async_->buildingSince).count());
@@ -1792,4 +1806,98 @@ PM4MetalRenderer::Target* PM4MetalRenderer::depthTexture(const PM4Draw& d, id<MT
     depth = {texture, true};
     return &depth;
 }
+
+void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (archiveOpened) return;
+        archiveOpened = true;
+    }
+    archiveQueue = dispatch_queue_create("maxps4.metal-archive", DISPATCH_QUEUE_SERIAL);
+    NSURL* caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    if (!caches) { std::lock_guard<std::mutex> lock(mutex); archiveState = "pas de dossier Caches"; return; }
+    NSURL* folder = [caches URLByAppendingPathComponent:@"MaxPS4" isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL* url = [folder URLByAppendingPathComponent:@"metal-pipelines.bin"];
+    MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
+    NSError* error = nil;
+    id<MTLBinaryArchive> made = nil;
+    std::string state;
+    NSNumber* size = nil;
+    [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+    // Over 1 GiB: start again rather than load it (old programs never come back).
+    if (size && size.unsignedLongLongValue > (1ull << 30)) {
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        size = nil;
+    }
+    if (size) {
+        descriptor.url = url;
+        made = [device newBinaryArchiveWithDescriptor:descriptor error:&error];
+        char text[96];
+        std::snprintf(text, sizeof text, made ? "relue (%.1f Mo)" : "illisible, recommencee", size.doubleValue / (1 << 20));
+        state = text;
+        if (!made) [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+    }
+    if (!made) {
+        descriptor.url = nil;
+        made = [device newBinaryArchiveWithDescriptor:descriptor error:&error];
+        if (state.empty()) state = "nouvelle";
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    archive = made;
+    archiveSavedAt = std::chrono::steady_clock::now();
+    archiveState = made ? state : std::string("indisponible : ") + (error ? error.localizedDescription.UTF8String : "?");
+}
+
+void PM4MetalRenderer::AsyncPipelines::remember(MTLRenderPipelineDescriptor* descriptor) {
+    id<MTLBinaryArchive> into = nil;
+    { std::lock_guard<std::mutex> lock(mutex); into = archive; }
+    if (!into || !archiveQueue) return;
+    // The renderer may go before the queue drains: the block keeps this alive.
+    auto self = shared_from_this();
+    dispatch_async(archiveQueue, ^{
+        NSError* error = nil;
+        const bool added = [into addRenderPipelineFunctionsWithDescriptor:descriptor error:&error];
+        bool save = false;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex);
+            if (added) { ++self->archiveAdded; ++self->archiveUnsaved; }
+            else self->archiveError = error ? error.localizedDescription.UTF8String : "ajout refuse";
+            save = self->archiveUnsaved >= 16 ||
+                (self->archiveUnsaved && std::chrono::steady_clock::now() - self->archiveSavedAt > std::chrono::seconds(30));
+        }
+        if (save) self->saveArchive();
+    });
+}
+
+void PM4MetalRenderer::AsyncPipelines::saveArchive() {
+    id<MTLBinaryArchive> from = nil;
+    { std::lock_guard<std::mutex> lock(mutex); from = archive; }
+    NSURL* caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    if (!from || !caches) return;
+    NSURL* folder = [caches URLByAppendingPathComponent:@"MaxPS4" isDirectory:YES];
+    NSURL* url = [folder URLByAppendingPathComponent:@"metal-pipelines.bin"];
+    NSURL* partial = [folder URLByAppendingPathComponent:@"metal-pipelines.partial"];
+    [[NSFileManager defaultManager] removeItemAtURL:partial error:nil];
+    // Written beside it, then swapped in: a launch cut short never leaves half a file.
+    NSError* error = nil;
+    const bool written = [from serializeToURL:partial error:&error] &&
+        [[NSFileManager defaultManager] replaceItemAtURL:url withItemAtURL:partial backupItemName:nil options:0 resultingItemURL:nil error:&error];
+    NSNumber* size = nil;
+    if (written) [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+    std::lock_guard<std::mutex> lock(mutex);
+    archiveSavedAt = std::chrono::steady_clock::now();
+    if (written) { archiveUnsaved = 0; ++archiveSaves; archiveBytes = size ? size.unsignedLongLongValue : 0; }
+    else archiveError = error ? error.localizedDescription.UTF8String : "ecriture refusee";
+}
+
+std::string PM4MetalRenderer::AsyncPipelines::archiveReport() const {
+    if (!archiveOpened) return std::string();
+    char text[256];
+    std::snprintf(text, sizeof text, " · archive Metal %s : %u trouvés, %u compilés, %u ajoutés, %u écritures (%.1f Mo)%s%s",
+                  archiveState.c_str(), archiveHits, archiveMisses, archiveAdded, archiveSaves, double(archiveBytes) / (1 << 20),
+                  archiveError.empty() ? "" : ", erreur : ", archiveError.c_str());
+    return text;
+}
+
 } // namespace maxps4::gpu

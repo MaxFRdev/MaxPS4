@@ -233,7 +233,7 @@ private:
     std::chrono::steady_clock::time_point translateWindow_{};
     double translateWindowMs_ = 0;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
-    struct AsyncPipelines {
+    struct AsyncPipelines : std::enable_shared_from_this<AsyncPipelines> {
         struct Pending { std::chrono::steady_clock::time_point since; const char* stage; std::string programs; };
         std::mutex mutex;
         std::map<PipelineKey, Pending> pending;
@@ -255,6 +255,21 @@ private:
         }
         std::string lastError;
         double slowest = 0; // Seconds the slowest finished build took.
+        // Pipelines the iPhone compiled, kept on disk between launches (a
+        // binary archive in Caches): a pipeline found there skips the backend
+        // compile, a minute for some of CoD's. Added to on a serial queue and
+        // written every 16 additions or 30 s.
+        id<MTLBinaryArchive> archive = nil;
+        bool archiveOpened = false;
+        dispatch_queue_t archiveQueue = nil;
+        unsigned archiveHits = 0, archiveMisses = 0, archiveAdded = 0, archiveUnsaved = 0, archiveSaves = 0;
+        unsigned long long archiveBytes = 0;
+        std::chrono::steady_clock::time_point archiveSavedAt;
+        std::string archiveState, archiveError;
+        void openArchive(id<MTLDevice> device);
+        void remember(MTLRenderPipelineDescriptor* descriptor);
+        void saveArchive(); // on archiveQueue
+        std::string archiveReport() const; // with mutex held
         // Libraries by source (hash, length, optimisation): many pipelines
         // differ only in state and share one program pair, and CoD's are up
         // to 370 KB of Metal; each is compiled once. Waiters of a compile in
