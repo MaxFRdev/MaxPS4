@@ -698,6 +698,7 @@ int main() {
         assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);
         const double normalSubmit=profilingBridge.submitMilliseconds-beforeSubmit;
         drainProfilingBridge();
+        [profilingBridge refreshReport];
         assert(profilingBridge.profiledDraws==0 && ![profilingBridge.report containsString:@"GPU par programme"]);
         // Frame timing is separately opt-in: it records bounded aggregate
         // samples and does not turn on the intrusive draw-by-draw profiler.
@@ -841,6 +842,7 @@ int main() {
         assert(barrierFinished);
         if (!guestWrites.load()) std::printf("FAIL no guest write reached the barrier:\n%s\n", barrier.report.UTF8String);
         assert(guestWrites.load() >= 5);
+        [barrier refreshReport];
         assert([barrier.report containsString:@"Barrières compute : 5 ("] && [barrier.report containsString:@"CS 0x11000"]);
         std::puts("PASS compute barrier completes with submissions and display copies in flight");
         // The same with Gnmx's fill: no kernel, no barrier, into guest memory
@@ -868,11 +870,13 @@ int main() {
             assert([barrier submit:stream.words.data() count:stream.words.size()] == 0);
         };
         fill(fillGuest,64);
+        [barrier refreshReport];
         if (![barrier.report containsString:@"remplissages 1 "]) std::printf("FAIL fill not recognised:\n%s\n", barrier.report.UTF8String);
         assert([barrier.report containsString:@"Barrières compute : 5 ("] && [barrier.report containsString:@"remplissages 1 "]);
         std::uint32_t filled[2]; assert(computeArena.memory.read(fillGuest+63*4,filled,8));
         assert(filled[0] == fillValue && filled[1] == 0);
         fill(targetB,width*height);
+        [barrier refreshReport];
         assert([barrier.report containsString:@"remplissages 2 "]);
         std::uint8_t cleared[width*height*4]{};
         id<MTLTexture> filledTarget = [barrier copyTargetAtAddress:targetB width:width height:height];
@@ -880,6 +884,7 @@ int main() {
         readPixels(device,queue,filledTarget,cleared);
         for (unsigned n = 0; n < width*height; ++n) { std::uint32_t pixel; std::memcpy(&pixel,cleared+4*n,4); assert(pixel == fillValue); }
         fill(fillGuest,64,fillMulCS);
+        [barrier refreshReport];
         if (![barrier.report containsString:@"remplissages 3 "]) std::printf("FAIL multiplying fill not recognised:\n%s\n", barrier.report.UTF8String);
         assert([barrier.report containsString:@"remplissages 3 "]);
         std::puts("PASS fill dispatches reach guest memory and targets without a kernel");
