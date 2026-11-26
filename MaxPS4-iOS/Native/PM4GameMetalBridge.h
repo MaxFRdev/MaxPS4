@@ -55,6 +55,11 @@ typedef const void* _Nullable (^MaxPS4GameMemoryView)(uint64_t, size_t);
 // queue-cap waits and completed-command GPU duration without adding a GPU wait.
 @property(nonatomic) BOOL frameTimingProfiling;
 @property(nonatomic, readonly, copy) NSString* frameTimingReport;
+// Diagnostic, on by default: the displayed buffers' centre pixel is read back
+// after each draw into them (each read ends the render pass). Set before submitting.
+@property(nonatomic) BOOL displayProbes;
+// Rebuilds the report now (it is otherwise rebuilt at most every 250 ms).
+- (void)refreshReport;
 @end
 NS_ASSUME_NONNULL_END
 #endif

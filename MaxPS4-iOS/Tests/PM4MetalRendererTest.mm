@@ -676,7 +676,8 @@ int main() {
             reader:^BOOL(uint64_t address, void* destination, size_t count) {
                 return reader->memory.read(address,destination,count);
             }];
-        assert(bridge && !bridge.failure);
+        assert(bridge && !bridge.failure && bridge.displayProbes);
+        bridge.displayProbes = NO; // the pass counts below exclude the diagnostic reads
         MaxPS4GameMetalBridge* profilingBridge = [[MaxPS4GameMetalBridge alloc] initWithDevice:device
             reader:^BOOL(uint64_t address, void* destination, size_t count) {
                 return reader->memory.read(address,destination,count);
@@ -745,6 +746,7 @@ int main() {
         const bool bridgeB=compare("app bridge B",before,arena.bytes.data()+(targetB-Arena::start));
         assert(separateOK && bridgeA && bridgeB);
         assert([bridge submit:s.words.data() count:s.words.size()]==0);
+        [bridge refreshReport]; // the report is otherwise rebuilt at most every 250 ms
         assert([bridge.report containsString:@"5 passes"]);
         readback([bridge copyTargetAtAddress:targetB width:width height:height],after);
         assert(compare("batched app bridge",after,arena.bytes.data()+(targetB-Arena::start)));

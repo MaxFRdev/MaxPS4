@@ -534,6 +534,15 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
     return [NSString stringWithFormat:@"Soumission en cours depuis %.1f s : %s, dessin %u (PS 0x%llx)%s\n%@", seconds, phases[phase],
             s.phaseDraw.load(), s.phasePS.load(), compiling > 0 && compiling < 4 ? work[compiling] : "", self.lastReport];
 }
+- (BOOL)displayProbes { return state_->renderer.displayProbes; }
+- (void)setDisplayProbes:(BOOL)enabled {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->renderer.displayProbes = enabled;
+}
+- (void)refreshReport {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    self.lastReport = state_->report();
+}
 - (BOOL)asynchronousPipelines { return state_->renderer.asyncPipelines; }
 - (void)setAsynchronousPipelines:(BOOL)asynchronous {
     std::lock_guard<std::mutex> lock(state_->mutex);

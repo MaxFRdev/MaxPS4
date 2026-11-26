@@ -119,7 +119,8 @@ public:
     std::string drawsInto(std::uint64_t address) const;
     // Flipped buffers (the bridge says), whose centre pixel is read back after
     // each draw or fill into them: the readings that changed it, bytes in texture order.
-    void noteShown(std::uint64_t address) { if (shown_.size() < 8) shown_.insert(address); }
+    void noteShown(std::uint64_t address) { if (displayProbes && shown_.size() < 8) shown_.insert(address); }
+    bool displayProbes = true;
     std::string gpuProbes() const;
     // Full-screen quads whose first vertex changed colour (or every 10 s), with the time.
     std::deque<std::string> fades;
