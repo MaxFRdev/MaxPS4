@@ -144,6 +144,28 @@ int main() {
         tiled.attribute = wave.attribute;
         assert(!tiled.run(0x10000) && tiled.error.find("tiled image (tile mode 14)") == 0);
     }
+    // 2b. image_sample_d: the four 2D derivatives come before the coordinates
+    //     (v2..v5 derivatives, v6..v7 coordinates); they are not coordinates.
+    {
+        Arena arena;
+        arena.code(0x10000, {
+            0xf0880f00, 0x00400802, // image_sample_d v[8:11], v[2:7], s[0:7], s[8:11] dmask:0xf
+            0xf800180f, 0x0b0a0908, // exp mrt0, v8, v9, v10, v11 done vm
+            0xbf810000});
+        const std::uint16_t texels[] = {0xf800, 0x07e0, 0x001f, 0xffff}; // red, green, blue, white
+        for (unsigned row = 0; row < 2; ++row) for (unsigned x = 0; x < 4; ++x) arena.put16(0x12000 + 2 * (row * 4 + x), texels[x]);
+        const std::uint32_t tsharp[8] = {0x120, 0x01000000, 0x4003, 0x9080032e, 0x6000, 0, 0, 0};
+        const std::uint32_t ssharp[4] = {0x12, 0, 0x500000, 0};
+        GCNWave wave(arena.memory, 1);
+        for (unsigned n = 0; n < 8; ++n) wave.s[n] = tsharp[n];
+        for (unsigned n = 0; n < 4; ++n) wave.s[8 + n] = ssharp[n];
+        const float address[] = {0.875f, 0.25f, 0, 0, 0.375f, 0.25f}; // white's centre as derivatives, green's as coordinates
+        for (unsigned n = 0; n < 6; ++n) wave.v(2 + n, 0) = u32(address[n]);
+        if (!wave.run(0x10000)) { std::printf("%s\n", wave.error.c_str()); assert(false); }
+        assert(wave.exports.size() == 1 && wave.exports[0].target == 0);
+        assert(near(f32(wave.exports[0].value[0][0]), 0) && near(f32(wave.exports[0].value[1][0]), 1) &&
+               near(f32(wave.exports[0].value[2][0]), 0));
+    }
     // 3. A VS calling a fetch shader (s_swappc/s_setpc), a scalar loop and VOP3.
     {
         Arena arena;

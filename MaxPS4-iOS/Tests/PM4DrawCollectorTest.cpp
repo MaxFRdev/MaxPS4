@@ -37,6 +37,24 @@ struct Fixture {
 }
 int main() {
     {
+        // Packets whose effect is lost are counted by name; sync packets and
+        // NUM_INSTANCES 1 are not, and the stream goes on to the next draw.
+        Fixture f;
+        assert(f.stats.ignoredReport().empty());
+        f.run({0xc0032400, 0, 0, 0, 0,                   // DRAW_INDIRECT
+               0xc0002f00, 1,                            // NUM_INSTANCES 1: nothing lost
+               0xc0002f00, 4,                            // NUM_INSTANCES 4: one instance drawn
+               0xc0003800, 0, 0xc0003800, 0,             // DRAW_INDEX_INDIRECT_MULTI twice
+               0xc0055000, 0, 0, 0, 0, 0, 0,             // DMA_DATA
+               0xc0004600, 0,                            // EVENT_WRITE: synchronization only
+               0xc0012d00, 3, 2});                       // DRAW_INDEX_AUTO
+        assert(f.stats.failed == 0 && f.draws.size() == 1);
+        assert(f.stats.ignored[0x24] == 1 && f.stats.ignored[0x2f] == 1 && f.stats.ignored[0x38] == 2 &&
+               f.stats.ignored[0x50] == 1 && f.stats.ignored[0x46] == 0);
+        assert(f.stats.ignoredReport() ==
+               "\nPaquets non gérés : DRAW_INDIRECT ×1, NUM_INSTANCES > 1 ×1, DRAW_INDEX_INDIRECT_MULTI ×2, DMA_DATA ×1");
+    }
+    {
         // Depth state is only counted: Z enabled and written, back faces culled,
         // then the same with no colour target mask.
         Fixture f;
