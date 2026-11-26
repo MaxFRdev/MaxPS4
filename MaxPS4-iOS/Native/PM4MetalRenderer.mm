@@ -1039,6 +1039,20 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         nativeLastMiss = text;
         return nil;
     };
+    // A colour target lives only in its Metal texture, never written back to
+    // guest memory: a T# at its address in its format reads it there (an
+    // emulator renders its console's frame, then draws that frame scaled on
+    // screen; a 3D game samples its 16-bit float scene to tone-map it). Before
+    // the tiled decoders below: a tiled T# of a target reads the target too.
+    if (const auto rendered = targets_.find(base); rendered != targets_.end() && rendered->second.format == dfmt) {
+        id<MTLTexture> texture = rendered->second.texture;
+        bool attached = texture == drawing;
+        for (id<MTLTexture> other : drawingMore_) attached = attached || (other && texture == other);
+        if (texture && !attached && !rendered->second.fresh && texture.width >= width && texture.height >= height) {
+            ++targetReads;
+            return texture;
+        }
+    }
     if (dfmt == 41 || (dfmt >= 35 && dfmt <= 39)) {
         // NFMT 0 unorm; BC4/BC5 also 1 snorm (normal maps).
         const unsigned nfmt = (t[1] >> 26) & 15;
@@ -1052,19 +1066,6 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     if ((dfmt == 3 || dfmt == 10) && ((t[3] >> 20) & 31) == 13 && ((t[1] >> 26) & 15) == 0) {
         id<MTLTexture> decoded = thinTexture(base, width, height, pitch, dfmt);
         return decoded ? decoded : miss(4, 0);
-    }
-    // A colour target lives only in its Metal texture, never written back to
-    // guest memory: a T# at its address in its format reads it there (an
-    // emulator renders its console's frame, then draws that frame scaled on
-    // screen; a 3D game samples its 16-bit float scene to tone-map it).
-    if (const auto rendered = targets_.find(base); rendered != targets_.end() && rendered->second.format == dfmt) {
-        id<MTLTexture> texture = rendered->second.texture;
-        bool attached = texture == drawing;
-        for (id<MTLTexture> other : drawingMore_) attached = attached || (other && texture == other);
-        if (texture && !attached && !rendered->second.fresh && texture.width >= width && texture.height >= height) {
-            ++targetReads;
-            return texture;
-        }
     }
     // 8_8_8_8, 5_6_5 or 8 (video planes): read, and filtered by Metal's sampler, through a view.
     if ((dfmt != 10 && dfmt != 16 && dfmt != 1) || (dfmt == 1 && ((t[1] >> 26) & 15) != 0) ||
