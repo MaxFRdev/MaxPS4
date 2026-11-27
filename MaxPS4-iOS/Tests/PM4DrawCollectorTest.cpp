@@ -91,6 +91,8 @@ int main() {
         assert(f.draws[0] == std::vector<std::uint32_t>({0, 1, 2}) && f.full[0].instances == 2);
         assert(f.full[0].vsUser[1] == 5 && f.full[0].vsUser[2] == 7);
         assert(f.draws[1] == std::vector<std::uint32_t>({11, 12, 13}) && f.full[1].instances == 1 && f.full[1].vsUser[1] == 9);
+        f.run({0xc0032e00, 3, 0, 0x00050004, 0x00000006});   // DRAW_INDEX_IMMD: indices 4, 5, 6 in the packet
+        assert(f.draws.size() == 3 && f.draws[2] == std::vector<std::uint32_t>({4, 5, 6}) && f.stats.ignored[0x2e] == 0);
         std::puts("PASS indirect draws read their counts, base vertex and first instance from memory");
     }
     {

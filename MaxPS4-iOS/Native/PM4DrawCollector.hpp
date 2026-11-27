@@ -280,6 +280,11 @@ public:
             case 0x50: if (!dmaData(data, n)) ++stats_.ignored[0x50]; break;
             case 0x86: if (!ce_.empty()) { ++stats_.ceWaits; runConstantEngine(true); } break; // WAIT_ON_CE_COUNTER
             case 0x37: writeData(data, n); break;
+            case 0x2e: {                                                // DRAW_INDEX_IMMD: count, initiator, indices
+                if (n < 2 || std::uint64_t(data[0]) * indexBytes_ > std::uint64_t(n - 2) * 4) { ++stats_.ignored[0x2e]; break; }
+                collect(data[0], true, 0, draw, reinterpret_cast<const std::uint8_t*>(data + 2));
+                break;
+            }
             case 0x41: {
                 // CP_DMA: DMA_DATA's older form, the selects beside the high
                 // address halves: rewritten as a DMA_DATA packet.
@@ -534,7 +539,9 @@ private:
         d.depthWidth = ((context_[0x16] & 0x7ff) + 1) * 8;
         d.depthHeight = (((context_[0x16] >> 11) & 0x7ff) + 1) * 8;
     }
-    template <class Draw> void collect(std::uint32_t count, bool indexed, std::uint64_t indexAddress, Draw& draw) {
+    // `inlineIndices`: the indices of DRAW_INDEX_IMMD, in the packet, instead of memory.
+    template <class Draw> void collect(std::uint32_t count, bool indexed, std::uint64_t indexAddress, Draw& draw,
+                                       const std::uint8_t* inlineIndices = nullptr) {
         ++stats_.draws;
         noteDepth();
         PM4Draw d;
@@ -591,7 +598,8 @@ private:
         d.indices.resize(count);
         if (indexed) {
             std::vector<std::uint8_t> bytes(std::size_t(count) * indexBytes_);
-            if (!memory_.read(indexAddress, bytes.data(), bytes.size())) {
+            if (inlineIndices) std::memcpy(bytes.data(), inlineIndices, bytes.size());
+            else if (!memory_.read(indexAddress, bytes.data(), bytes.size())) {
                 char where[96];
                 std::snprintf(where, sizeof where, " 0x%llx (%u index de %u octets)", (unsigned long long)indexAddress, count, indexBytes_);
                 stats_.fail(std::string("unreadable index buffer") + where); return;
