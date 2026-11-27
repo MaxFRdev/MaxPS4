@@ -372,7 +372,11 @@ public:
     double textureMs = 0; unsigned texturesDecoded = 0;
 private:
     id<MTLTexture> bc7Texture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt, bool snorm = false);
-    id<MTLTexture> thinTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt);
+    id<MTLTexture> thinTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt,
+                               MTLPixelFormat format, unsigned pixelBytes);
+    // The Metal format a T#'s DFMT/NFMT reads as through texture2d<float>
+    // (unorm or float only), and its bytes per pixel; Invalid when none.
+    MTLPixelFormat nativeFormat(unsigned dfmt, unsigned nfmt, unsigned& pixelBytes) const;
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
     std::map<std::uint64_t, int> fillPrograms_;
     std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.

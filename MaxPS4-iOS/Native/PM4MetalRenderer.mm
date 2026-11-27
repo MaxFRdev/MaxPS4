@@ -1004,12 +1004,36 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
 
 // An uncompressed T# in tile mode 13 (Thin_1dThin, non-displayable micro
 // tiles: 8x8 pixels, x0 y0 x1 y1 x2 y2 order) read into a linear texture.
-id<MTLTexture> PM4MetalRenderer::thinTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt) {
-    const std::uint64_t pixelBytes = dfmt == 3 ? 2 : 4;
+MTLPixelFormat PM4MetalRenderer::nativeFormat(unsigned dfmt, unsigned nfmt, unsigned& pixelBytes) const {
+    // 32-bit float channels filter only where the GPU says so (A14 and later).
+    bool floatFilter = false;
+    if (@available(macOS 11.0, iOS 14.0, *)) floatFilter = device_.supports32BitFloatFiltering;
+    pixelBytes = 0;
+    switch (dfmt) {
+    case 1: if (nfmt == 0) { pixelBytes = 1; return MTLPixelFormatR8Unorm; } break;
+    case 2: if (nfmt == 0 || nfmt == 7) { pixelBytes = 2; return nfmt ? MTLPixelFormatR16Float : MTLPixelFormatR16Unorm; } break;
+    case 3: if (nfmt == 0) { pixelBytes = 2; return MTLPixelFormatRG8Unorm; } break;
+    case 4: if (nfmt == 7 && floatFilter) { pixelBytes = 4; return MTLPixelFormatR32Float; } break;
+    case 5: if (nfmt == 0 || nfmt == 7) { pixelBytes = 4; return nfmt ? MTLPixelFormatRG16Float : MTLPixelFormatRG16Unorm; } break;
+    // 2_10_10_10 lists its channels high to low: X in the low 10 bits, as RGB10A2.
+    case 9: if (nfmt == 0) { pixelBytes = 4; return MTLPixelFormatRGB10A2Unorm; } break;
+    case 10: pixelBytes = 4; return MTLPixelFormatRGBA8Unorm; // gcn_texel_at reads it as unorm whatever the nfmt
+    case 11: if (nfmt == 7 && floatFilter) { pixelBytes = 8; return MTLPixelFormatRG32Float; } break;
+    case 12: if (nfmt == 0 || nfmt == 7) { pixelBytes = 8; return nfmt ? MTLPixelFormatRGBA16Float : MTLPixelFormatRGBA16Unorm; } break;
+    case 14: if (nfmt == 7 && floatFilter) { pixelBytes = 16; return MTLPixelFormatRGBA32Float; } break;
+    case 16: pixelBytes = 2; return MTLPixelFormatB5G6R5Unorm;
+    default: break;
+    }
+    return MTLPixelFormatInvalid;
+}
+
+id<MTLTexture> PM4MetalRenderer::thinTexture(std::uint64_t base, std::uint64_t width, std::uint64_t height, std::uint64_t pitch, unsigned dfmt,
+                                             MTLPixelFormat format, unsigned pixelBytesIn) {
+    const std::uint64_t pixelBytes = pixelBytesIn;
     const std::uint64_t tilesWide = (pitch + 7) / 8, tilesHigh = (height + 7) / 8;
     const std::uint64_t bytes = tilesWide * tilesHigh * 64 * pixelBytes;
     if (!bytes || bytes > (64ull << 20) || width > pitch) return nil;
-    const DecodedKey key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32, height);
+    const DecodedKey key = std::make_tuple(base, width | std::uint64_t(dfmt) << 32 | std::uint64_t(format) << 40, height);
     std::uint64_t mark = 0;
     if (id<MTLTexture> kept = decodedTexture(key, base, bytes, mark)) return kept;
     Stopwatch watch{textureMs};
@@ -1023,8 +1047,7 @@ id<MTLTexture> PM4MetalRenderer::thinTexture(std::uint64_t base, std::uint64_t w
         const std::uint64_t at = ((y / 8 * tilesWide + x / 8) * 64 + morton) * pixelBytes;
         std::memcpy(pixels.data() + y * rowBytes + x * pixelBytes, tiled.data() + at, pixelBytes);
     }
-    auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:dfmt == 3 ? MTLPixelFormatRG8Unorm : MTLPixelFormatRGBA8Unorm
-                                                                          width:width height:height mipmapped:NO];
+    auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
     if (!texture) return nil;
@@ -1070,17 +1093,22 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         id<MTLTexture> decoded = bc7Texture(base, width, height, pitch, dfmt, snorm);
         return decoded ? decoded : miss(4, 0);
     }
-    // 8_8 or 8_8_8_8 in tile mode 13: 8x8 pixel micro tiles, Morton order
-    // inside, decoded once (CoD's menu frames and gradients).
-    if ((dfmt == 3 || dfmt == 10) && ((t[3] >> 20) & 31) == 13 && ((t[1] >> 26) & 15) == 0) {
-        id<MTLTexture> decoded = thinTexture(base, width, height, pitch, dfmt);
+    // Unorm and float formats (nativeFormat). Programs with many samples
+    // read any other T# as zero (see manySamples): CoD's lighting reads
+    // 16-bit float and 16_16 images that were all refused, 68861 in a mission.
+    unsigned pixelBytes = 0;
+    const unsigned nfmt = (t[1] >> 26) & 15, tiling = (t[3] >> 20) & 31;
+    const MTLPixelFormat format = nativeFormat(dfmt, nfmt, pixelBytes);
+    if (format == MTLPixelFormatInvalid) return miss(1, nfmt);
+    // Tile mode 13: 8x8 pixel micro tiles, Morton order inside, decoded once
+    // (CoD's menu frames and gradients). 5_6_5 stays linear only.
+    if (tiling == 13 && dfmt != 16) {
+        id<MTLTexture> decoded = thinTexture(base, width, height, pitch, dfmt, format, pixelBytes);
         return decoded ? decoded : miss(4, 0);
     }
-    // 8_8_8_8, 5_6_5 or 8 (video planes): read, and filtered by Metal's sampler, through a view.
-    if ((dfmt != 10 && dfmt != 16 && dfmt != 1) || (dfmt == 1 && ((t[1] >> 26) & 15) != 0) ||
-        ((t[3] >> 20) & 31) != 8 || pitch < width) return miss(1, 0);
-    const MTLPixelFormat format = dfmt == 10 ? MTLPixelFormatRGBA8Unorm : dfmt == 16 ? MTLPixelFormatB5G6R5Unorm : MTLPixelFormatR8Unorm;
-    const std::uint64_t rowBytes = pitch * (dfmt == 10 ? 4 : dfmt == 16 ? 2 : 1), bytes = rowBytes * height;
+    // Linear (tile mode 8): read, and filtered by Metal's sampler, through a view.
+    if (tiling != 8 || pitch < width) return miss(1, 100 + tiling);
+    const std::uint64_t rowBytes = pitch * pixelBytes, bytes = rowBytes * height;
     std::uint64_t offset = 0;
     bool inside = false;
     if (!rangeCount) {
