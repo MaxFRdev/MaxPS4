@@ -1092,10 +1092,13 @@ GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_loca
 GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 2ul, o)) *(device ushort*)(M.p + o) = ushort(v); }
 GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 1ul, o)) *(device uchar*)(M.p + o) = uchar(v); }
 #if GCN_NATIVE_TEXTURES
-// Which of the draw's Metal textures (0 to 3) views T# `t`, or -1.
+// Which of the draw's Metal textures (0 to 3) views T# `t`, or -1. The CPU
+// binds only T#s it can serve (nativeTexture): any format it bound matches.
+// A list of formats here (8_8_8_8, 5_6_5, 8, BC7) had left out the colour
+// targets in other formats (a 16-bit float scene, read back as guest memory
+// that never holds it), BC1-5 and the micro-tiled images the CPU decoded.
 GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
-    const uint dfmt = (t.d[1] >> 20) & 63u;
-    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u && dfmt != 41u)) return -1;
+    if (!M.native || M.native->enabled == 0u) return -1;
     const uint4 low = uint4(t.d[0],t.d[1],t.d[2],t.d[3]), high = uint4(t.d[4],t.d[5],t.d[6],t.d[7]);
     const uint enabled = M.native->enabled;
     if ((enabled & 1u) && all(M.native->low == low) && all(M.native->high == high)) return 0;
