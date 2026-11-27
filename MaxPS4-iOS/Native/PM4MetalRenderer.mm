@@ -1609,6 +1609,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         probe(target.texture, d.target, line, commands);
     }
     if (details_ && batchDraws.size() < 20000) {
+        const std::size_t entryStart = batchDraws.size();
         char text[256];
         std::snprintf(text, sizeof text, "\n  - cible 0x%llx %ux%u (swap %u, masque 0x%x, blend 0x%x), %zu sommets, ciseaux %u,%u-%u,%u, PS 0x%llx",
                       (unsigned long long)d.target, d.pitch, d.height, d.swap, d.mask, d.blend, d.indices.size(),
@@ -1738,6 +1739,15 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                 }
             }
         }
+        // The same target and programs as the entry before it: counted there.
+        BatchRun& run = batchRun_;
+        if (run.serial == batchSerial_ && run.target == d.target && run.vs == d.vs && run.ps == d.ps && entryStart >= run.suffix) {
+            batchDraws.resize(entryStart - run.suffix);
+            ++run.repeats;
+            std::snprintf(text, sizeof text, " (x%u, mêmes cible et programmes)", run.repeats + 1);
+            run.suffix = std::strlen(text);
+            batchDraws += text;
+        } else run = {batchSerial_, d.target, d.vs, d.ps, 0, 0};
     }
     return true;
 }

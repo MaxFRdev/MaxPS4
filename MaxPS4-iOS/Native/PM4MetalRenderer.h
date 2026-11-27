@@ -84,6 +84,9 @@ public:
     // The draws of the current batch, described for the session report, and
     // the disassembly of the first programs drawn (VS and PS, with user SGPRs).
     std::string batchDraws, programListings;
+    // batchDraws: consecutive draws with the same target and programs (a shadow
+    // pass, dozens of them) become one entry with its count.
+    struct BatchRun { std::uint64_t serial = ~0ull, target = 0, vs = 0, ps = 0; unsigned repeats = 0; std::size_t suffix = 0; } batchRun_;
     // Opt-in for a single submission: consecutive draws to the same texture
     // share a render pass. Always end the batch before committing commands.
     // `details`: also describe its draws and count their samples, which costs
