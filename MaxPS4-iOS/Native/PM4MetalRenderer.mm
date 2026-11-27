@@ -273,17 +273,23 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                 { std::lock_guard<std::mutex> lock(pool->mutex); lookups = pool->lookups; }
                 if (!lookups) { pool->compile(gpu, desc, done); return; }
                 // From earlier launches' archives only: a miss compiles as before.
+                // Synchronous (a lookup is quick): the asynchronous call with
+                // FailOnBinaryArchiveMiss crashed the iPhone's driver, copying a
+                // block from a stack address inside dispatch_async.
                 desc.binaryArchives = lookups;
-                [gpu newRenderPipelineStateWithDescriptor:desc options:MTLPipelineOptionFailOnBinaryArchiveMiss
-                                        completionHandler:^(id<MTLRenderPipelineState> state, MTLRenderPipelineReflection*, NSError*) {
-                    bool first = false;
-                    { std::lock_guard<std::mutex> lock(pool->mutex);
-                      ++(state ? pool->archiveHits : pool->archiveMisses);
-                      first = state && pool->archiveHits == 1; }
-                    // A lookup that worked: this launch got past the archive code.
-                    if (first) [[NSFileManager defaultManager] removeItemAtURL:[archiveFolder() URLByAppendingPathComponent:@"unfinished"] error:nil];
-                    if (state) done(state, nil); else pool->compile(gpu, desc, done);
-                }];
+                id<MTLRenderPipelineState> found = nil;
+                @try {
+                    NSError* missed = nil;
+                    found = [gpu newRenderPipelineStateWithDescriptor:desc options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                           reflection:nil error:&missed];
+                } @catch (NSException*) { found = nil; }
+                bool first = false;
+                { std::lock_guard<std::mutex> lock(pool->mutex);
+                  ++(found ? pool->archiveHits : pool->archiveMisses);
+                  first = found && pool->archiveHits == 1; }
+                // A lookup that worked: this launch got past the archive code.
+                if (first) [[NSFileManager defaultManager] removeItemAtURL:[archiveFolder() URLByAppendingPathComponent:@"unfinished"] error:nil];
+                if (found) done(found, nil); else pool->compile(gpu, desc, done);
             };
             const AsyncPipelines::LibraryKey libraryKey{sourceHash, sourceLength, fast};
             id<MTLLibrary> have = nil;
