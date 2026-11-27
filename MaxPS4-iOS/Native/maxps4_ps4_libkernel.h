@@ -128,7 +128,7 @@ enum class PS4KernelService : uint32_t {
     gnm_ding_dong_marker, gnm_embedded_ps, gnm_compute_wait_address, gnm_compute_wait_semaphore,
     gnm_dispatch_indirect_mec, thread_getname,
     trophy_game_info, trophy_group_info, trophy_unlock_state, rtc_time_t,
-    attr_getschedparam, thread_getschedparam, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_post, sem_timedwait, sem_trywait, sem_getvalue, uuid_create,
+    attr_getschedparam, thread_getschedparam, app_content_space, net_mac_address, net_ether_ntostr, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_post, sem_timedwait, sem_trywait, sem_getvalue, uuid_create,
     net_pton, net_ntop,
     // sceSystemServiceLoadExec(path, argv): the game replaces itself; the run
     // ends like exit and the session boots `path` with argv[0] (runtime).

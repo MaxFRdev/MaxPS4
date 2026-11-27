@@ -560,6 +560,22 @@ constexpr Binding bindings[] = {
     {"sceSystemGestureGetTouchEventsCount", "h8uongcBNVs", PS4KernelService::succeed, "libSceSystemGesture"},
     {"sceInvitationDialogUpdateStatus", "9+g9iOq+7kg", PS4KernelService::succeed, "libSceInvitationDialog"},
     {"sceNpProfileDialogUpdateStatus", "haVZE9FgKqE", PS4KernelService::succeed, "libSceNpProfileDialog"},
+    // Space for temporary and download data (CoD asks at boot; unanswered,
+    // it read whatever the stack held): 4 GiB.
+    {"sceAppContentTemporaryDataGetAvailableSpaceKb", "SaKib2Ug0yI", PS4KernelService::app_content_space, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
+    {"sceAppContentDownloadDataGetAvailableSpaceKb", "Gl6w5i0JokY", PS4KernelService::app_content_space, "libSceAppContent", false, false, 0, nullptr, 0, "libSceAppContentUtil"},
+    // A fixed, locally administered MAC address, and its text form.
+    {"sceNetGetMacAddress", "6Oc0bLsIYe0", PS4KernelService::net_mac_address, "libSceNet"},
+    {"sceNetEtherNtostr", "v6M4txecCuo", PS4KernelService::net_ether_ntostr, "libSceNet"},
+    // Online and sharing services that only need to start: no effect here.
+    {"sceGameLiveStreamingInitialize", "kvYEw2lBndk", PS4KernelService::succeed, "libSceGameLiveStreaming"},
+    {"sceGameLiveStreamingEnableLiveStreaming", "dWM80AX39o4", PS4KernelService::succeed, "libSceGameLiveStreaming"},
+    {"scePlayGoPrefetch", "-Q1-u1a7p0g", PS4KernelService::succeed, "libScePlayGo"},
+    {"sceContentExportInit", "FzEWeYnAFlI", PS4KernelService::succeed, "libSceContentExport"},
+    {"sceNpPartyInitialize", "lhYCTQmBkds", PS4KernelService::succeed, "libSceNpParty"},
+    {"sceNpPartyRegisterHandler", "kA88gbv71ao", PS4KernelService::succeed, "libSceNpParty"},
+    {"sceSharePlayInitialize", "isruqthpYcw", PS4KernelService::succeed, "libSceSharePlay"},
+    {"sceSharePlaySetProhibition", "co2NCj--pnc", PS4KernelService::succeed, "libSceSharePlay"},
     {"sceErrorDialogInitialize", "I88KChlynSs", PS4KernelService::error_init, "libSceErrorDialog"},
     {"sceErrorDialogOpen", "M2ZF-ClLhgY", PS4KernelService::error_open, "libSceErrorDialog"},
     {"sceErrorDialogUpdateStatus", "WWiGuh9XfgQ", PS4KernelService::error_status, "libSceErrorDialog"},
@@ -2262,6 +2278,19 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
         }
     }
     // scePthreadGetname(thread, char name[32]).
+    case S::app_content_space: return c.rsi && write(c.rsi, 4ull << 20, 8) ? 0 : kernel_error(inval);
+    case S::net_mac_address: {
+        const uint8_t mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+        return c.rdi && memory_.write(c.rdi, mac, sizeof(mac)) ? 0 : kernel_error(inval);
+    }
+    case S::net_ether_ntostr: {
+        // EtherNtostr(addr, char* out, size): "xx:xx:xx:xx:xx:xx" from the address.
+        uint8_t mac[6] = {};
+        if (!c.rdi || !c.rsi || c.rdx < 18 || !memory_.read(c.rdi, mac, sizeof(mac))) return kernel_error(inval);
+        char text[18];
+        std::snprintf(text, sizeof text, "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        return memory_.write(c.rsi, text, sizeof(text)) ? 0 : kernel_error(fault);
+    }
     case S::thread_getname: {
         const uint8_t empty[32] = {};
         return c.rsi && memory_.write(c.rsi, empty, sizeof(empty)) ? 0 : kernel_error(fault);
