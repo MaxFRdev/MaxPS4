@@ -240,7 +240,7 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
     if (tiling != 8u && !gcn_micro_tiled(tiling)) return float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (dfmt >= 35u && dfmt <= 39u) {
         uint number = (t.d[1] >> 26) & 15u;
-        if ((number != 0u && !(dfmt >= 38u && number == 1u)) || pitch < (t.d[2] & 0x3fffu) + 1u)
+        if ((number != 0u && !(dfmt >= 38u && number == 1u) && !(dfmt <= 37u && number == 9u)) || pitch < (t.d[2] & 0x3fffu) + 1u)
             return float4(0.0f, 0.0f, 0.0f, 0.0f);
         uint blockBytes = (dfmt == 35u || dfmt == 38u) ? 8u : 16u;
         ulong relative = gcn_element_offset(tiling, uint(x) / 4u, uint(y) / 4u, (pitch + 3u) / 4u, blockBytes);
@@ -267,6 +267,7 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
         float4 colour;
         for (uint c = 0u; c < 4u; ++c) colour[c] = gcn_bc1_component(endpoints, selectors, pixel, c, dfmt != 35u);
         if (dfmt != 35u) colour[3] = gcn_bc23_alpha(alphaLow, alphaHigh, pixel, dfmt == 37u);
+        if (number == 9u) for (uint c = 0u; c < 3u; ++c) colour[c] = gcn_srgb_linear(colour[c]);
         return gcn_texture_swizzle(t, colour);
     }
     uint bytes = 4u;

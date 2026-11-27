@@ -918,6 +918,8 @@ private:
             break;
         default: return fail("image data format " + std::to_string(t.dfmt));
         }
+        if (t.nfmt == 9 && t.dfmt >= 35 && t.dfmt <= 37) // sRGB BC1-3: colour to linear
+            for (unsigned n = 0; n < 3; ++n) c[n] = c[n] <= 0.04045f ? c[n] / 12.92f : std::pow((c[n] + 0.055f) / 1.055f, 2.4f);
         // Other number formats (snorm, integers) read as their unorm or float
         // bits: approximate, where failing stopped the whole resource scan.
         for (unsigned n = 0; n < 4; ++n) {
