@@ -1009,7 +1009,9 @@ id<MTLTexture> PM4MetalRenderer::bc7Texture(std::uint64_t base, std::uint64_t wi
         }
     }
     const MTLPixelFormat pixelFormat = dfmt == 38 ? (snorm ? MTLPixelFormatR8Snorm : MTLPixelFormatR8Unorm)
-                                     : dfmt == 39 ? (snorm ? MTLPixelFormatRG8Snorm : MTLPixelFormatRG8Unorm) : MTLPixelFormatRGBA8Unorm;
+                                     : dfmt == 39 ? (snorm ? MTLPixelFormatRG8Snorm : MTLPixelFormatRG8Unorm)
+                                     // BC1-3 and BC7: `snorm` means sRGB (NFMT 9), converted to linear when sampled.
+                                     : snorm ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm;
     auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat width:width height:height mipmapped:NO];
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
@@ -1106,9 +1108,9 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         }
     }
     if (dfmt == 41 || (dfmt >= 35 && dfmt <= 39)) {
-        // NFMT 0 unorm; BC4/BC5 also 1 snorm (normal maps).
+        // NFMT 0 unorm; BC4/BC5 also 1 snorm (normal maps), the others 9 sRGB.
         const unsigned nfmt = (t[1] >> 26) & 15;
-        const bool snorm = nfmt == 1 && (dfmt == 38 || dfmt == 39);
+        const bool snorm = (nfmt == 1 && (dfmt == 38 || dfmt == 39)) || (nfmt == 9 && dfmt != 38 && dfmt != 39);
         if (((t[3] >> 20) & 31) != 13 || (nfmt != 0 && !snorm)) return miss(1, nfmt);
         id<MTLTexture> decoded = bc7Texture(base, width, height, pitch, dfmt, snorm);
         return decoded ? decoded : miss(4, 0);
