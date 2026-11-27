@@ -267,7 +267,7 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
     }
     uint bytes = 4u;
     if (dfmt == 1u) bytes = 1u; else if (dfmt == 2u || dfmt == 3u || (dfmt >= 16u && dfmt <= 19u)) bytes = 2u;
-    else if (dfmt == 14u) bytes = 16u;
+    else if (dfmt == 11u || dfmt == 12u) bytes = 8u; else if (dfmt == 13u) bytes = 12u; else if (dfmt == 14u) bytes = 16u;
     ulong relative = gcn_element_offset(tiling, uint(x), uint(y), pitch, bytes);
     ulong at = base + relative;
     ulong packed = offset + relative;
@@ -285,8 +285,24 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
     else if (dfmt == 17u) { c0 = float(raw & 1u); c1 = float((raw >> 1) & 31u) / 31.0f; c2 = float((raw >> 6) & 31u) / 31.0f; c3 = float((raw >> 11) & 31u) / 31.0f; }
     else if (dfmt == 18u) { c0 = float(raw & 31u) / 31.0f; c1 = float((raw >> 5) & 31u) / 31.0f; c2 = float((raw >> 10) & 31u) / 31.0f; c3 = float((raw >> 15) & 1u); }
     else if (dfmt == 19u) { c0 = float(raw & 15u) / 15.0f; c1 = float((raw >> 4) & 15u) / 15.0f; c2 = float((raw >> 8) & 15u) / 15.0f; c3 = float((raw >> 12) & 15u) / 15.0f; }
-    else if (dfmt == 14u) { c0 = gf(raw); c1 = gf(resolved ? gcn_packed32(M, packed + 4u) : gcn_ld32(M, at + 4u));
-        c2 = gf(resolved ? gcn_packed32(M, packed + 8u) : gcn_ld32(M, at + 8u)); c3 = gf(resolved ? gcn_packed32(M, packed + 12u) : gcn_ld32(M, at + 12u)); }
+    else if (dfmt == 14u || dfmt == 13u) { c0 = gf(raw); c1 = gf(resolved ? gcn_packed32(M, packed + 4u) : gcn_ld32(M, at + 4u));
+        c2 = gf(resolved ? gcn_packed32(M, packed + 8u) : gcn_ld32(M, at + 8u));
+        if (dfmt == 14u) c3 = gf(resolved ? gcn_packed32(M, packed + 12u) : gcn_ld32(M, at + 12u)); }
+    // 16_16, 16_16_16_16 (a 16-bit float scene), 32_32 and the packed formats,
+    // float when NFMT says so, else unorm.
+    else if (dfmt == 5u) { c0 = nfmt == 7u ? gcn_f16(raw & 0xffffu) : float(raw & 0xffffu) / 65535.0f;
+                           c1 = nfmt == 7u ? gcn_f16(raw >> 16) : float(raw >> 16) / 65535.0f; }
+    else if (dfmt == 12u) { uint high = resolved ? gcn_packed32(M, packed + 4u) : gcn_ld32(M, at + 4u);
+        c0 = nfmt == 7u ? gcn_f16(raw & 0xffffu) : float(raw & 0xffffu) / 65535.0f;
+        c1 = nfmt == 7u ? gcn_f16(raw >> 16) : float(raw >> 16) / 65535.0f;
+        c2 = nfmt == 7u ? gcn_f16(high & 0xffffu) : float(high & 0xffffu) / 65535.0f;
+        c3 = nfmt == 7u ? gcn_f16(high >> 16) : float(high >> 16) / 65535.0f; }
+    else if (dfmt == 11u) { c0 = gf(raw); c1 = gf(resolved ? gcn_packed32(M, packed + 4u) : gcn_ld32(M, at + 4u)); }
+    else if (dfmt == 6u || dfmt == 7u || dfmt == 9u) {
+        uint number = nfmt == 7u ? 7u : 0u;
+        c0 = gf(gcn_packed_component(raw, dfmt, 0u, number)); c1 = gf(gcn_packed_component(raw, dfmt, 1u, number));
+        c2 = gf(gcn_packed_component(raw, dfmt, 2u, number));
+        if (dfmt == 9u) c3 = gf(gcn_packed_component(raw, dfmt, 3u, number)); }
     return gcn_texture_swizzle(t, float4(c0, c1, c2, c3));
 }
 GCN_FN float4 gcn_texel(GCNMemory M, GCNRes8 t, int x, int y) { return gcn_texel_at(M, t, x, y, false, 0ul); }

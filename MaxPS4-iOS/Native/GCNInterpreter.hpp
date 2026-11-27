@@ -808,7 +808,8 @@ private:
     static bool imageBytes(unsigned dfmt, unsigned& bytes) {
         switch (dfmt) {
         case 1: bytes = 1; return true; case 2: case 3: case 16: case 17: case 18: case 19: bytes = 2; return true;
-        case 4: case 5: case 10: bytes = 4; return true; case 11: case 12: bytes = 8; return true;
+        case 4: case 5: case 6: case 7: case 9: case 10: bytes = 4; return true; case 11: case 12: bytes = 8; return true;
+        case 13: bytes = 12; return true;
         case 14: bytes = 16; return true; case 35: case 38: bytes = 8; return true; case 36: case 37: case 39: bytes = 16; return true; default: return false;
         }
     }
@@ -879,10 +880,23 @@ private:
         case 18: c[0] = unorm(raw & 31, 5); c[1] = unorm((raw >> 5) & 31, 5); c[2] = unorm((raw >> 10) & 31, 5); c[3] = unorm((raw >> 15) & 1, 1); break;
         case 19: for (unsigned n = 0; n < 4; ++n) c[n] = unorm((raw >> (4 * n)) & 15, 4); break;
         case 14: for (unsigned n = 0; n < 4; ++n) std::memcpy(&c[n], data + 4 * n, 4); break;
+        case 13: for (unsigned n = 0; n < 3; ++n) std::memcpy(&c[n], data + 4 * n, 4); break;
+        case 11: for (unsigned n = 0; n < 2; ++n) std::memcpy(&c[n], data + 4 * n, 4); break;
+        // 16_16 and 16_16_16_16 (a 16-bit float scene): float when NFMT says so, else unorm.
+        case 5: case 12:
+            for (unsigned n = 0; n < (t.dfmt == 5 ? 2u : 4u); ++n) {
+                std::uint16_t half = 0;
+                std::memcpy(&half, data + 2 * n, 2);
+                c[n] = t.nfmt == 7 ? gcn_detail::f16(half) : unorm(half, 16);
+            }
+            break;
+        case 6: case 7: case 9:
+            for (unsigned n = 0; n < (t.dfmt == 9 ? 4u : 3u); ++n) c[n] = gcn_detail::f32(packedComponent(raw, t.dfmt, n, t.nfmt == 7 ? 7 : 0));
+            break;
         default: return fail("image data format " + std::to_string(t.dfmt));
         }
-        if (t.dfmt != 4 && t.dfmt != 14 && !(t.dfmt >= 38 && t.dfmt <= 39 && t.nfmt == 1) && t.nfmt != 0 && t.nfmt != 7 && t.nfmt != 9)
-            return fail("image number format " + std::to_string(t.nfmt));
+        // Other number formats (snorm, integers) read as their unorm or float
+        // bits: approximate, where failing stopped the whole resource scan.
         for (unsigned n = 0; n < 4; ++n) {
             const unsigned sel = t.sel[n];
             out[n] = sel >= 4 ? c[sel - 4] : sel == 1 ? 1.0f : 0.0f;
