@@ -26,6 +26,7 @@ struct PM4DrawStats {
     unsigned dmaCopies = 0;  // DMA_DATA copies and fills done in guest memory
     std::uint32_t lastDmaControl = 0, lastDmaCommand = 0; // the last DMA_DATA met
     unsigned indirectBuffers = 0; // INDIRECT_BUFFER calls executed
+    unsigned instancedDraws = 0;  // draws of more than one instance
     std::string error; // the first failure
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
@@ -47,9 +48,9 @@ struct PM4DrawStats {
             more = line;
         }
         if (fastClears || dmaCopies || lastDmaControl || lastDmaCommand) {
-            char line[200];
-            std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u (dernier DMA_DATA : contrôle 0x%x, commande 0x%x) · appels de tampons : %u",
-                          fastClears, dmaCopies, lastDmaControl, lastDmaCommand, indirectBuffers);
+            char line[256];
+            std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u (dernier DMA_DATA : contrôle 0x%x, commande 0x%x) · appels de tampons : %u · dessins instanciés : %u",
+                          fastClears, dmaCopies, lastDmaControl, lastDmaCommand, indirectBuffers, instancedDraws);
             more += line;
         }
         return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
@@ -117,6 +118,7 @@ struct PM4Draw {
     // it. clearWords: CB_COLOR0_CLEAR_WORD0/1, a pixel in the target's format.
     bool fastClear = false;
     std::uint32_t clearWords[2] = {};
+    std::uint32_t instances = 1; // NUM_INSTANCES
     float blendConstant[4] = {};                     // CB_BLEND_RED/GREEN/BLUE/ALPHA
     // False: a depth-only draw (no colour target, or mask 0); target is then 0
     // and pitch/height are the depth buffer's.
@@ -223,7 +225,9 @@ public:
                 dispatch(c);
                 break;
             }
-            case 0x2f: if (n >= 1 && data[0] > 1) ++stats_.ignored[0x2f]; break; // NUM_INSTANCES: one instance is drawn
+            // NUM_INSTANCES: the draws after it run that many instances (the
+            // vertex program reads the instance in v3), until the next one.
+            case 0x2f: if (n >= 1) instances_ = std::max(1u, std::min(data[0], 1u << 16)); break;
             case 0x50: if (!dmaData(data, n)) ++stats_.ignored[0x50]; break;
             case 0x3f: {
                 // INDIRECT_BUFFER: a call into another command buffer (IB_BASE,
@@ -300,6 +304,7 @@ private:
     std::uint64_t indexBase_ = 0; // Persists across submissions, like INDEX_TYPE.
     std::map<std::uint64_t, std::array<std::uint32_t, 2>> pendingClears_; // by target, see PM4Draw::fastClear
     unsigned depth_ = 0; // INDIRECT_BUFFER nesting
+    std::uint32_t instances_ = 1; // NUM_INSTANCES, persists like the hardware's
 
     static void setRegisters(std::array<std::uint32_t, 0x400>& bank, const std::uint32_t* data, std::size_t n) {
         for (std::size_t k = 1; k < n; ++k) if (data[0] + k - 1 < bank.size()) bank[data[0] + k - 1] = data[k];
@@ -404,6 +409,8 @@ private:
         d.number = (info >> 8) & 7;
         if (d.colour && !otherTargetFormats && (d.format != 0xa || d.number != 0)) { stats_.fail("colour target format"); return; }
         d.primitive = uconfig_[0x242];
+        d.instances = instances_;
+        if (instances_ > 1) ++stats_.instancedDraws;
         if (d.primitive != 4 && d.primitive != 5 && d.primitive != 6 && d.primitive != 0x11) {
             stats_.fail("primitive type " + std::to_string(d.primitive)); return;
         }

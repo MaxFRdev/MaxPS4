@@ -1179,7 +1179,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     for (unsigned p = 0; p < 32; ++p)
         if ((vs.params >> p) & 1) s += "    L.param[" + std::to_string(p) + "] = float4(0.0f);\n";
     s += "    for (uint k = 0u; k < 16u; ++k) L.user[k] = D.vsUser[k];\n"
-         "    L.vinit[0] = index; L.vinit[3] = iid;\n"
+         // v1/v2: the instance divided by VGT_INSTANCE_STEP_RATE_0/1, taken as
+         // 1 (the usual rate); v3: the instance.
+         "    L.vinit[0] = index; L.vinit[1] = iid; L.vinit[2] = iid; L.vinit[3] = iid;\n"
          "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u }; M.s = S;\n"
          "    " + vsName + "(L, M, Q);\n"
          "    GCNVaryings o; o.position = L.pos;\n";
