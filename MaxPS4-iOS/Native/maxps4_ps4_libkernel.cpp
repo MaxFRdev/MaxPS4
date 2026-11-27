@@ -550,6 +550,16 @@ constexpr Binding bindings[] = {
     {"sceMsgDialogGetResult", "Lr8ovHH9l6A", PS4KernelService::msg_result, "libSceMsgDialog"},
     {"sceMsgDialogClose", "HTrcDKlFKuM", PS4KernelService::msg_close, "libSceMsgDialog"},
     {"sceMsgDialogTerminate", "ePw-kqZmelo", PS4KernelService::msg_term, "libSceMsgDialog"},
+    // Touch pad gestures: no recognizer events (CoD updates and polls them
+    // every frame). Invitation and profile dialogs are never running (status 0).
+    {"sceSystemGestureOpen", "qpo-mEOwje0", PS4KernelService::succeed, "libSceSystemGesture"},
+    {"sceSystemGestureInitializePrimitiveTouchRecognizer", "3pcAvmwKCvM", PS4KernelService::succeed, "libSceSystemGesture"},
+    {"sceSystemGestureCreateTouchRecognizer", "FWF8zkhr854", PS4KernelService::succeed, "libSceSystemGesture"},
+    {"sceSystemGestureUpdatePrimitiveTouchRecognizer", "GgFMb22sbbI", PS4KernelService::succeed, "libSceSystemGesture"},
+    {"sceSystemGestureUpdateTouchRecognizer", "j4h82CQWENo", PS4KernelService::succeed, "libSceSystemGesture"},
+    {"sceSystemGestureGetTouchEventsCount", "h8uongcBNVs", PS4KernelService::succeed, "libSceSystemGesture"},
+    {"sceInvitationDialogUpdateStatus", "9+g9iOq+7kg", PS4KernelService::succeed, "libSceInvitationDialog"},
+    {"sceNpProfileDialogUpdateStatus", "haVZE9FgKqE", PS4KernelService::succeed, "libSceNpProfileDialog"},
     {"sceErrorDialogInitialize", "I88KChlynSs", PS4KernelService::error_init, "libSceErrorDialog"},
     {"sceErrorDialogOpen", "M2ZF-ClLhgY", PS4KernelService::error_open, "libSceErrorDialog"},
     {"sceErrorDialogUpdateStatus", "WWiGuh9XfgQ", PS4KernelService::error_status, "libSceErrorDialog"},
