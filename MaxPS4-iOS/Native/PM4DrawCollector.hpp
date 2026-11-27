@@ -262,6 +262,15 @@ public:
             case 0x50: if (!dmaData(data, n)) ++stats_.ignored[0x50]; break;
             case 0x86: if (!ce_.empty()) { ++stats_.ceWaits; runConstantEngine(true); } break; // WAIT_ON_CE_COUNTER
             case 0x37: writeData(data, n); break;
+            case 0x41: {
+                // CP_DMA: DMA_DATA's older form, the selects beside the high
+                // address halves: rewritten as a DMA_DATA packet.
+                if (n < 5) { ++stats_.ignored[0x41]; break; }
+                const std::uint32_t as[6] = {(data[1] & (3u << 29)) | (data[3] & (3u << 20)), data[0], data[1] & 0xffff,
+                                             data[2], data[3] & 0xffff, data[4]};
+                if (!dmaData(as, 6)) ++stats_.ignored[0x41];
+                break;
+            }
             case 0x3f: {
                 // INDIRECT_BUFFER: a call into another command buffer (IB_BASE,
                 // IB_SIZE in dwords), executed here in order with the same state.

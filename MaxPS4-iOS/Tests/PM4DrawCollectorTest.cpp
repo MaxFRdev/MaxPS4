@@ -64,11 +64,12 @@ int main() {
             0xc0055000, 1u << 20, std::uint32_t(base), 0, 0x100, 0, 4,                              // to GDS: ignored
             0xc0033700, 5u << 8, std::uint32_t(base + 0x40), 0, 0x12345678,                        // WRITE_DATA to memory
             0xc0055000, 0, std::uint32_t(base + 0x40), 0, std::uint32_t(base + 0x48), 0, 4,         // then read by a copy
+            0xc0044100, std::uint32_t(base + 0x40), 0, std::uint32_t(base + 0x50), 0, 4,              // CP_DMA copy
         };
         collector.execute(words.data(), words.size(), [](const PM4Draw&) {});
         assert(std::memcmp(ram.data() + 0x20, ram.data(), 8) == 0);
         assert(ram[0x30] == 0xdd && ram[0x33] == 0xaa && ram[0x37] == 0xaa && ram[0x38] == 0);
-        assert(stats.dmaCopies == 3 && stats.ignored[0x50] == 1 && stats.failed == 0 && stats.memoryWrites == 1);
+        assert(stats.dmaCopies == 4 && stats.ignored[0x41] == 0 && ram[0x50] == 0x78 && stats.ignored[0x50] == 1 && stats.failed == 0 && stats.memoryWrites == 1);
         assert(ram[0x48] == 0x78 && ram[0x4b] == 0x12);
         std::puts("PASS DMA_DATA copies and fills guest memory in submission order");
     }
