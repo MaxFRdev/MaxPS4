@@ -87,6 +87,10 @@ struct GameMetalState {
     // (then what the game shows was never drawn by Metal), and the last one.
     unsigned shown = 0, absent = 0;
     uint64_t lastShown = 0, otherShown = 0; // The last flipped buffer, and the one before it.
+    // Display copies, reused in turn (a new 8 MB texture every frame cost
+    // milliseconds of CPU): three, as a swap chain, while their size holds.
+    id<MTLTexture> displayRing[3] = {nil, nil, nil};
+    unsigned displayNext = 0;
     // Compute dispatches run as kernels, or refused (and skipped) with the last reason.
     unsigned computeRun = 0, computeRefused = 0;
     // Waits for compute results inside submissions, and how long batches took.
@@ -458,11 +462,15 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
     }
     ++s.shown;
     const auto started = Clock::now();
-    auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
-        width:width height:height mipmapped:NO];
-    descriptor.usage = MTLTextureUsageShaderRead;
-    descriptor.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> texture = [s.device newTextureWithDescriptor:descriptor];
+    id<MTLTexture>& slot = s.displayRing[s.displayNext++ % 3];
+    if (!slot || slot.width != width || slot.height != height || slot.pixelFormat != source.pixelFormat) {
+        auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
+            width:width height:height mipmapped:NO];
+        descriptor.usage = MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModePrivate;
+        slot = [s.device newTextureWithDescriptor:descriptor];
+    }
+    id<MTLTexture> texture = slot;
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = texture && command ? [command blitCommandEncoder] : nil;
     if (!blit) { s.error = "Metal display copy allocation"; return nil; }
