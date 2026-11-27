@@ -37,6 +37,28 @@ struct Fixture {
 }
 int main() {
     {
+        // DMA_DATA copies and fills guest memory in order; GDS stays ignored.
+        std::vector<std::uint8_t> ram(256);
+        for (unsigned k = 0; k < 16; ++k) ram[k] = std::uint8_t(k + 1);
+        const std::uint64_t base = 0x20000;
+        auto inside = [&](std::uint64_t a, std::size_t n) { return a >= base && a - base + n <= ram.size(); };
+        GCNMemory memory{
+            [&](std::uint64_t a, void* out, std::size_t n) { return inside(a, n) && std::memcpy(out, ram.data() + (a - base), n); },
+            [&](std::uint64_t a, const void* in, std::size_t n) { return inside(a, n) && std::memcpy(ram.data() + (a - base), in, n); }};
+        PM4DrawStats stats;
+        PM4DrawCollector collector{memory, stats};
+        const std::vector<std::uint32_t> words = {
+            0xc0055000, 0, std::uint32_t(base), 0, std::uint32_t(base + 0x20), 0, 8,                // copy 8 bytes
+            0xc0055000, 2u << 29, 0xaabbccdd, 0, std::uint32_t(base + 0x30), 0, 8,                 // fill 8 bytes
+            0xc0055000, 1u << 20, std::uint32_t(base), 0, 0x100, 0, 4,                              // to GDS: ignored
+        };
+        collector.execute(words.data(), words.size(), [](const PM4Draw&) {});
+        assert(std::memcmp(ram.data() + 0x20, ram.data(), 8) == 0);
+        assert(ram[0x30] == 0xdd && ram[0x33] == 0xaa && ram[0x37] == 0xaa && ram[0x38] == 0);
+        assert(stats.dmaCopies == 2 && stats.ignored[0x50] == 1 && stats.failed == 0);
+        std::puts("PASS DMA_DATA copies and fills guest memory in submission order");
+    }
+    {
         // ELIMINATE_FAST_CLEAR (CB_COLOR_CONTROL MODE 2) draws nothing; the
         // target's next draw carries the clear (CB_COLOR0_CLEAR_WORD0/1), once.
         Fixture f;

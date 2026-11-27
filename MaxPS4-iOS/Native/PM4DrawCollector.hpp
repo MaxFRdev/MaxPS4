@@ -23,6 +23,7 @@ namespace maxps4::gpu {
 struct PM4DrawStats {
     unsigned draws = 0, rendered = 0, skipped = 0, failed = 0, dispatches = 0;
     unsigned fastClears = 0; // ELIMINATE_FAST_CLEAR passes, applied as clears (PM4Draw::fastClear)
+    unsigned dmaCopies = 0;  // DMA_DATA copies and fills done in guest memory
     std::string error; // the first failure
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
@@ -43,9 +44,9 @@ struct PM4DrawStats {
             std::snprintf(line, sizeof line, " · MRT : %u cibles en plus, %u écartées", extraTargets, extraTargetsDropped);
             more = line;
         }
-        if (fastClears) {
-            char line[64];
-            std::snprintf(line, sizeof line, " · effacements rapides : %u", fastClears);
+        if (fastClears || dmaCopies) {
+            char line[96];
+            std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u", fastClears, dmaCopies);
             more += line;
         }
         return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
@@ -220,6 +221,7 @@ public:
                 break;
             }
             case 0x2f: if (n >= 1 && data[0] > 1) ++stats_.ignored[0x2f]; break; // NUM_INSTANCES: one instance is drawn
+            case 0x50: if (!dmaData(data, n)) ++stats_.ignored[0x50]; break;
             default:
                 // Synchronization and prefetch packets have nothing to draw. The
                 // others named by ignoredName are lost: count them for the report.
@@ -238,6 +240,36 @@ public:
     bool otherTargetFormats = false;
 
 private:
+    // DMA_DATA (CP DMA): a copy or fill of guest memory in submission order,
+    // so the draws after it see it (CoD updates its constant buffers this way:
+    // without it a post-processing pass read zeros and wrote NaN). Memory to
+    // memory only; GDS, registers and swaps stay ignored (returns false).
+    bool dmaData(const std::uint32_t* data, std::size_t n) {
+        if (n < 6 || !memory_.write) return false;
+        const std::uint32_t control = data[0], command = data[5];
+        const unsigned srcSel = (control >> 29) & 3, dstSel = (control >> 20) & 3;
+        const bool srcRegister = (command >> 26) & 1, dstRegister = (command >> 27) & 1;
+        const bool srcFixed = (command >> 28) & 1, dstFixed = (command >> 29) & 1;
+        const std::uint32_t bytes = command & 0x1fffff;
+        if (dstSel != 0 || dstRegister || dstFixed || ((command >> 22) & 15) || (srcSel != 0 && srcSel != 2)) return false;
+        const std::uint64_t dst = std::uint64_t(data[3]) | std::uint64_t(data[4]) << 32;
+        if (!bytes) return true;
+        std::vector<std::uint8_t> buffer(bytes);
+        if (srcSel == 2) { // DATA: fill with the dword in SRC_ADDR_LO
+            for (std::uint32_t k = 0; k < bytes; ++k) buffer[k] = std::uint8_t(data[1] >> (8 * (k & 3)));
+        } else {
+            if (srcRegister) return false;
+            const std::uint64_t src = std::uint64_t(data[1]) | std::uint64_t(data[2]) << 32;
+            if (srcFixed) {
+                std::uint32_t word = 0;
+                if (!memory_.read(src, &word, 4)) return false;
+                for (std::uint32_t k = 0; k < bytes; ++k) buffer[k] = std::uint8_t(word >> (8 * (k & 3)));
+            } else if (!memory_.read(src, buffer.data(), bytes)) return false;
+        }
+        if (!memory_.write(dst, buffer.data(), bytes)) return false;
+        ++stats_.dmaCopies;
+        return true;
+    }
     const GCNMemory& memory_;
     PM4DrawStats& stats_;
     std::array<std::uint32_t, 0x400> context_{}, shader_{}, uconfig_{};
