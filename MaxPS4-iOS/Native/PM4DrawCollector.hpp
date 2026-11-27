@@ -25,6 +25,7 @@ struct PM4DrawStats {
     unsigned fastClears = 0; // ELIMINATE_FAST_CLEAR passes, applied as clears (PM4Draw::fastClear)
     unsigned dmaCopies = 0;  // DMA_DATA copies and fills done in guest memory
     std::uint32_t lastDmaControl = 0, lastDmaCommand = 0; // the last DMA_DATA met
+    unsigned dmaRegisterWrites = 0; std::uint32_t lastDmaRegister = 0; // DMA_DATA into a GPU register
     unsigned indirectBuffers = 0; // INDIRECT_BUFFER calls executed
     unsigned instancedDraws = 0;  // draws of more than one instance
     // Constant engine (the submission's CCBs): CE RAM writes and loads, dumps
@@ -53,9 +54,9 @@ struct PM4DrawStats {
             more = line;
         }
         if (fastClears || dmaCopies || lastDmaControl || lastDmaCommand) {
-            char line[256];
-            std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u (dernier DMA_DATA : contrôle 0x%x, commande 0x%x) · appels de tampons : %u · dessins instanciés : %u",
-                          fastClears, dmaCopies, lastDmaControl, lastDmaCommand, indirectBuffers, instancedDraws);
+            char line[320];
+            std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u (dernier DMA_DATA : contrôle 0x%x, commande 0x%x ; %u vers des registres, dernier 0x%x) · appels de tampons : %u · dessins instanciés : %u",
+                          fastClears, dmaCopies, lastDmaControl, lastDmaCommand, dmaRegisterWrites, lastDmaRegister, indirectBuffers, instancedDraws);
             more += line;
         }
         if (memoryWrites || indirectCalls) {
@@ -446,6 +447,28 @@ private:
         const bool srcRegister = (command >> 26) & 1, dstRegister = (command >> 27) & 1;
         const bool srcFixed = (command >> 28) & 1, dstFixed = (command >> 29) & 1;
         const std::uint32_t bytes = command & 0x1fffff;
+        // DAS: into GPU registers (DST_ADDR their byte address), the dwords one
+        // register after another, or all into one with DAIC (its last value stays).
+        if (dstRegister && dstSel == 0 && !((command >> 22) & 15) && (srcSel == 0 || srcSel == 2) && !srcRegister && bytes >= 4) {
+            std::vector<std::uint32_t> words((bytes + 3) / 4);
+            if (srcSel == 2) std::fill(words.begin(), words.end(), data[1]);
+            else {
+                const std::uint64_t src = std::uint64_t(data[1]) | std::uint64_t(data[2]) << 32;
+                if (srcFixed) { std::uint32_t word = 0; if (!memory_.read(src, &word, 4)) return false; std::fill(words.begin(), words.end(), word); }
+                else if (!memory_.read(src, words.data(), words.size() * 4)) return false;
+            }
+            // A byte address, or a dword one if only that lands in a register bank.
+            auto banked = [](std::uint32_t r) { return (r >= 0xa000 && r < 0xa400) || (r >= 0x2c00 && r < 0x3000) || (r >= 0xc000 && r < 0xc400); };
+            const std::uint32_t first = banked((data[3] >> 2) & 0xffff) || !banked(data[3] & 0xffff) ? (data[3] >> 2) & 0xffff : data[3] & 0xffff;
+            for (std::size_t k = 0; k < words.size(); ++k) {
+                const std::uint32_t reg = dstFixed ? first : first + std::uint32_t(k);
+                if (reg >= 0xa000 && reg < 0xa400) context_[reg - 0xa000] = words[k];
+                else if (reg >= 0x2c00 && reg < 0x3000) shader_[reg - 0x2c00] = words[k];
+                else if (reg >= 0xc000 && reg < 0xc400) uconfig_[reg - 0xc000] = words[k];
+            }
+            ++stats_.dmaRegisterWrites; stats_.lastDmaRegister = first;
+            return true;
+        }
         if (dstSel != 0 || dstRegister || dstFixed || ((command >> 22) & 15) || (srcSel != 0 && srcSel != 2)) return false;
         const std::uint64_t dst = std::uint64_t(data[3]) | std::uint64_t(data[4]) << 32;
         if (!bytes) return true;
