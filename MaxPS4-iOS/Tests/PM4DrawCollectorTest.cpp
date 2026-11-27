@@ -74,6 +74,26 @@ int main() {
         std::puts("PASS DMA_DATA copies and fills guest memory in submission order");
     }
     {
+        // Indirect draws: SET_BASE 1, then the counts read from memory; the
+        // first vertex or base vertex and first instance land in the VS user
+        // SGPRs named by BASE_VTX_LOC and START_INST_LOC.
+        Fixture f;
+        const std::uint32_t args[9] = {3, 2, 5, 7, 3, 1, 1, 9, 0};
+        std::memcpy(f.bytes.data(), args, sizeof args);
+        const std::uint16_t indices[4] = {10, 11, 12, 13};
+        std::memcpy(f.bytes.data() + 40, indices, sizeof indices);
+        f.run({0xc0021100, 1, 0x10000, 0,                   // SET_BASE
+               0xc0032400, 0, 0x4d, 0x4e, 2,                // DRAW_INDIRECT
+               0xc0002a00, 0,                               // INDEX_TYPE 16-bit
+               0xc0012600, 0x10000 + 40, 0,                 // INDEX_BASE
+               0xc0032500, 16, 0x4d, 0x4e, 0});             // DRAW_INDEX_INDIRECT
+        assert(f.stats.failed == 0 && f.draws.size() == 2 && f.stats.indirectCalls == 2);
+        assert(f.draws[0] == std::vector<std::uint32_t>({0, 1, 2}) && f.full[0].instances == 2);
+        assert(f.full[0].vsUser[1] == 5 && f.full[0].vsUser[2] == 7);
+        assert(f.draws[1] == std::vector<std::uint32_t>({11, 12, 13}) && f.full[1].instances == 1 && f.full[1].vsUser[1] == 9);
+        std::puts("PASS indirect draws read their counts, base vertex and first instance from memory");
+    }
+    {
         // The constant engine stream (a NOP marked ceMarker, as PS4GnmQueue
         // puts the CCBs first) runs to its next counter at each DE wait: the
         // first dump is read by the DMA between the waits, before the second.

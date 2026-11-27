@@ -31,6 +31,7 @@ struct PM4DrawStats {
     // to guest memory, and the DE waits that ran the CE up to its next counter.
     unsigned ceWrites = 0, ceLoads = 0, ceDumps = 0, ceWaits = 0, ceIgnored = 0;
     unsigned memoryWrites = 0; // WRITE_DATA to memory applied in stream order
+    unsigned indirectCalls = 0; // indirect draws and dispatches run from their memory arguments
     std::string error; // the first failure
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
@@ -57,9 +58,9 @@ struct PM4DrawStats {
                           fastClears, dmaCopies, lastDmaControl, lastDmaCommand, indirectBuffers, instancedDraws);
             more += line;
         }
-        if (memoryWrites) {
-            char line[64];
-            std::snprintf(line, sizeof line, " · écritures WRITE_DATA : %u", memoryWrites);
+        if (memoryWrites || indirectCalls) {
+            char line[96];
+            std::snprintf(line, sizeof line, " · écritures WRITE_DATA : %u · appels indirects : %u", memoryWrites, indirectCalls);
             more += line;
         }
         if (ceWrites || ceLoads || ceDumps || ceWaits || ceIgnored) {
@@ -237,23 +238,40 @@ public:
                 break;
             }
             case 0x2d: if (n >= 1) collect(data[0], false, 0, draw); break;
-            case 0x15: {                                                // DISPATCH_DIRECT
-                ++stats_.dispatches;
-                // COMPUTE_PGM_LO/HI (0x2e0c), COMPUTE_NUM_THREAD_X/Y/Z (0x2e07).
-                const std::uint64_t program = (std::uint64_t(shader_[0x20c]) | std::uint64_t(shader_[0x20d] & 0xff) << 32) << 8;
-                char text[160];
-                std::snprintf(text, sizeof text, "programme 0x%llx, groupes %ux%ux%u de %ux%ux%u",
-                              (unsigned long long)program, n > 0 ? data[0] : 0, n > 1 ? data[1] : 0, n > 2 ? data[2] : 0,
-                              shader_[0x207] & 0xffff, shader_[0x208] & 0xffff, shader_[0x209] & 0xffff);
-                stats_.lastDispatch = text;
-                if (n < 3) break;
-                PM4Dispatch c;
-                c.program = program;
-                c.rsrc2 = shader_[0x213];                                // COMPUTE_PGM_RSRC2
-                c.userCount = std::min(16u, unsigned((c.rsrc2 >> 1) & 31));
-                for (unsigned k = 0; k < 16; ++k) c.user[k] = shader_[0x240 + k]; // COMPUTE_USER_DATA_0..15
-                for (unsigned k = 0; k < 3; ++k) { c.threads[k] = shader_[0x207 + k] & 0xffff; c.groups[k] = data[k]; }
-                dispatch(c);
+            case 0x15:                                                  // DISPATCH_DIRECT
+                runDispatch(n >= 1 ? data[0] : 0, n >= 2 ? data[1] : 0, n >= 3 ? data[2] : 0, n >= 3, dispatch);
+                break;
+            // SET_BASE: base 1 holds the arguments of indirect draws and dispatches.
+            case 0x11: if (n >= 3 && (data[0] & 0xf) == 1) indirectBase_ = (std::uint64_t(data[1]) | std::uint64_t(data[2] & 0xffff) << 32) & ~7ull; break;
+            case 0x16: {                                                // DISPATCH_INDIRECT: x, y, z groups
+                std::uint32_t groups[3];
+                if (n < 2 || !indirectBase_ || !memory_.read(indirectBase_ + data[0], groups, sizeof groups)) { ++stats_.ignored[0x16]; break; }
+                ++stats_.indirectCalls;
+                runDispatch(groups[0], groups[1], groups[2], true, dispatch);
+                break;
+            }
+            case 0x24: case 0x25: {
+                // DRAW_INDIRECT (vertices, instances, first vertex, first instance)
+                // and DRAW_INDEX_INDIRECT (indices, instances, first index, base
+                // vertex, first instance): the counts from memory; the base
+                // vertex and first instance go to the user SGPRs named by
+                // BASE_VTX_LOC and START_INST_LOC, as the CP writes them.
+                const bool indexed = packet.opcode == 0x25;
+                std::uint32_t args[5] = {};
+                if (n < 3 || !indirectBase_ || !memory_.read(indirectBase_ + data[0], args, indexed ? 20 : 16)) {
+                    ++stats_.ignored[packet.opcode]; break;
+                }
+                ++stats_.indirectCalls;
+                if (!args[0] || !args[1]) break;
+                const std::uint32_t base = indexed ? args[3] : args[2], first = indexed ? args[4] : args[3];
+                // Both offsets count from the SH register base (0x2c00).
+                if ((data[1] & 0xffff) && (data[1] & 0xffff) < shader_.size()) shader_[data[1] & 0xffff] = base;
+                if ((data[2] & 0xffff) && (data[2] & 0xffff) < shader_.size()) shader_[data[2] & 0xffff] = first;
+                const std::uint32_t saved = instances_;
+                instances_ = std::max(1u, std::min(args[1], 1u << 16));
+                if (indexed) collect(args[0], true, indexBase_ + std::uint64_t(args[2]) * indexBytes_, draw);
+                else collect(args[0], false, 0, draw);
+                instances_ = saved;
                 break;
             }
             // NUM_INSTANCES: the draws after it run that many instances (the
@@ -308,6 +326,26 @@ public:
     bool otherTargetFormats = false;
 
 private:
+    template <class Dispatch> void runDispatch(std::uint32_t x, std::uint32_t y, std::uint32_t z, bool complete, Dispatch& dispatch) {
+        ++stats_.dispatches;
+        // COMPUTE_PGM_LO/HI (0x2e0c), COMPUTE_NUM_THREAD_X/Y/Z (0x2e07).
+        const std::uint64_t program = (std::uint64_t(shader_[0x20c]) | std::uint64_t(shader_[0x20d] & 0xff) << 32) << 8;
+        char text[160];
+        std::snprintf(text, sizeof text, "programme 0x%llx, groupes %ux%ux%u de %ux%ux%u",
+                      (unsigned long long)program, x, y, z,
+                      shader_[0x207] & 0xffff, shader_[0x208] & 0xffff, shader_[0x209] & 0xffff);
+        stats_.lastDispatch = text;
+        if (!complete) return;
+        PM4Dispatch c;
+        c.program = program;
+        c.rsrc2 = shader_[0x213];                                // COMPUTE_PGM_RSRC2
+        c.userCount = std::min(16u, unsigned((c.rsrc2 >> 1) & 31));
+        for (unsigned k = 0; k < 16; ++k) c.user[k] = shader_[0x240 + k]; // COMPUTE_USER_DATA_0..15
+        const std::uint32_t groups[3] = {x, y, z};
+        for (unsigned k = 0; k < 3; ++k) { c.threads[k] = shader_[0x207 + k] & 0xffff; c.groups[k] = groups[k]; }
+        dispatch(c);
+    }
+    std::uint64_t indirectBase_ = 0; // SET_BASE 1: indirect draw and dispatch arguments
     // The constant engine: CE RAM (48 KiB, kept across submissions like the
     // GPU's) filled by WRITE/LOAD_CONST_RAM and copied to guest memory by
     // DUMP_CONST_RAM. Gnmx writes the shaders' resource and constant tables
