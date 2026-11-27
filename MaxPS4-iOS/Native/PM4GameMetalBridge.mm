@@ -186,8 +186,12 @@ struct GameMetalState {
                    MaxPS4GameMemoryWriter writer, bool nativeTextures)
         : memory{[reader](uint64_t a, void* d, size_t n) { return bool(reader(a,d,n)); },
                  // DMA_DATA packets copy guest memory in submission order (PM4DrawCollector::dmaData).
-                 writer ? std::function<bool(uint64_t, const void*, size_t)>([writer](uint64_t a, const void* d, size_t n) {
-                     uint64_t failed = 0; return writer(a, d, n, &failed) == 0; }) : std::function<bool(uint64_t, const void*, size_t)>{}},
+                 // The renderer's copies of what they overwrite are dropped.
+                 writer ? std::function<bool(uint64_t, const void*, size_t)>([this, writer](uint64_t a, const void* d, size_t n) {
+                     uint64_t failed = 0;
+                     if (writer(a, d, n, &failed) != 0) return false;
+                     renderer.guestWritten(a, n);
+                     return true; }) : std::function<bool(uint64_t, const void*, size_t)>{}},
           collector(memory, stats), renderer(device, memory, nil, 0, nativeTextures,
               writer ? std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>([writer](uint64_t a, const void* d, size_t n, uint64_t* f) { return int32_t(writer(a,d,n,f)); }) :
                        std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>{}), device(device),

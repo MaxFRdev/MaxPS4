@@ -122,6 +122,14 @@ public:
     // Called on each flip. Probes run for the draws of one frame in 60 only:
     // each ends the render pass (a full store and load of the target on the
     // iPhone's tiled GPU), and every draw of the HUD and composite paid it.
+    // Guest memory the command stream itself wrote (DMA_DATA, the constant
+    // engine's dumps): copies of it taken earlier in this command buffer for
+    // later draws are stale.
+    void guestWritten(std::uint64_t address, std::uint64_t size) {
+        if (!size || shared_.empty()) return;
+        for (auto it = shared_.begin(); it != shared_.end();)
+            it = it->first.first < address + size && address < it->first.first + it->first.second ? shared_.erase(it) : std::next(it);
+    }
     void noteShown(std::uint64_t address) {
         if (displayProbes && shown_.size() < 8) shown_.insert(address);
         probeFrame_ = displayProbes && (flips_++ % 60) == 0;
