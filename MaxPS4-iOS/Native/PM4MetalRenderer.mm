@@ -608,11 +608,22 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     // Copies of the ranges the program addresses, as for a draw (copy mode only).
     if (guest_) return fail("compute with a guest memory window");
     if (fillDispatch(c, commands)) return true;
-    const auto& ranges = scanner_.scan(c);
+    const auto& scanned = scanner_.scan(c);
     if (!scanner_.dispatchError().empty())
         return fail("compute resource scan stopped: " + scanner_.dispatchError());
-    if (ranges.empty()) return fail("compute program addresses no memory");
-    if (ranges.size() > 16) return fail("compute reads more than 16 memory ranges");
+    // A kernel that addresses no memory (LDS only, or registers alone) has
+    // nothing visible to change.
+    if (scanned.empty() && !scanner_.stored().empty()) return fail("compute program addresses no memory");
+    if (scanned.empty()) { ++dispatchesWithoutEffect; lastDispatchNote_ = "aucune mémoire adressée"; return true; }
+    // As for draws: over 16 ranges, joined across their smallest gaps, unless
+    // that copies 8 MiB more than the kernel's own ranges.
+    const std::vector<PM4Range> ranges = scanned.size() > 16 ? coalesceRanges(scanned, 16) : scanned;
+    if (scanned.size() > 16) {
+        std::uint64_t own = 0, joined = 0;
+        for (const auto& r : scanned) own += r.size;
+        for (const auto& r : ranges) joined += r.size;
+        if (joined > own + (8ull << 20)) return fail("compute reads more than 16 memory ranges");
+    }
     auto stored = [&](std::uint64_t address, std::uint64_t length) {
         for (const auto& s : scanner_.stored()) if (address < s.base + s.size && s.base < address + length) return true;
         return false;
