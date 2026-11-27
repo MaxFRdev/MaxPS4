@@ -85,6 +85,10 @@ GCN_FN uint gcn_convert(uint raw, uint bits, uint nfmt) {
     if (nfmt == 7u && bits == 16u) return gu(gcn_f16(raw));
     return raw;
 }
+// An sRGB channel (NFMT 9) to linear, as the texture unit converts it.
+GCN_FN float gcn_srgb_linear(float c) {
+    return c <= 0.04045f ? c / 12.92f : gcn_exp2(2.4f * gcn_log2((c + 0.055f) / 1.055f));
+}
 // An unsigned 10- or 11-bit float (5 exponent bits, `mbits` mantissa bits).
 GCN_FN uint gcn_ufloat(uint raw, uint mbits) {
     uint e = raw >> mbits; uint m = raw & ((1u << mbits) - 1u);
@@ -280,7 +284,8 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
     else if (dfmt == 3u) { c0 = float(raw & 0xffu) / 255.0f; c1 = float((raw >> 8) & 0xffu) / 255.0f; }
     else if (dfmt == 4u) c0 = nfmt == 7u ? gf(raw) : float(raw);
     else if (dfmt == 10u) { c0 = float(raw & 0xffu) / 255.0f; c1 = float((raw >> 8) & 0xffu) / 255.0f;
-                            c2 = float((raw >> 16) & 0xffu) / 255.0f; c3 = float((raw >> 24) & 0xffu) / 255.0f; }
+                            c2 = float((raw >> 16) & 0xffu) / 255.0f; c3 = float((raw >> 24) & 0xffu) / 255.0f;
+                            if (nfmt == 9u) { c0 = gcn_srgb_linear(c0); c1 = gcn_srgb_linear(c1); c2 = gcn_srgb_linear(c2); } }
     else if (dfmt == 16u) { c0 = float(raw & 31u) / 31.0f; c1 = float((raw >> 5) & 63u) / 63.0f; c2 = float((raw >> 11) & 31u) / 31.0f; }
     else if (dfmt == 17u) { c0 = float(raw & 1u); c1 = float((raw >> 1) & 31u) / 31.0f; c2 = float((raw >> 6) & 31u) / 31.0f; c3 = float((raw >> 11) & 31u) / 31.0f; }
     else if (dfmt == 18u) { c0 = float(raw & 31u) / 31.0f; c1 = float((raw >> 5) & 31u) / 31.0f; c2 = float((raw >> 10) & 31u) / 31.0f; c3 = float((raw >> 15) & 1u); }

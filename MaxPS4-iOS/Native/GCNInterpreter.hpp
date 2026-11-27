@@ -892,7 +892,12 @@ private:
         case 2: c[0] = t.nfmt == 7 ? gcn_detail::f16(raw & 0xffff) : unorm(raw & 0xffff, 16); break;
         case 3: c[0] = unorm(raw & 0xff, 8); c[1] = unorm((raw >> 8) & 0xff, 8); break;
         case 4: c[0] = t.nfmt == 7 ? gcn_detail::f32(raw) : float(raw); break;
-        case 10: for (unsigned n = 0; n < 4; ++n) c[n] = unorm((raw >> (8 * n)) & 0xff, 8); break;
+        case 10:
+            for (unsigned n = 0; n < 4; ++n) c[n] = unorm((raw >> (8 * n)) & 0xff, 8);
+            // sRGB (NFMT 9): colour channels to linear, as the texture unit does.
+            if (t.nfmt == 9)
+                for (unsigned n = 0; n < 3; ++n) c[n] = c[n] <= 0.04045f ? c[n] / 12.92f : std::pow((c[n] + 0.055f) / 1.055f, 2.4f);
+            break;
         case 16: c[0] = unorm(raw & 31, 5); c[1] = unorm((raw >> 5) & 63, 6); c[2] = unorm((raw >> 11) & 31, 5); break;
         case 17: c[0] = unorm(raw & 1, 1); c[1] = unorm((raw >> 1) & 31, 5); c[2] = unorm((raw >> 6) & 31, 5); c[3] = unorm((raw >> 11) & 31, 5); break;
         case 18: c[0] = unorm(raw & 31, 5); c[1] = unorm((raw >> 5) & 31, 5); c[2] = unorm((raw >> 10) & 31, 5); c[3] = unorm((raw >> 15) & 1, 1); break;

@@ -1036,7 +1036,8 @@ MTLPixelFormat PM4MetalRenderer::nativeFormat(unsigned dfmt, unsigned nfmt, unsi
     case 6: if (nfmt == 7) { pixelBytes = 4; return MTLPixelFormatRG11B10Float; } break;
     // 2_10_10_10 lists its channels high to low: X in the low 10 bits, as RGB10A2.
     case 9: if (nfmt == 0) { pixelBytes = 4; return MTLPixelFormatRGB10A2Unorm; } break;
-    case 10: pixelBytes = 4; return MTLPixelFormatRGBA8Unorm; // gcn_texel_at reads it as unorm whatever the nfmt
+    // Read as unorm whatever the nfmt, sRGB (9) converted to linear as GCN does.
+    case 10: pixelBytes = 4; return nfmt == 9 ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm;
     case 11: if (nfmt == 7 && floatFilter) { pixelBytes = 8; return MTLPixelFormatRG32Float; } break;
     case 12: if (nfmt == 0 || nfmt == 7) { pixelBytes = 8; return nfmt ? MTLPixelFormatRGBA16Float : MTLPixelFormatRGBA16Unorm; } break;
     case 14: if (nfmt == 7 && floatFilter) { pixelBytes = 16; return MTLPixelFormatRGBA32Float; } break;
