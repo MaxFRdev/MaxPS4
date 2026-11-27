@@ -37,6 +37,18 @@ struct Fixture {
 }
 int main() {
     {
+        // ELIMINATE_FAST_CLEAR (CB_COLOR_CONTROL MODE 2) draws nothing; the
+        // target's next draw carries the clear (CB_COLOR0_CLEAR_WORD0/1), once.
+        Fixture f;
+        f.run({0xc0016900, 0x202, 2u << 4, 0xc0026900, 0x323, 0x11223344, 0x55667788, 0xc0012d00, 3, 2});
+        assert(f.full.empty() && f.stats.fastClears == 1);
+        f.run({0xc0016900, 0x202, 1u << 4, 0xc0012d00, 3, 2, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 2 && f.full[0].fastClear && !f.full[1].fastClear);
+        assert(f.full[0].clearWords[0] == 0x11223344 && f.full[0].clearWords[1] == 0x55667788 && f.full[0].target == 0x11000);
+        assert(f.stats.depthReport().find("effacements rapides : 1") != std::string::npos);
+        std::puts("PASS fast clear eliminations become a clear of the target's next draw");
+    }
+    {
         // Packets whose effect is lost are counted by name; sync packets and
         // NUM_INSTANCES 1 are not, and the stream goes on to the next draw.
         Fixture f;

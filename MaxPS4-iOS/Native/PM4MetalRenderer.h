@@ -130,6 +130,8 @@ public:
     // 32 32_32 32_32_32_32 FLOAT, 2_10_10_10 UNORM, 10_11_11 FLOAT, 8_8 and
     // 8 UNORM/SNORM; others swap 0 only.
     static MTLPixelFormat targetFormat(unsigned format, unsigned number, unsigned swap);
+    static MTLClearColor fastClearColour(unsigned format, unsigned number, const std::uint32_t words[2]);
+    unsigned fastClearsApplied = 0; // colour targets cleared for an eliminated fast clear
     // Bytes per pixel of a colour target format (0 for others).
     static unsigned bytesPerPixel(MTLPixelFormat format);
     // f(address, texture) for every colour target.
@@ -204,6 +206,7 @@ private:
     std::map<std::uint64_t, std::pair<double, std::array<float, 4>>> fadeLast_; // per pixel program
     void noteInto(std::uint64_t address, std::string line);
     std::map<std::uint64_t, float> depthClearTo_; // Clears waiting for a pass, by address.
+    std::map<std::uint64_t, MTLClearColor> colourClearTo_; // fast clears waiting for a pass, by target
     std::map<std::uint64_t, unsigned> stencilClearTo_; // The same for stencil.
     // By depth function and write, then stencil faces (see depthState).
     std::map<std::array<std::uint32_t, 5>, id<MTLDepthStencilState>> depthStates_;

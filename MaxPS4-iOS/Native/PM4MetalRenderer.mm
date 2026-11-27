@@ -1181,6 +1181,16 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     if (d.scissor[2] <= d.scissor[0] || d.scissor[3] <= d.scissor[1]) return true; // nothing visible
     // Front and back faces culled: no triangle is left (rectangles are never culled).
     if (d.cull == 3 && d.primitive != 0x11 && !d.depthClear) { ++culledDraws; return true; }
+    // A fast clear due on this target (PM4Draw::fastClear) loads its next
+    // pass cleared, even if this draw waits for its pipeline.
+    if (d.colour && d.fastClear) {
+        colourClearTo_[d.target] = fastClearColour(d.format, d.number, d.clearWords);
+        ++fastClearsApplied;
+        const auto open = targets_.find(d.target);
+        if (encoder_ && open != targets_.end() && attachment_ == open->second.texture) {
+            [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil;
+        }
+    }
     deferred_ = false;
     id<MTLRenderPipelineState> state = pipeline(d, format, depthFormat);
     if (!state && deferred_) { ++drawsDeferred; return true; } // its pipeline is still being built
@@ -1297,8 +1307,10 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     if (target.texture) {
         pass.colorAttachments[0].texture = target.texture;
-        pass.colorAttachments[0].loadAction = target.fresh ? MTLLoadActionClear : MTLLoadActionLoad;
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        const auto clearTo = colourClearTo_.find(d.target);
+        pass.colorAttachments[0].loadAction = target.fresh || clearTo != colourClearTo_.end() ? MTLLoadActionClear : MTLLoadActionLoad;
+        pass.colorAttachments[0].clearColor = clearTo != colourClearTo_.end() ? clearTo->second : MTLClearColorMake(0, 0, 0, 0);
+        if (clearTo != colourClearTo_.end()) colourClearTo_.erase(clearTo);
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     }
     for (unsigned k = 0; k < 7; ++k) {
@@ -1606,6 +1618,44 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
 id<MTLTexture> PM4MetalRenderer::target(std::uint64_t address) const {
     const auto found = targets_.find(address);
     return found == targets_.end() ? nil : found->second.texture;
+}
+
+// CB_COLOR0_CLEAR_WORD0/1 hold one pixel in the target's format: its value
+// as Metal's clear colour (formats without a decoding clear to zero).
+MTLClearColor PM4MetalRenderer::fastClearColour(unsigned format, unsigned number, const std::uint32_t words[2]) {
+    auto half = [](std::uint32_t h) -> double {
+        const int e = int((h >> 10) & 31); const double m = double(h & 1023), s = (h & 0x8000) ? -1 : 1;
+        if (e == 0) return s * m * std::ldexp(1.0, -24);
+        if (e == 31) return 0; // inf or NaN: a clear never wants either
+        return s * (1 + m / 1024) * std::ldexp(1.0, e - 15);
+    };
+    auto small = [](std::uint32_t bits, int mantissa) -> double { // unsigned 11- or 10-bit float
+        const int e = int(bits >> mantissa); const double m = double(bits & ((1u << mantissa) - 1));
+        if (e == 0) return m * std::ldexp(1.0, -14 - mantissa);
+        if (e == 31) return 0;
+        return (1 + m / double(1u << mantissa)) * std::ldexp(1.0, e - 15);
+    };
+    auto unorm = [](std::uint32_t v, unsigned bits) { return double(v) / double((1u << bits) - 1); };
+    auto snorm8 = [](std::uint32_t v) { return std::max(-1.0, double(std::int8_t(v)) / 127); };
+    const std::uint32_t w0 = words[0], w1 = words[1];
+    switch (format) {
+    case 0xa:
+        if (number == 1) return MTLClearColorMake(snorm8(w0), snorm8(w0 >> 8), snorm8(w0 >> 16), snorm8(w0 >> 24));
+        return MTLClearColorMake(unorm(w0 & 255, 8), unorm((w0 >> 8) & 255, 8), unorm((w0 >> 16) & 255, 8), unorm(w0 >> 24, 8));
+    case 0xc:
+        if (number == 7) return MTLClearColorMake(half(w0 & 0xffff), half(w0 >> 16), half(w1 & 0xffff), half(w1 >> 16));
+        return MTLClearColorMake(unorm(w0 & 0xffff, 16), unorm(w0 >> 16, 16), unorm(w1 & 0xffff, 16), unorm(w1 >> 16, 16));
+    case 0x5:
+        if (number == 7) return MTLClearColorMake(half(w0 & 0xffff), half(w0 >> 16), 0, 1);
+        return MTLClearColorMake(unorm(w0 & 0xffff, 16), unorm(w0 >> 16, 16), 0, 1);
+    case 0x2: return MTLClearColorMake(number == 7 ? half(w0 & 0xffff) : unorm(w0 & 0xffff, 16), 0, 0, 1);
+    case 0x4: { float v; std::memcpy(&v, &w0, 4); return MTLClearColorMake(std::isfinite(v) ? v : 0, 0, 0, 1); }
+    case 0x6: return MTLClearColorMake(small(w0 & 0x7ff, 6), small((w0 >> 11) & 0x7ff, 6), small(w0 >> 22, 5), 1);
+    case 0x9: return MTLClearColorMake(unorm(w0 & 1023, 10), unorm((w0 >> 10) & 1023, 10), unorm((w0 >> 20) & 1023, 10), unorm(w0 >> 30, 2));
+    case 0x3: return MTLClearColorMake(unorm(w0 & 255, 8), unorm((w0 >> 8) & 255, 8), 0, 1);
+    case 0x1: return MTLClearColorMake(unorm(w0 & 255, 8), 0, 0, 1);
+    default: return MTLClearColorMake(0, 0, 0, 0);
+    }
 }
 
 MTLPixelFormat PM4MetalRenderer::targetFormat(unsigned format, unsigned number, unsigned swap) {

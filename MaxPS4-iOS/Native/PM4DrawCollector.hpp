@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,6 +22,7 @@
 namespace maxps4::gpu {
 struct PM4DrawStats {
     unsigned draws = 0, rendered = 0, skipped = 0, failed = 0, dispatches = 0;
+    unsigned fastClears = 0; // ELIMINATE_FAST_CLEAR passes, applied as clears (PM4Draw::fastClear)
     std::string error; // the first failure
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
@@ -40,6 +42,11 @@ struct PM4DrawStats {
             char line[96];
             std::snprintf(line, sizeof line, " · MRT : %u cibles en plus, %u écartées", extraTargets, extraTargetsDropped);
             more = line;
+        }
+        if (fastClears) {
+            char line[64];
+            std::snprintf(line, sizeof line, " · effacements rapides : %u", fastClears);
+            more += line;
         }
         return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
     }
@@ -101,6 +108,11 @@ struct PM4Draw {
     // them and they share its size: more[k - 1] for slot k, base 0 when unused.
     struct ColourTarget { std::uint64_t base = 0; unsigned format = 0xa, number = 0, swap = 0, mask = 0; std::uint32_t blend = 0; };
     ColourTarget more[7];
+    // A fast clear of target 0 is due before this draw: the game eliminated
+    // one on this target (CB_COLOR_CONTROL MODE 2) since its last draw into
+    // it. clearWords: CB_COLOR0_CLEAR_WORD0/1, a pixel in the target's format.
+    bool fastClear = false;
+    std::uint32_t clearWords[2] = {};
     float blendConstant[4] = {};                     // CB_BLEND_RED/GREEN/BLUE/ALPHA
     // False: a depth-only draw (no colour target, or mask 0); target is then 0
     // and pitch/height are the depth buffer's.
@@ -231,6 +243,7 @@ private:
     std::array<std::uint32_t, 0x400> context_{}, shader_{}, uconfig_{};
     unsigned indexBytes_ = 2;
     std::uint64_t indexBase_ = 0; // Persists across submissions, like INDEX_TYPE.
+    std::map<std::uint64_t, std::array<std::uint32_t, 2>> pendingClears_; // by target, see PM4Draw::fastClear
 
     static void setRegisters(std::array<std::uint32_t, 0x400>& bank, const std::uint32_t* data, std::size_t n) {
         for (std::size_t k = 1; k < n; ++k) if (data[0] + k - 1 < bank.size()) bank[data[0] + k - 1] = data[k];
@@ -306,6 +319,17 @@ private:
         // A stencil write without colour (a mask, a shadow volume) is a depth-only draw too.
         const bool stencilWrites = d.stencilClear || (d.stencilTest && (d.stencil[0].writeMask || d.stencil[1].writeMask) &&
             (d.stencil[0].fail | d.stencil[0].zpass | d.stencil[0].zfail | d.stencil[1].fail | d.stencil[1].zpass | d.stencil[1].zfail));
+        // ELIMINATE_FAST_CLEAR: the GPU writes the clear colour into the tiles
+        // a fast clear left untouched. Targets live in Metal textures with no
+        // CMASK: the clear is applied whole, before the target's next draw
+        // (the next frame's), instead of leaving its first contents (CoD's
+        // HDR scene stayed NaN, and its bloom and tone mapping black).
+        if (((context_[0x202] >> 4) & 7) == 2 && context_[0x318]) {
+            ++stats_.skipped;
+            ++stats_.fastClears;
+            pendingClears_[std::uint64_t(context_[0x318]) << 8] = {context_[0x323], context_[0x324]};
+            return;
+        }
         if (!d.colour && !(depthOnlyDraws && (d.depthWrite || d.depthClear || stencilWrites))) {
             ++stats_.skipped;
             // CB_TARGET_MASK, CB_COLOR0/1 BASE and INFO format, CB_COLOR_CONTROL,
@@ -389,6 +413,11 @@ private:
         if (d.colour) {
             // CB_COLOR0_PITCH in 8-pixel units, CB_COLOR0_SLICE in 64-pixel units.
             d.target = std::uint64_t(context_[0x318]) << 8;
+            if (const auto due = pendingClears_.find(d.target); due != pendingClears_.end()) {
+                d.fastClear = true;
+                d.clearWords[0] = due->second[0]; d.clearWords[1] = due->second[1];
+                pendingClears_.erase(due);
+            }
             d.pitch = ((context_[0x319] & 0x7ff) + 1) * 8;
             d.height = unsigned((std::uint64_t((context_[0x31a] & 0x3fffff) + 1) * 64) / d.pitch);
             d.swap = (info >> 11) & 3;
