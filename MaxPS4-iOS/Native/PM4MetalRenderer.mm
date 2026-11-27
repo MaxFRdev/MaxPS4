@@ -1990,6 +1990,7 @@ void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
         std::lock_guard<std::mutex> lock(mutex);
         if (archiveOpened) return;
         archiveOpened = true;
+        archiveDevice = device;
     }
     NSFileManager* files = [NSFileManager defaultManager];
     NSURL* folder = archiveFolder();
@@ -2111,17 +2112,34 @@ void PM4MetalRenderer::AsyncPipelines::saveArchive() {
     } @catch (NSException* exception) { failure = std::string("exception : ") + exception.reason.UTF8String; }
     NSNumber* size = nil;
     if (written) [buildingURL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+    // A write that failed ("cannot pack" on the iPhone) fails again with the
+    // same contents, every 16 additions, and nothing later gets saved: this
+    // launch goes on in a new archive file (the last one written stays).
+    id<MTLBinaryArchive> next = nil;
+    NSURL* nextURL = nil;
+    if (!written && archiveDevice) {
+        @try {
+            NSError* failed = nil;
+            next = [archiveDevice newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&failed];
+            nextURL = [folder URLByAppendingPathComponent:[NSString stringWithFormat:@"%lld-%u.bin",
+                                                           (long long)[NSDate date].timeIntervalSince1970, archiveRestarts + 1]];
+        } @catch (NSException*) { next = nil; }
+    }
     std::lock_guard<std::mutex> lock(mutex);
     archiveSavedAt = std::chrono::steady_clock::now();
     if (written) { archiveUnsaved = 0; ++archiveSaves; archiveBytes = size ? size.unsignedLongLongValue : 0; }
-    else archiveError = !failure.empty() ? failure : error ? error.localizedDescription.UTF8String : "ecriture refusee";
+    else {
+        archiveError = !failure.empty() ? failure : error ? error.localizedDescription.UTF8String : "ecriture refusee";
+        archiveUnsaved = 0;
+        if (next) { building = next; buildingURL = nextURL; ++archiveRestarts; }
+    }
 }
 
 std::string PM4MetalRenderer::AsyncPipelines::archiveReport() const {
     if (!archiveOpened) return std::string();
     char text[256];
-    std::snprintf(text, sizeof text, " · archive Metal %s : %u trouvés, %u compilés, %u ajoutés, %u écritures (%.1f Mo)%s%s",
-                  archiveState.c_str(), archiveHits, archiveMisses, archiveAdded, archiveSaves, double(archiveBytes) / (1 << 20),
+    std::snprintf(text, sizeof text, " · archive Metal %s : %u trouvés, %u compilés, %u ajoutés, %u écritures (%.1f Mo), %u reprises%s%s",
+                  archiveState.c_str(), archiveHits, archiveMisses, archiveAdded, archiveSaves, double(archiveBytes) / (1 << 20), archiveRestarts,
                   archiveError.empty() ? "" : ", erreur : ", archiveError.c_str());
     return text;
 }

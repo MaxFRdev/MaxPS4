@@ -285,6 +285,8 @@ private:
         id<MTLBinaryArchive> building = nil;          // this launch's, on archiveQueue
         NSURL* buildingURL = nil;
         bool archiveOpened = false;
+        id<MTLDevice> archiveDevice = nil; // for a new archive after a failed write
+        unsigned archiveRestarts = 0;
         dispatch_queue_t archiveQueue = nil;
         unsigned archiveHits = 0, archiveMisses = 0, archiveAdded = 0, archiveUnsaved = 0, archiveSaves = 0;
         unsigned long long archiveBytes = 0;
