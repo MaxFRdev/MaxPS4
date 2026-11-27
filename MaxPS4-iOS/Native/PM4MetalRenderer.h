@@ -71,7 +71,11 @@ public:
     unsigned scalarLoadsDirect = 0, scalarLoadsAll = 0; // Pixel programs translated so far.
     bool nativeSamplesOnly = false; // Tests only: no software filtering, see the pipeline source.
     // Pixel programs with this many samples or more sample native textures only (see pipeline()).
-    static constexpr std::size_t manySamples = 8;
+    // 2: each inlined software sampler (every format, tiling, BC block) made
+    // the Metal compile slow, and CoD's libraries queued by the hundred (547
+    // waiting in a mission); native textures now cover almost every T# (64475
+    // bound, 2252 refused), so only single-sample programs keep the fallback.
+    static constexpr std::size_t manySamples = 2;
     unsigned nativeOnlyPrograms = 0;
     void listCostly(std::uint64_t address); // Adds a program's words to programListings, once.
     const std::string& lastDispatchNote() const { return lastDispatchNote_; }
