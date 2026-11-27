@@ -987,7 +987,12 @@ private:
                 (d[2] & 0x3fff) + 1, ((d[2] >> 14) & 0x3fff) + 1, ((d[4] >> 13) & 0x3fff) + 1,
                 (d[1] >> 20) & 0x3f, (d[1] >> 26) & 15, (d[3] >> 20) & 0x1f, d[3] >> 28,
                 {d[3] & 7, (d[3] >> 3) & 7, (d[3] >> 6) & 7, (d[3] >> 9) & 7}};
-        if (t.type != 9) return fail("image type " + std::to_string(t.type));
+        // 1D, 2D, 3D, cube and arrays read their first slice here; the range
+        // noted covers every layer (cube faces, array layers, 3D depth slices),
+        // which the translated programs reach through gcn_slice.
+        if (t.type < 8 || t.type > 13) return fail("image type " + std::to_string(t.type));
+        const std::uint32_t lastLayer = (d[5] >> 13) & 0x1fff, depth3d = (d[4] & 0x1fff) + 1;
+        const std::uint64_t layers = t.type >= 11 ? std::uint64_t(lastLayer) + 1 : t.type == 10 ? depth3d : 1;
         // Preserve the destination address even when its tiled layout cannot
         // be interpreted by this CPU-side resource scan. The renderer uses
         // this to refuse unsupported writes instead of silently dropping them.
@@ -1018,10 +1023,11 @@ private:
         unsigned bytes;
         if (!imageBytes(t.dfmt, bytes)) return fail("image data format " + std::to_string(t.dfmt));
         if (t.dfmt >= 35 && t.dfmt <= 39 &&
-            ((t.nfmt != 0 && !(t.dfmt >= 38 && t.nfmt == 1)) || t.pitch < t.width))
+            ((t.nfmt != 0 && !(t.dfmt >= 38 && t.nfmt == 1) && !(t.dfmt <= 37 && t.nfmt == 9)) || t.pitch < t.width))
             return fail("BC" + std::to_string(t.dfmt - 34) +
                 (t.dfmt >= 38 ? " requires UNORM/SNORM and pitch >= width" : " requires UNORM and pitch >= width"));
-        if (resource) resource(t.base, imageSize(t, bytes));
+        const std::uint64_t layerBytes = (imageSize(t, bytes) + 255) & ~std::uint64_t(255);
+        if (resource) resource(t.base, layers > 1 ? layerBytes * layers : imageSize(t, bytes));
         if (i.opcode == 8 && stored) stored(t.base, imageSize(t, bytes));
         if (imageResource) {
             imageSampler = {};

@@ -62,11 +62,15 @@ int main() {
     GCNWave valid(limited,1);
     std::copy_n(texture.d,8,valid.s.begin()); valid.v(0,0)=6; valid.v(1,0)=8;
     assert(valid.run(program));
-    for (unsigned number : {7u,9u}) {
+    {
         GCNWave unsupported(arena.memory,1);
-        std::copy_n(texture.d,8,unsupported.s.begin()); unsupported.s[1] |= number << 26;
+        std::copy_n(texture.d,8,unsupported.s.begin()); unsupported.s[1] |= 7u << 26;
         assert(!unsupported.run(program));
         assert(unsupported.error.find("BC1 requires UNORM and pitch >= width") == 0);
+        // sRGB (NFMT 9) is read, converted to linear.
+        GCNWave srgb(arena.memory,1);
+        std::copy_n(texture.d,8,srgb.s.begin()); srgb.s[1] |= 9u << 26; srgb.v(0,0)=6; srgb.v(1,0)=8;
+        assert(srgb.run(program));
     }
     // Bilinear filtering interpolates decoded colours across a block boundary.
     rt::GCNRes4 sampler{{0x12,0,1u << 20,0}};
