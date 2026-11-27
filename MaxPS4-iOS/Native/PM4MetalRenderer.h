@@ -245,6 +245,11 @@ private:
     id<MTLRenderPipelineState> depthCopyPipeline_ = nil;
     bool depthCopyBroken_ = false;
     bool copyDepth(std::uint64_t address, id<MTLCommandBuffer> commands);
+    // A T# inside a depth buffer (a shadow cascade in an atlas): the rows it
+    // starts at, copied out of that buffer's R32Float copy, by T# address.
+    struct DepthPart { id<MTLTexture> texture = nil; std::uint64_t version = ~0ull; };
+    std::map<std::uint64_t, DepthPart> depthParts_;
+    bool copyDepthPart(std::uint64_t address, unsigned width, unsigned height, id<MTLCommandBuffer> commands);
     id<MTLTexture> depthAttachment_ = nil;
     id<MTLDevice> device_;
     const GCNMemory& code_;
@@ -319,11 +324,10 @@ private:
         std::map<LibraryKey, id<MTLLibrary>> libraries;
         std::map<LibraryKey, std::vector<std::function<void(id<MTLLibrary>, NSError*)>>> compiling;
         unsigned librariesShared = 0, librariesCompiled = 0;
-        // At most compileLimit compiles in flight, library or pipeline: hundreds
-        // started together (CoD's mission) left the iPhone's compiler service
-        // thrashing, each taking a minute, and pipeline creations, unbounded,
-        // still waited 98 s behind each other. The rest wait their turn, in
-        // order, a pipeline (its library done, a draw close to showing) first.
+        // At most compileLimit library compiles in flight: hundreds started
+        // together (CoD's mission) left the iPhone's compiler service
+        // thrashing, each taking a minute. The rest wait their turn, in order.
+        // Pipeline creations stay outside it (counted in pipelinesRunning).
         static constexpr unsigned compileLimit = 4;
         unsigned compilesRunning = 0, pipelinesRunning = 0;
         std::deque<std::function<void()>> compileQueue;

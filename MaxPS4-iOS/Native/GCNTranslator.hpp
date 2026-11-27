@@ -44,6 +44,7 @@ struct GCNTranslation {
     std::uint8_t colors = 0;     // pixel: MRTs exported
     bool position = false, quad = false, mayKill = false;
     bool stores = false;         // compute: writes guest memory
+    unsigned ldsApproximated = 0; // pixel LDS accesses read as 0 / dropped (no LDS outside compute)
     // pixel: the scalar loads, each with `2 + count` words at `offset` of the
     // draw's table of scalar values (address, then words: gcn_site_hit).
     std::vector<GCNScalarSite> sites;
@@ -591,6 +592,8 @@ private:
         case 261: expr = "gu(fb - fa)"; break;
         case 263: expr = "(fa == 0.0f || fb == 0.0f) ? 0u : gu(fa * fb)"; break;
         case 264: expr = "gu(fa * fb)"; break;
+        case 265: expr = "uint(int(a << 8) >> 8) * uint(int(b << 8) >> 8)"; break;
+        case 266: expr = "uint(ulong(long(int(a << 8) >> 8) * long(int(b << 8) >> 8)) >> 32)"; break;
         case 267: expr = "(a & 0xffffffu) * (b & 0xffffffu)"; break;
         case 268: expr = "uint((ulong(a & 0xffffffu) * ulong(b & 0xffffffu)) >> 32)"; break;
         case 271: expr = "gu(gcn_fmin(fa, fb))"; break;
@@ -720,7 +723,28 @@ private:
     bool ds(const Inst& in) {
         const GCNInstruction& i = in.i;
         const unsigned offset = i.word0 & 0xffff;
-        if (i.opcode != 53) return fail("LDS access other than a swizzle");
+        if (i.opcode != 53) {
+            // Other LDS accesses in a pixel program (CoD left 3857 draws out over
+            // one): no LDS here, so reads and returning atomics give 0 and
+            // writes are dropped, rather than losing the draw. Compute still fails.
+            if (options_.stage != GCNStage::pixel) return fail("LDS access other than a swizzle: " + in.name);
+            const unsigned op = i.opcode, dst = i.word1 >> 24;
+            unsigned returned = 0;
+            if (op == 54 || (op >= 57 && op <= 60)) returned = 1;            // ds_read_b32, u8/i8/u16/i16
+            else if (op == 55 || op == 56 || op == 118) returned = 2;        // read2_b32 (st64), read_b64
+            else if (op == 119 || op == 120) returned = 4;                   // read2_b64 (st64)
+            else if (op >= 32 && op <= 52) returned = 1;                     // 32-bit atomics returning
+            else if (op >= 96 && op <= 116) returned = 2;                    // 64-bit atomics returning
+            body_ += "/* " + in.name + ": no LDS */";
+            if (returned) {
+                body_ += " if (" + std::string(ex()) + ") {";
+                for (unsigned k = 0; k < returned && dst + k < 256; ++k) body_ += " " + v(dst + k) + " = 0u;";
+                body_ += " }";
+                sregs_.insert(126);
+            }
+            ++out_.ldsApproximated;
+            return true;
+        }
         if (options_.stage != GCNStage::pixel) return fail("quad swizzle outside a pixel program");
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
         // Quad mode (bit 15): two bits per lane pick the source lane. Bitmask

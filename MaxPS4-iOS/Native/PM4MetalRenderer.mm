@@ -1110,12 +1110,18 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     // emulator renders its console's frame, then draws that frame scaled on
     // screen; a 3D game samples its 16-bit float scene to tone-map it). Before
     // the tiled decoders below: a tiled T# of a target reads the target too.
-    if (dfmt == 4 || dfmt == 2)
+    if (dfmt == 4 || dfmt == 2) {
         if (const auto copy = depthCopies_.find(base); copy != depthCopies_.end() && copy->second.texture &&
             copy->second.texture.width >= width && copy->second.texture.height >= height) {
             ++depthReads;
             return copy->second.texture;
         }
+        if (const auto part = depthParts_.find(base); part != depthParts_.end() && part->second.texture &&
+            part->second.texture.width >= width && part->second.texture.height >= height) {
+            ++depthReads;
+            return part->second.texture;
+        }
+    }
     if (const auto rendered = targets_.find(base); rendered != targets_.end() && rendered->second.format == dfmt) {
         id<MTLTexture> texture = rendered->second.texture;
         bool attached = texture == drawing;
@@ -1340,7 +1346,9 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         for (const auto& t : scanner_.images()) {
             const std::uint64_t at = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
             const unsigned format = (t[1] >> 20) & 63;
-            if ((format == 4 || format == 2) && depthTargets_.count(at)) copyDepth(at, commands);
+            if (format != 4 && format != 2) continue;
+            if (depthTargets_.count(at)) copyDepth(at, commands);
+            else copyDepthPart(at, (t[2] & 0x3fff) + 1, ((t[2] >> 14) & 0x3fff) + 1, commands);
         }
     Target none{nil, false};
     Target& target = d.colour ? targets_[d.target] : none;
@@ -2056,6 +2064,39 @@ fragment float depth_copy_fragment(DepthCopyVertex in [[stage_in]], depth2d<floa
     return true;
 }
 
+bool PM4MetalRenderer::copyDepthPart(std::uint64_t address, unsigned width, unsigned height, id<MTLCommandBuffer> commands) {
+    // The depth buffer holding `address`: 32-bit depth, rows of its width.
+    for (auto& [base, depth] : depthTargets_) {
+        if (!depth.texture || address <= base) continue;
+        const std::uint64_t row = std::uint64_t(depth.texture.width) * 4, size = row * depth.texture.height;
+        if (address >= base + size) continue;
+        const std::uint64_t top = (address - base) / row;
+        if ((address - base) % row || width > depth.texture.width || top + height > depth.texture.height) return false;
+        if (!copyDepth(base, commands)) return false;
+        const DepthCopy& whole = depthCopies_[base];
+        DepthPart& part = depthParts_[address];
+        if (part.texture && part.version == whole.version && part.texture.width == width && part.texture.height == height) return true;
+        if (!part.texture || part.texture.width != width || part.texture.height != height) {
+            MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                                                  width:width height:height mipmapped:NO];
+            descriptor.usage = MTLTextureUsageShaderRead;
+            descriptor.storageMode = MTLStorageModePrivate;
+            part.texture = [device_ newTextureWithDescriptor:descriptor];
+            if (!part.texture) return false;
+        }
+        if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
+        id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+        if (!blit) return false;
+        [blit copyFromTexture:whole.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, top, 0)
+                   sourceSize:MTLSizeMake(width, height, 1) toTexture:part.texture destinationSlice:0 destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        part.version = whole.version;
+        return true;
+    }
+    return false;
+}
+
 PM4MetalRenderer::Target* PM4MetalRenderer::depthTexture(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     Target& depth = depthTargets_[d.depthTarget];
     if (depth.texture && depth.texture.width == d.pitch && depth.texture.height == d.height) return &depth;
@@ -2177,16 +2218,14 @@ void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
 void PM4MetalRenderer::AsyncPipelines::compile(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
                                                std::function<void(id<MTLRenderPipelineState>, NSError*)> done) {
     auto self = shared_from_this();
-    // Through the compile limit, ahead of libraries waiting (see compileLimit).
-    startCompile([self, device, descriptor, done] {
-        { std::lock_guard<std::mutex> lock(self->mutex); ++self->pipelinesRunning; }
-        [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
-            { std::lock_guard<std::mutex> lock(self->mutex); --self->pipelinesRunning; }
-            self->compileDone();
-            if (state) self->remember(descriptor);
-            done(state, failed);
-        }];
-    }, true);
+    // Not through the library compile limit: a CoD mission built 38 pipelines
+    // in 100 s that way (619 waiting, 457335 draws left out), 253 without it.
+    { std::lock_guard<std::mutex> lock(self->mutex); ++self->pipelinesRunning; }
+    [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
+        { std::lock_guard<std::mutex> lock(self->mutex); --self->pipelinesRunning; }
+        if (state) self->remember(descriptor);
+        done(state, failed);
+    }];
 }
 
 void PM4MetalRenderer::AsyncPipelines::remember(MTLRenderPipelineDescriptor* descriptor) {

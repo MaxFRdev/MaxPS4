@@ -548,6 +548,7 @@ private:
             case 264: r = u32(fa * fb); break;
             case 265: r = std::uint32_t(std::int64_t(std::int32_t(a << 8) / 256) * (std::int32_t(b << 8) / 256)); break;
             case 267: r = (a & 0xffffff) * (b & 0xffffff); break;
+            case 266: r = std::uint32_t(std::uint64_t(std::int64_t(std::int32_t(a << 8) / 256) * (std::int32_t(b << 8) / 256)) >> 32); break;
             case 268: r = std::uint32_t((std::uint64_t(a & 0xffffff) * (b & 0xffffff)) >> 32); break;
             case 271: r = u32(std::fmin(fa, fb)); break;
             case 272: r = u32(std::fmax(fa, fb)); break;
