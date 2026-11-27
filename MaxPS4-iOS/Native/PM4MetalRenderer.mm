@@ -1195,7 +1195,16 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         // smallest gaps (CoD's scene draws read more, and the refusal stopped
         // the whole renderer). The 256 MiB check below still bounds the copy.
         const std::vector<PM4Range> ranges = scanned.size() > 16 ? coalesceRanges(scanned, 16) : scanned;
-        if (scanned.size() > 16) ++coalescedDraws;
+        if (scanned.size() > 16) {
+            // Joined across wide gaps, a draw would copy megabytes it never
+            // reads, every frame (the iPhone ends the app for less): over
+            // 8 MiB more than its own ranges, the draw is left out instead.
+            std::uint64_t own = 0, joined = 0;
+            for (const auto& r : scanned) own += r.size;
+            for (const auto& r : ranges) joined += r.size;
+            if (joined > own + (8ull << 20)) { ++rangeRefusedDraws; return true; }
+            ++coalescedDraws;
+        }
         // A large range (a texture atlas, a vertex pool) gets a buffer of its
         // own, copied once per submission and shared by every draw reading it;
         // the rest is copied into this draw's buffer.
