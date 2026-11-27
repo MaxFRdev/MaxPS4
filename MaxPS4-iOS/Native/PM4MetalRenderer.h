@@ -119,7 +119,13 @@ public:
     std::string drawsInto(std::uint64_t address) const;
     // Flipped buffers (the bridge says), whose centre pixel is read back after
     // each draw or fill into them: the readings that changed it, bytes in texture order.
-    void noteShown(std::uint64_t address) { if (displayProbes && shown_.size() < 8) shown_.insert(address); }
+    // Called on each flip. Probes run for the draws of one frame in 60 only:
+    // each ends the render pass (a full store and load of the target on the
+    // iPhone's tiled GPU), and every draw of the HUD and composite paid it.
+    void noteShown(std::uint64_t address) {
+        if (displayProbes && shown_.size() < 8) shown_.insert(address);
+        probeFrame_ = displayProbes && (flips_++ % 60) == 0;
+    }
     bool displayProbes = true;
     std::string gpuProbes() const;
     // Full-screen quads whose first vertex changed colour (or every 10 s), with the time.
@@ -196,6 +202,8 @@ private:
     std::map<std::uint64_t, std::deque<std::pair<std::string, unsigned>>> into_;
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
     std::set<std::uint64_t> shown_;
+    std::uint64_t flips_ = 0;
+    bool probeFrame_ = false;
     static constexpr unsigned probeSlots = 512;
     id<MTLBuffer> probeRing_ = nil;
     std::uint64_t probeNext_ = 0;

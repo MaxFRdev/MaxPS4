@@ -1522,7 +1522,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     // The GPU's own result: a flipped buffer's centre pixel right after each
     // draw into it. The pass ends here (the next draw reopens it, loading what
     // is there) and a blit copies the pixel to a ring the report reads.
-    if (d.colour && shown_.count(d.target) && target.texture && commands) {
+    if (probeFrame_ && d.colour && shown_.count(d.target) && target.texture && commands) {
         float pos[4] = {0, 0, 0, 0}, colour[4] = {-1, -1, -1, -1};
         for (const auto& e : scanner_.vertexExports()) {
             float* into = e[0] == 12 ? pos : e[0] == 32 ? colour : nullptr;
