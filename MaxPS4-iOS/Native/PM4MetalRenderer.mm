@@ -1098,6 +1098,12 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     // emulator renders its console's frame, then draws that frame scaled on
     // screen; a 3D game samples its 16-bit float scene to tone-map it). Before
     // the tiled decoders below: a tiled T# of a target reads the target too.
+    if (dfmt == 4 || dfmt == 2)
+        if (const auto copy = depthCopies_.find(base); copy != depthCopies_.end() && copy->second.texture &&
+            copy->second.texture.width >= width && copy->second.texture.height >= height) {
+            ++depthReads;
+            return copy->second.texture;
+        }
     if (const auto rendered = targets_.find(base); rendered != targets_.end() && rendered->second.format == dfmt) {
         id<MTLTexture> texture = rendered->second.texture;
         bool attached = texture == drawing;
@@ -1205,6 +1211,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         // Depth and stencil load separately: a clear of one keeps the other.
         if (d.depthClear) depthClearTo_[d.depthTarget] = d.depthClearValue;
         if (d.stencilClear) stencilClearTo_[d.depthTarget] = d.stencilClearValue;
+        ++depthVersion_[d.depthTarget];
         return true;
     }
     if ((d.vte & 0x3f) != 0x3f) return fail("viewport without scale and offset");
@@ -1313,6 +1320,14 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
         drawState.rangeCount = std::uint32_t(ranges.size());
         lastRanges = drawState.rangeCount;
     }
+    // Depth buffers this draw samples: their R32Float copies are brought up to
+    // date before its pass opens (a copy is a pass of its own).
+    if (native_ && !depthTargets_.empty())
+        for (const auto& t : scanner_.images()) {
+            const std::uint64_t at = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
+            const unsigned format = (t[1] >> 20) & 63;
+            if ((format == 4 || format == 2) && depthTargets_.count(at)) copyDepth(at, commands);
+        }
     Target none{nil, false};
     Target& target = d.colour ? targets_[d.target] : none;
     if (d.colour && (!target.texture || target.texture.width != d.pitch || target.texture.height != d.height ||
@@ -1348,6 +1363,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     for (unsigned k = 0; k < 7; ++k) sameMore = sameMore && moreAttachments_[k] == (more[k] ? more[k]->texture : nil);
     Target* depth = nullptr;
     if (d.depthTarget && !(depth = depthTexture(d, commands))) return false;
+    if (depth && (d.depthWrite || d.depthClear || d.stencilClear)) ++depthVersion_[d.depthTarget];
     id<MTLTexture> depthView = depth ? depth->texture : nil;
     if (encoder_ && (commands_ != commands || attachment_ != target.texture || depthAttachment_ != depthView || !sameMore)) {
         [encoder_ endEncoding]; encoder_ = nil;
@@ -1856,9 +1872,10 @@ id<MTLTexture> PM4MetalRenderer::depthTarget(std::uint64_t address) const {
 }
 
 std::string PM4MetalRenderer::depthReport() const {
-    char text[320];
-    std::snprintf(text, sizeof text, "\nProfondeur Metal : %u effacements sans programme · %u dessins avec profondeur, dont %u sans couleur · %u dessins entièrement cullés · %zu tampons, %u redimensionnés · stencil : %u dessins, %u états approchés · MRT : %u dessins",
-                  embeddedDepthDraws, depthDraws, depthOnlyDraws, culledDraws, depthTargets_.size(), depthResized, stencilDraws, stencilApproximated, mrtDraws);
+    char text[512];
+    std::snprintf(text, sizeof text, "\nProfondeur Metal : %u effacements sans programme · %u dessins avec profondeur, dont %u sans couleur · %u dessins entièrement cullés · %zu tampons, %u redimensionnés · stencil : %u dessins, %u états approchés · MRT : %u dessins · profondeur lue par les programmes : %u copies, %u lectures%s",
+                  embeddedDepthDraws, depthDraws, depthOnlyDraws, culledDraws, depthTargets_.size(), depthResized, stencilDraws, stencilApproximated, mrtDraws,
+                  depthCopiesMade, depthReads, depthCopyBroken_ ? " (copie impossible)" : "");
     return text;
 }
 
@@ -1937,12 +1954,71 @@ id<MTLDepthStencilState> PM4MetalRenderer::depthStencilState(const PM4Draw& d, u
     return state;
 }
 
+bool PM4MetalRenderer::copyDepth(std::uint64_t address, id<MTLCommandBuffer> commands) {
+    const auto found = depthTargets_.find(address);
+    if (found == depthTargets_.end() || !found->second.texture || found->second.fresh || depthCopyBroken_ || !commands) return false;
+    id<MTLTexture> source = found->second.texture;
+    const std::uint64_t version = depthVersion_[address];
+    DepthCopy& copy = depthCopies_[address];
+    if (copy.texture && copy.version == version && copy.texture.width == source.width && copy.texture.height == source.height) return true;
+    if (!depthCopyPipeline_) {
+        static const char* const source_text = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+struct DepthCopyVertex { float4 position [[position]]; };
+vertex DepthCopyVertex depth_copy_vertex(uint id [[vertex_id]]) {
+    const float2 corner = float2(float((id << 1) & 2u), float(id & 2u));
+    DepthCopyVertex out; out.position = float4(corner * 2.0f - 1.0f, 0.0f, 1.0f); return out;
+}
+fragment float depth_copy_fragment(DepthCopyVertex in [[stage_in]], depth2d<float> depth [[texture(0)]]) {
+    return depth.read(uint2(in.position.xy));
+}
+)MSL";
+        NSError* error = nil;
+        id<MTLLibrary> library = [device_ newLibraryWithSource:[NSString stringWithUTF8String:source_text] options:nil error:&error];
+        MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+        descriptor.vertexFunction = [library newFunctionWithName:@"depth_copy_vertex"];
+        descriptor.fragmentFunction = [library newFunctionWithName:@"depth_copy_fragment"];
+        descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+        depthCopyPipeline_ = library ? [device_ newRenderPipelineStateWithDescriptor:descriptor error:&error] : nil;
+        if (!depthCopyPipeline_) { depthCopyBroken_ = true; return false; }
+    }
+    if (!copy.texture || copy.texture.width != source.width || copy.texture.height != source.height) {
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                                              width:source.width height:source.height mipmapped:NO];
+        descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModePrivate;
+        copy.texture = [device_ newTextureWithDescriptor:descriptor];
+        if (!copy.texture) return false;
+    }
+    if (encoder_) { [encoder_ endEncoding]; encoder_ = nil; commands_ = nil; attachment_ = nil; depthAttachment_ = nil; }
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = copy.texture;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    // A clear still waiting for the depth buffer's next pass: the copy is that value.
+    const auto cleared = depthClearTo_.find(address);
+    pass.colorAttachments[0].loadAction = cleared != depthClearTo_.end() ? MTLLoadActionClear : MTLLoadActionDontCare;
+    if (cleared != depthClearTo_.end()) pass.colorAttachments[0].clearColor = MTLClearColorMake(cleared->second, 0, 0, 1);
+    id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    if (!encoder) return false;
+    if (cleared == depthClearTo_.end()) {
+        [encoder setRenderPipelineState:depthCopyPipeline_];
+        [encoder setFragmentTexture:source atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    }
+    [encoder endEncoding];
+    copy.version = version;
+    ++depthCopiesMade;
+    return true;
+}
+
 PM4MetalRenderer::Target* PM4MetalRenderer::depthTexture(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     Target& depth = depthTargets_[d.depthTarget];
     if (depth.texture && depth.texture.width == d.pitch && depth.texture.height == d.height) return &depth;
     MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
                                                                                           width:d.pitch height:d.height mipmapped:NO];
-    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; // read by copyDepth
+    ++depthVersion_[d.depthTarget];
     descriptor.storageMode = MTLStorageModePrivate;
     id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
     if (!texture) { fail("depth texture"); return nullptr; }

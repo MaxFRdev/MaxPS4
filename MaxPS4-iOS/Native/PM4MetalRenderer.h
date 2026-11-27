@@ -179,6 +179,7 @@ public:
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;
     unsigned nativeArgumentsShared = 0; // draws reusing the previous draw's native argument buffer
+    unsigned depthCopiesMade = 0, depthReads = 0; // depth buffers copied for, and read by, programs
     unsigned rangesShared = 0; // large ranges copied once for a submission's draws (copy mode)
     unsigned rangesMapped = 0; // of which, textures read in place through hostView instead
     // The host bytes backing guest [address, address + size), or null. When
@@ -233,6 +234,15 @@ private:
     // The depth texture for `d` (d.pitch x d.height), copied from a texture of
     // another size when the buffer was drawn with other targets before.
     Target* depthTexture(const PM4Draw& d, id<MTLCommandBuffer> commands);
+    // Depth buffers read as textures (deferred lighting, SSAO, fog, shadows):
+    // they live only in their Metal depth texture, so a T# at a depth
+    // buffer's address reads an R32Float copy, redone when the depth changed.
+    struct DepthCopy { id<MTLTexture> texture = nil; std::uint64_t version = ~0ull; };
+    std::map<std::uint64_t, DepthCopy> depthCopies_;
+    std::map<std::uint64_t, std::uint64_t> depthVersion_;
+    id<MTLRenderPipelineState> depthCopyPipeline_ = nil;
+    bool depthCopyBroken_ = false;
+    bool copyDepth(std::uint64_t address, id<MTLCommandBuffer> commands);
     id<MTLTexture> depthAttachment_ = nil;
     id<MTLDevice> device_;
     const GCNMemory& code_;
