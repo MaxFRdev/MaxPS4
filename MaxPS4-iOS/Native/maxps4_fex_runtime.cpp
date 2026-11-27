@@ -1034,6 +1034,7 @@ private:
 #if __has_feature(ptrauth_calls)
             fatal.lr = uint64_t(reinterpret_cast<uintptr_t>(ptrauth_strip(reinterpret_cast<void*>(fatal.lr), ptrauth_key_return_address)));
 #endif
+            fatal.frames_from(fatal.fp);
             if (guard) {
                 const bool held = maxps4_jit_held();
                 auto classify = [&](uint64_t at) {

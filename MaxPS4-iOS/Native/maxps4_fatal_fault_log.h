@@ -9,6 +9,7 @@
 #include "maxps4_dispatch_fault.h"
 #include "maxps4_exit_link_trace.h"
 #include "maxps4_indirect_zero_trace.h"
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -60,6 +61,27 @@ struct FatalFault {
     // Which branch reached pc=0 (maxps4_indirect_zero_trace.h): registers,
     // call-ret pop, L1 slot 0, guest stack slot, and a candidate path.
     IndirectBranchTrace indirect;
+    // Host return addresses up the frame-pointer chain (see frames_from).
+    uint64_t frames[16] {};
+    uint8_t frame_count = 0;
+    // Walks fp -> {next fp, return address} while each frame stays above sp,
+    // within 1 MiB of it, aligned and rising: a corrupt chain stops the walk
+    // rather than faulting again.
+    void frames_from(uint64_t start_fp) {
+        frame_count = 0;
+        for (uint64_t at = start_fp; frame_count < 16;) {
+            if (!at || (at & 15) || at < sp || at - sp > (1u << 20)) break;
+            const auto* frame = reinterpret_cast<const uint64_t*>(uintptr_t(at));
+            uint64_t ret = frame[1];
+#if defined(__aarch64__)
+            ret &= 0x0000000fffffffffull; // pointer authentication bits
+#endif
+            if (!ret) break;
+            frames[frame_count++] = ret;
+            if (frame[0] <= at) break;
+            at = frame[0];
+        }
+    }
 };
 
 class FatalFaultLog {
@@ -163,6 +185,38 @@ public:
             const ssize_t w = ::write(fd, line + done, n - done);
             if (w <= 0) break;
             done += size_t(w);
+        }
+        // Names of the host code involved (pc, lr, then the frames), from the
+        // loaded images' symbol tables: not async-signal-safe in theory, but
+        // the process is dying and the line above is already written.
+        char names[3072];
+        Writer w {names, sizeof names};
+        auto name = [&](const char* label, uint64_t at) {
+            w.text(label); w.hex(at);
+            Dl_info info {};
+            if (at && ::dladdr(reinterpret_cast<const void*>(uintptr_t(at)), &info) && info.dli_fname) {
+                const char* image = info.dli_fname;
+                for (const char* p = info.dli_fname; *p; ++p) if (*p == '/') image = p + 1;
+                w.text("("); w.text(image);
+                if (info.dli_sname && info.dli_saddr) {
+                    w.text("!"); w.text(info.dli_sname); w.text("+");
+                    w.hex(at - uint64_t(reinterpret_cast<uintptr_t>(info.dli_saddr)));
+                } else if (info.dli_fbase) {
+                    w.text("+"); w.hex(at - uint64_t(reinterpret_cast<uintptr_t>(info.dli_fbase)));
+                }
+                w.text(")");
+            }
+        };
+        w.text("  host:");
+        name(" pc=", f.pc);
+        name(" lr=", f.lr);
+        for (uint8_t i = 0; i < f.frame_count; ++i) name(" f=", f.frames[i]);
+        w.text("\n");
+        const size_t m = w.finish();
+        for (size_t done = 0; done < m;) {
+            const ssize_t written = ::write(fd, names + done, m - done);
+            if (written <= 0) break;
+            done += size_t(written);
         }
         ::close(fd);
     }
