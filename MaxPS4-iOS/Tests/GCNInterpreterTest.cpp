@@ -200,9 +200,31 @@ int main() {
             assert(f32(wave.exports[1].value[0][lane]) == vertices[lane][0] * 9 + vertices[lane][1]);
         }
         for (unsigned c = 0; c < 4; ++c) assert(wave.exports[0].value[c][3] == 0);
+        // Packed formats: 2_10_10_10 snorm (normals) and 10_11_11 float, x in the low bits.
+        arena.code(0x10a00, {
+            0xc0840300,             // s_load_dwordx4 s[8:11], s[2:3], 0x0
+            0xbf8c007f,             // s_waitcnt lgkmcnt(0)
+            0xe00c2000, 0x80020400, // buffer_load_format_xyzw v[4:7], v0, s[8:11], 0 idxen
+            0xbf8c1f70,             // s_waitcnt vmcnt(0)
+            0xf80008cf, 0x07060504, // exp pos0, v4, v5, v6, v7 done
+            0xbf810000});
+        arena.code(0x10b00, {0x10b40, 4u << 16, 1, 0x49fac});        // dfmt 9, nfmt 1 (snorm)
+        arena.code(0x10b20, {0x10b44, 4u << 16, 1, 0x37fac});        // dfmt 6, nfmt 7 (float)
+        arena.put(0x10b40, 0x1ffu | 0x200u << 10 | 1u << 30);         // +511, -512, 0, 1
+        arena.put(0x10b44, 0x3c0u | 0x380u << 11 | 0x200u << 22);     // 1.0, 0.5, 2.0
+        GCNWave normal(arena.memory, 1, &cache);
+        normal.s[2] = 0x10b00;
+        if (!normal.run(0x10a00)) { std::printf("%s\n", normal.error.c_str()); assert(false); }
+        assert(f32(normal.exports[0].value[0][0]) == 1 && f32(normal.exports[0].value[1][0]) == -1 &&
+               f32(normal.exports[0].value[2][0]) == 0 && f32(normal.exports[0].value[3][0]) == 1);
+        GCNWave small(arena.memory, 1, &cache);
+        small.s[2] = 0x10b20;
+        if (!small.run(0x10a00)) { std::printf("%s\n", small.error.c_str()); assert(false); }
+        assert(f32(small.exports[0].value[0][0]) == 1 && f32(small.exports[0].value[1][0]) == 0.5f &&
+               f32(small.exports[0].value[2][0]) == 2 && small.exports[0].value[3][0] == 0);
         // Unmapped code fails with a message instead of running garbage.
         GCNWave lost(arena.memory, 1);
         assert(!lost.run(0x30000) && lost.error == "unreadable code");
     }
-    std::puts("PASS GCN interpreter: embedded VS, quad PS (interp, sample, swizzle, WQM, branch, compressed export), fetch-shader VS");
+    std::puts("PASS GCN interpreter: embedded VS, quad PS (interp, sample, swizzle, WQM, branch, compressed export), fetch-shader VS, packed vertex formats");
 }

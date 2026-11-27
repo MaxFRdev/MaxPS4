@@ -85,6 +85,28 @@ GCN_FN uint gcn_convert(uint raw, uint bits, uint nfmt) {
     if (nfmt == 7u && bits == 16u) return gu(gcn_f16(raw));
     return raw;
 }
+// An unsigned 10- or 11-bit float (5 exponent bits, `mbits` mantissa bits).
+GCN_FN uint gcn_ufloat(uint raw, uint mbits) {
+    uint e = raw >> mbits; uint m = raw & ((1u << mbits) - 1u);
+    if (e == 31u) return m != 0u ? 0x7fc00000u : 0x7f800000u;
+    if (e == 0u) return gu(gcn_ldexp(float(m), -14 - int(mbits)));
+    return gu(gcn_ldexp(float(m + (1u << mbits)), int(e) - 15 - int(mbits)));
+}
+// Packed buffer data formats, x in the low bits: 6 10_11_11 (x and y 11 bits,
+// z 10), 7 11_11_10 (x 10, y and z 11), 9 2_10_10_10 (x, y, z 10, w 2).
+GCN_FN uint gcn_packed_width(uint dfmt, uint c) {
+    if (dfmt == 9u) return c < 3u ? 10u : c == 3u ? 2u : 0u;
+    if (dfmt == 6u) return c < 2u ? 11u : c == 2u ? 10u : 0u;
+    if (dfmt == 7u) return c == 0u ? 10u : c < 3u ? 11u : 0u;
+    return 0u;
+}
+GCN_FN uint gcn_packed_component(uint word, uint dfmt, uint c, uint nfmt) {
+    uint shift = 0u; for (uint k = 0u; k < c; ++k) shift += gcn_packed_width(dfmt, k);
+    uint width = gcn_packed_width(dfmt, c);
+    uint raw = (word >> shift) & ((1u << width) - 1u);
+    if (nfmt == 7u) return width > 5u ? gcn_ufloat(raw, width - 5u) : gu(float(raw));
+    return gcn_convert(raw, width, nfmt);
+}
 // buffer_load_format_*: V# data/number format and DST_SEL applied.
 GCN_FN uint4 gcn_buffer_format(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen) {
     uint4 out;
@@ -101,9 +123,13 @@ GCN_FN uint4 gcn_buffer_format(GCNMemory M, GCNRes4 r, uint index, uint voffset,
     bool inside = stride != 0u ? idx < records : ulong(inst) + off < ulong(records);
     ulong address = base + soffset + inst + ulong(idx) * stride + off;
     uint4 comp = uint4(0u, 0u, 0u, 0u);
+    // Packed normals and colours (2_10_10_10, 10_11_11, 11_11_10): one dword.
+    bool packed = dfmt == 6u || dfmt == 7u || dfmt == 9u;
+    uint word = packed && inside ? gcn_ld32(M, address) : 0u;
     for (uint c = 0u; c < 4u; ++c) {
         uint raw = 0u;
-        if (inside && c < channels) {
+        if (packed) { if (inside && gcn_packed_width(dfmt, c) != 0u) comp[c] = gcn_packed_component(word, dfmt, c, nfmt); }
+        else if (inside && c < channels) {
             ulong at = address + c * (bits / 8u);
             raw = bits == 32u ? gcn_ld32(M, at) : bits == 16u ? gcn_ld16(M, at) : gcn_ld8(M, at);
             comp[c] = gcn_convert(raw, bits, nfmt);

@@ -689,6 +689,28 @@ private:
         default: return false;
         }
     }
+    // Packed data formats, x in the low bits (as gcn_packed_width): 6 10_11_11,
+    // 7 11_11_10, 9 2_10_10_10 (normals); 0 past the format's components.
+    static unsigned packedWidth(unsigned dfmt, unsigned c) {
+        if (dfmt == 9) return c < 3 ? 10 : c == 3 ? 2 : 0;
+        if (dfmt == 6) return c < 2 ? 11 : c == 2 ? 10 : 0;
+        if (dfmt == 7) return c == 0 ? 10 : c < 3 ? 11 : 0;
+        return 0;
+    }
+    static std::uint32_t packedComponent(std::uint32_t word, unsigned dfmt, unsigned c, unsigned nfmt) {
+        unsigned shift = 0;
+        for (unsigned k = 0; k < c; ++k) shift += packedWidth(dfmt, k);
+        const unsigned width = packedWidth(dfmt, c);
+        const std::uint32_t raw = (word >> shift) & ((1u << width) - 1);
+        if (nfmt == 7) {
+            if (width <= 5) return gcn_detail::u32(float(raw));
+            const unsigned mbits = width - 5, e = raw >> mbits, m = raw & ((1u << mbits) - 1);
+            if (e == 31) return m ? 0x7fc00000u : 0x7f800000u;
+            if (e == 0) return gcn_detail::u32(std::ldexp(float(m), -14 - int(mbits)));
+            return gcn_detail::u32(std::ldexp(float(m + (1u << mbits)), int(e) - 15 - int(mbits)));
+        }
+        return convertIn(raw, width, nfmt);
+    }
     static std::uint32_t convertIn(std::uint32_t raw, unsigned bits, unsigned nfmt) {
         const std::uint32_t max = bits == 32 ? ~0u : ((1u << bits) - 1);
         const std::int32_t sraw = bits == 32 ? std::int32_t(raw) : std::int32_t(raw << (32 - bits)) >> (32 - bits);
@@ -722,7 +744,9 @@ private:
         else if (op == 14 || op == 30) count = 4; else if (op == 15 || op == 31) count = 3;
         else return false;
         unsigned channels = 1, bits = 32;
-        if (format && !bufferLayout(dfmt, channels, bits)) return fail("buffer data format " + std::to_string(dfmt));
+        const bool packed = format && packedWidth(dfmt, 0);
+        if (packed && store) return fail("packed buffer store format " + std::to_string(dfmt));
+        if (format && !packed && !bufferLayout(dfmt, channels, bits)) return fail("buffer data format " + std::to_string(dfmt));
         if (resource) resource(base, stride ? std::uint64_t(records) * stride : records);
         if (store && stored) stored(base, stride ? std::uint64_t(records) * stride : records);
         if (buffer) {
@@ -741,7 +765,7 @@ private:
             const std::uint32_t voffset = offen ? v(vaddr + (idxen ? 1 : 0), lane) : 0;
             const std::uint64_t address = base + soffset + instOffset + std::uint64_t(index) * stride + voffset;
             const bool inside = stride ? index < records : std::uint64_t(instOffset) + voffset < records;
-            const unsigned bytes = format ? channels * bits / 8 : count * 4;
+            const unsigned bytes = packed ? 4 : format ? channels * bits / 8 : count * 4;
             if (store) {
                 if (!inside) continue;
                 std::uint8_t data[16] = {};
@@ -760,7 +784,11 @@ private:
             if (inside && !memory_.read(address, data, bytes)) return fail("unreadable buffer load");
             if (!format) { for (unsigned c = 0; c < count; ++c) std::memcpy(&v(vdata + c, lane), data + 4 * c, 4); continue; }
             std::uint32_t component[4] = {0, 0, 0, 0};
-            for (unsigned c = 0; c < channels; ++c) {
+            if (packed) {
+                std::uint32_t word = 0;
+                std::memcpy(&word, data, 4);
+                for (unsigned c = 0; c < 4; ++c) component[c] = inside && packedWidth(dfmt, c) ? packedComponent(word, dfmt, c, nfmt) : 0;
+            } else for (unsigned c = 0; c < channels; ++c) {
                 std::uint32_t raw = 0;
                 std::memcpy(&raw, data + c * bits / 8, bits / 8);
                 component[c] = inside ? convertIn(raw, bits, nfmt) : 0;
