@@ -24,6 +24,8 @@ struct PM4DrawStats {
     unsigned draws = 0, rendered = 0, skipped = 0, failed = 0, dispatches = 0;
     unsigned fastClears = 0; // ELIMINATE_FAST_CLEAR passes, applied as clears (PM4Draw::fastClear)
     unsigned dmaCopies = 0;  // DMA_DATA copies and fills done in guest memory
+    std::uint32_t lastDmaControl = 0, lastDmaCommand = 0; // the last DMA_DATA met
+    unsigned indirectBuffers = 0; // INDIRECT_BUFFER calls executed
     std::string error; // the first failure
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
@@ -44,9 +46,10 @@ struct PM4DrawStats {
             std::snprintf(line, sizeof line, " · MRT : %u cibles en plus, %u écartées", extraTargets, extraTargetsDropped);
             more = line;
         }
-        if (fastClears || dmaCopies) {
-            char line[96];
-            std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u", fastClears, dmaCopies);
+        if (fastClears || dmaCopies || lastDmaControl || lastDmaCommand) {
+            char line[200];
+            std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u (dernier DMA_DATA : contrôle 0x%x, commande 0x%x) · appels de tampons : %u",
+                          fastClears, dmaCopies, lastDmaControl, lastDmaCommand, indirectBuffers);
             more += line;
         }
         return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
@@ -222,6 +225,22 @@ public:
             }
             case 0x2f: if (n >= 1 && data[0] > 1) ++stats_.ignored[0x2f]; break; // NUM_INSTANCES: one instance is drawn
             case 0x50: if (!dmaData(data, n)) ++stats_.ignored[0x50]; break;
+            case 0x3f: {
+                // INDIRECT_BUFFER: a call into another command buffer (IB_BASE,
+                // IB_SIZE in dwords), executed here in order with the same state.
+                // A buffer that cannot be read or framed stays counted as lost.
+                if (n < 3 || depth_ >= 4) { ++stats_.ignored[0x3f]; break; }
+                const std::uint64_t ib = (std::uint64_t(data[0]) & ~3ull) | std::uint64_t(data[1] & 0xffff) << 32;
+                const std::uint32_t size = data[2] & 0xfffff;
+                std::vector<std::uint32_t> nested(size);
+                if (!size || !memory_.read(ib, nested.data(), std::size_t(size) * 4) || !decodePM4Type3(nested.data(), size)) {
+                    ++stats_.ignored[0x3f]; break;
+                }
+                ++depth_; ++stats_.indirectBuffers;
+                execute(nested.data(), size, draw, dispatch);
+                --depth_;
+                break;
+            }
             default:
                 // Synchronization and prefetch packets have nothing to draw. The
                 // others named by ignoredName are lost: count them for the report.
@@ -247,7 +266,11 @@ private:
     bool dmaData(const std::uint32_t* data, std::size_t n) {
         if (n < 6 || !memory_.write) return false;
         const std::uint32_t control = data[0], command = data[5];
-        const unsigned srcSel = (control >> 29) & 3, dstSel = (control >> 20) & 3;
+        stats_.lastDmaControl = control; stats_.lastDmaCommand = command;
+        // SRC_SEL 0/3 and DST_SEL 0/3: memory (3 through the L2, as Gnm does).
+        unsigned srcSel = (control >> 29) & 3, dstSel = (control >> 20) & 3;
+        if (srcSel == 3) srcSel = 0;
+        if (dstSel == 3) dstSel = 0;
         const bool srcRegister = (command >> 26) & 1, dstRegister = (command >> 27) & 1;
         const bool srcFixed = (command >> 28) & 1, dstFixed = (command >> 29) & 1;
         const std::uint32_t bytes = command & 0x1fffff;
@@ -276,6 +299,7 @@ private:
     unsigned indexBytes_ = 2;
     std::uint64_t indexBase_ = 0; // Persists across submissions, like INDEX_TYPE.
     std::map<std::uint64_t, std::array<std::uint32_t, 2>> pendingClears_; // by target, see PM4Draw::fastClear
+    unsigned depth_ = 0; // INDIRECT_BUFFER nesting
 
     static void setRegisters(std::array<std::uint32_t, 0x400>& bank, const std::uint32_t* data, std::size_t n) {
         for (std::size_t k = 1; k < n; ++k) if (data[0] + k - 1 < bank.size()) bank[data[0] + k - 1] = data[k];

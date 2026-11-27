@@ -37,6 +37,17 @@ struct Fixture {
 }
 int main() {
     {
+        // INDIRECT_BUFFER runs the buffer it points to, in order, with the
+        // current state; an unreadable one is counted as lost.
+        Fixture f;
+        const std::uint32_t nested[3] = {0xc0012d00, 3, 2}; // DRAW_INDEX_AUTO, 3 vertices
+        std::memcpy(f.bytes.data(), nested, sizeof nested);
+        f.run({0xc0023f00, 0x10000, 0, 3, 0xc0023f00, 0x90000, 0, 3});
+        assert(f.full.size() == 1 && f.full[0].indices.size() == 3);
+        assert(f.stats.indirectBuffers == 1 && f.stats.ignored[0x3f] == 1 && f.stats.failed == 0);
+        std::puts("PASS INDIRECT_BUFFER calls run their buffer in order");
+    }
+    {
         // DMA_DATA copies and fills guest memory in order; GDS stays ignored.
         std::vector<std::uint8_t> ram(256);
         for (unsigned k = 0; k < 16; ++k) ram[k] = std::uint8_t(k + 1);
