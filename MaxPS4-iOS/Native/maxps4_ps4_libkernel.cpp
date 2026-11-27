@@ -610,6 +610,16 @@ constexpr Binding bindings[] = {
     {"scePthreadGetname", "How7B8Oet6k", PS4KernelService::thread_getname},
     // Imported by the libc games ship (Orbis error codes).
     {"scePthreadAttrGetschedparam", "FXPWHNk8Of0", PS4KernelService::attr_getschedparam},
+    // Thread priorities are not applied (CoD reads and sets its threads'): the
+    // default policy and priority are reported, a new one accepted.
+    {"scePthreadGetschedparam", "P41kTWUS3EI", PS4KernelService::thread_getschedparam},
+    {"scePthreadSetschedparam", "oIRFTjoILbg", PS4KernelService::succeed},
+    // Hardware tuning and video output colour settings, without effect here.
+    {"sceKernelSetFsstParam", "VjBtg5Btl94", PS4KernelService::succeed},
+    {"sceKernelSetPrtAperture", "BohYr-F7-is", PS4KernelService::succeed},
+    {"sceKernelSetGPO", "ca7v6Cxulzs", PS4KernelService::succeed},
+    {"sceVideoOutColorSettingsSetGamma_", "DYhhWbJSeRg", PS4KernelService::succeed, "libSceVideoOut"},
+    {"sceVideoOutAdjustColor_", "pv9CI5VC+R0", PS4KernelService::succeed, "libSceVideoOut"},
     {"scePthreadMutexReltimedlockNp", "IafI2PxcPnQ", PS4KernelService::mutex_reltimedlock},
     {"pthread_getname_np", "9HzfhdtESio", PS4KernelService::thread_getname, "libkernel", true},
     // libSceLibcInternal (see internal_memcpy_code).
@@ -2229,6 +2239,8 @@ int64_t PS4Libkernel::extended(PS4KernelService service, const PS4KernelCall& c,
     case S::process_id: return 1;
     // AttrGetschedparam(attr*, sched_param*): the default priority.
     case S::attr_getschedparam: return c.rdi && c.rsi && write(c.rsi, 700, 4) ? 0 : kernel_error(inval);
+    // GetSchedparam(thread, int* policy, sched_param*): SCHED_OTHER, priority 700.
+    case S::thread_getschedparam: return c.rsi && c.rdx && write(c.rsi, 2, 4) && write(c.rdx, 700, 4) ? 0 : kernel_error(inval);
     // MutexReltimedlockNp(mutex*, microseconds): tries until the delay runs out.
     case S::mutex_reltimedlock: {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(c.rsi);
