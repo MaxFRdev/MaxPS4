@@ -272,6 +272,9 @@ private:
         std::string archiveState, archiveError;
         void openArchive(id<MTLDevice> device);
         void remember(MTLRenderPipelineDescriptor* descriptor);
+        // Builds the pipeline from source, then adds it to this launch's archive.
+        void compile(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
+                     std::function<void(id<MTLRenderPipelineState>, NSError*)> done);
         void saveArchive(); // on archiveQueue
         std::string archiveReport() const; // with mutex held
         // Libraries by source (hash, length, optimisation): many pipelines

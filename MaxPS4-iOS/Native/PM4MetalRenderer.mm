@@ -260,26 +260,29 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                 MTLRenderPipelineDescriptor* own = [descriptor copy];
                 own.vertexFunction = [library newFunctionWithName:@"gcn_vertex"];
                 own.fragmentFunction = fragment ? [library newFunctionWithName:@"gcn_fragment"] : nil;
-                auto compile = [=] {
-                    [device newRenderPipelineStateWithDescriptor:own completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
-                        if (state) async->remember(own);
-                        finished(state, failed, fast);
-                    }];
-                };
+                // The blocks below capture plain locals only: a block in a lambda
+                // nested in this one, reading that lambda's captured descriptor,
+                // was copied by Metal from a stack address (the app died in
+                // _Block_copy on the first archive builds).
+                std::shared_ptr<AsyncPipelines> pool = async;
+                std::function<void(id<MTLRenderPipelineState>, NSError*)> done =
+                    [finished, fast](id<MTLRenderPipelineState> state, NSError* error) { finished(state, error, fast); };
+                MTLRenderPipelineDescriptor* desc = own;
+                id<MTLDevice> gpu = device;
                 NSArray<id<MTLBinaryArchive>>* lookups = nil;
-                { std::lock_guard<std::mutex> lock(async->mutex); lookups = async->lookups; }
-                if (!lookups) { compile(); return; }
+                { std::lock_guard<std::mutex> lock(pool->mutex); lookups = pool->lookups; }
+                if (!lookups) { pool->compile(gpu, desc, done); return; }
                 // From earlier launches' archives only: a miss compiles as before.
-                own.binaryArchives = lookups;
-                [device newRenderPipelineStateWithDescriptor:own options:MTLPipelineOptionFailOnBinaryArchiveMiss
-                                           completionHandler:^(id<MTLRenderPipelineState> state, MTLRenderPipelineReflection*, NSError*) {
+                desc.binaryArchives = lookups;
+                [gpu newRenderPipelineStateWithDescriptor:desc options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                        completionHandler:^(id<MTLRenderPipelineState> state, MTLRenderPipelineReflection*, NSError*) {
                     bool first = false;
-                    { std::lock_guard<std::mutex> lock(async->mutex);
-                      ++(state ? async->archiveHits : async->archiveMisses);
-                      first = state && async->archiveHits == 1; }
+                    { std::lock_guard<std::mutex> lock(pool->mutex);
+                      ++(state ? pool->archiveHits : pool->archiveMisses);
+                      first = state && pool->archiveHits == 1; }
                     // A lookup that worked: this launch got past the archive code.
                     if (first) [[NSFileManager defaultManager] removeItemAtURL:[archiveFolder() URLByAppendingPathComponent:@"unfinished"] error:nil];
-                    if (state) finished(state, nil, fast); else compile();
+                    if (state) done(state, nil); else pool->compile(gpu, desc, done);
                 }];
             };
             const AsyncPipelines::LibraryKey libraryKey{sourceHash, sourceLength, fast};
@@ -1903,6 +1906,15 @@ void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
     if (fresh) archiveQueue = dispatch_queue_create("maxps4.metal-archive", DISPATCH_QUEUE_SERIAL);
     archiveSavedAt = std::chrono::steady_clock::now();
     archiveState = state;
+}
+
+void PM4MetalRenderer::AsyncPipelines::compile(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
+                                               std::function<void(id<MTLRenderPipelineState>, NSError*)> done) {
+    auto self = shared_from_this();
+    [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
+        if (state) self->remember(descriptor);
+        done(state, failed);
+    }];
 }
 
 void PM4MetalRenderer::AsyncPipelines::remember(MTLRenderPipelineDescriptor* descriptor) {
