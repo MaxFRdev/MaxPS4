@@ -443,7 +443,12 @@ int main() {
             assert(PM4MetalRenderer::targetFormat(0xa, 0, 1) == MTLPixelFormatBGRA8Unorm);
             assert(PM4MetalRenderer::targetFormat(0xa, 6, 0) == MTLPixelFormatRGBA8Unorm_sRGB);
             assert(PM4MetalRenderer::targetFormat(0xc, 7, 1) == MTLPixelFormatInvalid);
-            assert(PM4MetalRenderer::targetFormat(0xa, 4, 0) == MTLPixelFormatInvalid); // UINT
+            // Integer targets: their Metal Uint/Sint formats; swapped ones stay out.
+            assert(PM4MetalRenderer::targetFormat(0xa, 4, 0) == MTLPixelFormatRGBA8Uint);
+            assert(PM4MetalRenderer::targetFormat(0x4, 5, 0) == MTLPixelFormatR32Sint);
+            assert(PM4MetalRenderer::targetFormat(0xa, 4, 1) == MTLPixelFormatInvalid);
+            assert(PM4MetalRenderer::integerFormat(MTLPixelFormatRGBA8Uint) == 1 && PM4MetalRenderer::integerFormat(MTLPixelFormatR32Sint) == 2 &&
+                   PM4MetalRenderer::integerFormat(MTLPixelFormatRGBA8Unorm) == 0);
             std::puts("PASS colour targets in 16_16_16_16 FLOAT and 2_10_10_10 UNORM");
         }
         // Blend the same foreground/background with all supported operations.
