@@ -170,6 +170,7 @@ public:
     unsigned lastRanges = 0; // memory ranges copied for the last draw (copy mode)
     unsigned renderPasses = 0;
     unsigned buffersBuilt = 0, buffersReused = 0;
+    unsigned nativeArgumentsShared = 0; // draws reusing the previous draw's native argument buffer
     unsigned rangesShared = 0; // large ranges copied once for a submission's draws (copy mode)
     unsigned rangesMapped = 0; // of which, textures read in place through hostView instead
     // The host bytes backing guest [address, address + size), or null. When
@@ -354,8 +355,11 @@ private:
     id<MTLTexture> moreAttachments_[7] = {}; // colour targets 1-7 of the open encoder
     id<MTLTexture> drawingMore_[7] = {};     // colour targets 1-7 of the draw being encoded
     // `free`: its owner completed (checked once, Metal's status is a message send).
-    struct Upload { id<MTLBuffer> buffer; id<MTLCommandBuffer> owner; std::size_t length; bool free; };
-    std::vector<Upload> uploads_;
+    // Pooled upload buffers by length, each length's in submission order:
+    // command buffers finish in order, so only the oldest needs checking.
+    struct Upload { id<MTLBuffer> buffer; id<MTLCommandBuffer> owner; };
+    std::map<std::size_t, std::deque<Upload>> uploads_;
+    std::size_t uploadCount_ = 0;
     std::uint64_t pooledBytes_ = 0;
     id<MTLBuffer> uploadBuffer(std::size_t bytes, id<MTLCommandBuffer> commands);
     // Ranges of at least sharedRangeBytes get one of the shader's GCN_SLOTS
@@ -386,6 +390,17 @@ private:
     // (unorm or float only), and its bytes per pixel; Invalid when none.
     MTLPixelFormat nativeFormat(unsigned dfmt, unsigned nfmt, unsigned& pixelBytes) const;
     unsigned nativeBound_ = 0, nativeFiltered_ = 0; // Of the draw being encoded.
+    // The last native argument buffer and what it holds: consecutive draws
+    // binding the same textures in one command buffer share it.
+    struct NativeBinding {
+        id<MTLTexture> images[8] = {};
+        id<MTLSamplerState> samplers[8] = {};
+        std::array<std::uint32_t, 8> descriptors[8] = {};
+        std::array<std::uint32_t, 4> samplerWords[8] = {};
+        unsigned enabled = 0;
+        id<MTLBuffer> arguments = nil;
+        id<MTLCommandBuffer> commands = nil;
+    } lastNative_;
     std::map<std::uint64_t, int> fillPrograms_;
     std::map<std::uint32_t, id<MTLBuffer>> fills_; // Immutable, by fill value.
     id<MTLCommandBuffer> sharedOwner_ = nil;

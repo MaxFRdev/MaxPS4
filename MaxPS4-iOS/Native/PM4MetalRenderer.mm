@@ -878,20 +878,25 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
     // Small requests are rounded up to a power of two so that slots match again
     // (CoD's missions made 126 000 new buffers in 75 s with exact sizes).
     if (bytes <= (1u << 20)) { std::size_t rounded = 4096; while (rounded < bytes) rounded <<= 1; bytes = rounded; }
-    Upload* best = nullptr;
-    for (auto& upload : uploads_) {
-        if (upload.length < bytes || (best && upload.length >= best->length)) continue;
-        if (!upload.free) {
-            const auto status = upload.owner.status;
-            upload.free = status == MTLCommandBufferStatusCompleted || status == MTLCommandBufferStatusError;
+    // The smallest length that fits with its oldest buffer done, at most four
+    // times the request. A scan of the whole pool (up to 4096 buffers, each
+    // asking its command buffer's status) ran several times per draw.
+    for (auto it = uploads_.lower_bound(bytes); it != uploads_.end() && it->first / 4 <= bytes; ++it) {
+        auto& queue = it->second;
+        if (queue.empty()) continue;
+        Upload oldest = queue.front();
+        // Only the command buffer being encoded is ever left uncommitted: an
+        // older one not enqueued was given up after a failure, its buffers free.
+        if (oldest.owner) {
+            const auto status = oldest.owner.status;
+            const bool abandoned = status == MTLCommandBufferStatusNotEnqueued && oldest.owner != commands;
+            if (!abandoned && status != MTLCommandBufferStatusCompleted && status != MTLCommandBufferStatusError) continue;
         }
-        if (upload.free) best = &upload;
-    }
-    if (best) {
-        best->owner = commands;
-        best->free = false;
+        queue.pop_front();
+        oldest.owner = commands;
+        queue.push_back(oldest);
         ++buffersReused;
-        return best->buffer;
+        return oldest.buffer;
     }
     Stopwatch watch{allocateMs};
     id<MTLBuffer> buffer = [device_ newBufferWithLength:bytes options:MTLResourceStorageModeShared];
@@ -899,8 +904,9 @@ id<MTLBuffer> PM4MetalRenderer::uploadBuffer(std::size_t bytes, id<MTLCommandBuf
         ++buffersBuilt;
         // Shared ranges are atlases of up to 64 MiB: keep a frame's worth or two.
         constexpr std::uint64_t budget = 384ull << 20;
-        if (uploads_.size() < 4096 && bytes <= budget - pooledBytes_) {
-            uploads_.push_back({buffer, commands, bytes, false});
+        if (uploadCount_ < 4096 && bytes <= budget - pooledBytes_) {
+            uploads_[bytes].push_back({buffer, commands});
+            ++uploadCount_;
             pooledBytes_ += bytes;
         }
     }
@@ -1483,29 +1489,48 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             if ((samplers[found] = nativeSampler(samplerWords[found]))) { enabled |= 1u << (found < 4 ? found + 4 : found + 8); ++filtered; }
             descriptors[found++] = t;
         }
-        id<MTLBuffer> arguments = nativeArguments_ ? uploadBuffer(nativeArguments_.encodedLength, commands) : nil;
-        if (!arguments) {
-            if (!batching_) [encoder endEncoding];
-            return fail("native texture arguments");
-        }
-        [nativeArguments_ setArgumentBuffer:arguments offset:0];
-        *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = enabled;
         nativeBound_ = found; nativeFiltered_ = filtered;
-        static const NSUInteger fields[slotsMax] = {0, 4, 7, 16, 21, 26, 31, 36}, samplerFields[slotsMax] = {10, 11, 12, 19, 24, 29, 34, 39},
-                                wordFields[slotsMax] = {13, 14, 15, 20, 25, 30, 35, 40};
-        for (unsigned k = 0; k < slotsMax; ++k) {
-            const NSUInteger at = fields[k], low = k ? at + 1 : 2;
-            [nativeArguments_ setTexture:images[k] atIndex:at];
-            [nativeArguments_ setSamplerState:samplers[k] atIndex:samplerFields[k]];
-            std::memcpy([nativeArguments_ constantDataAtIndex:wordFields[k]], samplerWords[k].data(), 16);
-            std::memcpy([nativeArguments_ constantDataAtIndex:low], descriptors[k].data(), 16);
-            std::memcpy([nativeArguments_ constantDataAtIndex:low + 1], descriptors[k].data() + 4, 16);
-            if (images[k]) [encoder useResource:images[k] usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];
+        bool same = lastNative_.arguments && lastNative_.commands == commands && lastNative_.enabled == enabled;
+        for (unsigned k = 0; k < slotsMax && same; ++k)
+            same = lastNative_.images[k] == images[k] && lastNative_.samplers[k] == samplers[k] &&
+                   lastNative_.descriptors[k] == descriptors[k] && lastNative_.samplerWords[k] == samplerWords[k];
+        if (same) {
+            ++nativeArgumentsShared;
+            for (unsigned k = 0; k < slotsMax; ++k)
+                if (images[k]) [encoder useResource:images[k] usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];
+            [encoder setVertexBuffer:lastNative_.arguments offset:0 atIndex:3];
+            [encoder setFragmentBuffer:lastNative_.arguments offset:0 atIndex:3];
+            if (found) ++nativeDraws;
+            nativeViews += found;
+        } else {
+            id<MTLBuffer> arguments = nativeArguments_ ? uploadBuffer(nativeArguments_.encodedLength, commands) : nil;
+            if (!arguments) {
+                if (!batching_) [encoder endEncoding];
+                return fail("native texture arguments");
+            }
+            lastNative_.arguments = arguments; lastNative_.commands = commands; lastNative_.enabled = enabled;
+            for (unsigned k = 0; k < slotsMax; ++k) {
+                lastNative_.images[k] = images[k]; lastNative_.samplers[k] = samplers[k];
+                lastNative_.descriptors[k] = descriptors[k]; lastNative_.samplerWords[k] = samplerWords[k];
+            }
+            [nativeArguments_ setArgumentBuffer:arguments offset:0];
+            *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = enabled;
+            static const NSUInteger fields[slotsMax] = {0, 4, 7, 16, 21, 26, 31, 36}, samplerFields[slotsMax] = {10, 11, 12, 19, 24, 29, 34, 39},
+                                    wordFields[slotsMax] = {13, 14, 15, 20, 25, 30, 35, 40};
+            for (unsigned k = 0; k < slotsMax; ++k) {
+                const NSUInteger at = fields[k], low = k ? at + 1 : 2;
+                [nativeArguments_ setTexture:images[k] atIndex:at];
+                [nativeArguments_ setSamplerState:samplers[k] atIndex:samplerFields[k]];
+                std::memcpy([nativeArguments_ constantDataAtIndex:wordFields[k]], samplerWords[k].data(), 16);
+                std::memcpy([nativeArguments_ constantDataAtIndex:low], descriptors[k].data(), 16);
+                std::memcpy([nativeArguments_ constantDataAtIndex:low + 1], descriptors[k].data() + 4, 16);
+                if (images[k]) [encoder useResource:images[k] usage:MTLResourceUsageRead stages:MTLRenderStageVertex | MTLRenderStageFragment];
+            }
+            [encoder setVertexBuffer:arguments offset:0 atIndex:3];
+            [encoder setFragmentBuffer:arguments offset:0 atIndex:3];
+            if (found) ++nativeDraws;
+            nativeViews += found;
         }
-        [encoder setVertexBuffer:arguments offset:0 atIndex:3];
-        [encoder setFragmentBuffer:arguments offset:0 atIndex:3];
-        if (found) ++nativeDraws;
-        nativeViews += found;
     }
     const std::size_t bytes = d.indices.size() * sizeof(std::uint32_t);
     if (bytes <= 4096) [encoder setVertexBytes:d.indices.data() length:bytes atIndex:2];
