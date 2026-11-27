@@ -230,6 +230,35 @@ GCN_FN ulong gcn_surface_bytes(uint tiling, uint pitch, uint height, uint bytes)
     if (!gcn_micro_tiled(tiling)) return ulong(pitch) * height * bytes;
     return ulong((pitch + 7u) >> 3) * ((height + 7u) >> 3) * 64ul * bytes;
 }
+// One slice of a 2D array or a cube (T# TYPE 13 or 11), from the instruction's
+// slice coordinate (DA set), between BASE_ARRAY and LAST_ARRAY: the T# moved
+// to that slice, each slice one level 0 surface rounded to 256 bytes. Slice
+// 0 keeps the T# itself, so a Metal texture bound for it still matches.
+GCN_FN GCNRes8 gcn_slice(GCNRes8 t, float coordinate) {
+    uint type = t.d[3] >> 28;
+    if (type != 11u && type != 13u) return t;
+    uint first = t.d[5] & 0x1fffu; uint last = (t.d[5] >> 13) & 0x1fffu;
+    if (last < first) last = first;
+    float rounded = gcn_rint(coordinate);
+    uint index = rounded <= float(first) ? first : rounded >= float(last) ? last : uint(rounded);
+    if (index == 0u) return t;
+    uint dfmt = (t.d[1] >> 20) & 0x3fu; uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u;
+    uint height = ((t.d[2] >> 14) & 0x3fffu) + 1u; uint tiling = (t.d[3] >> 20) & 0x1fu;
+    ulong slice;
+    if (dfmt >= 35u && dfmt <= 41u) slice = gcn_surface_bytes(tiling, (pitch + 3u) / 4u, (height + 3u) / 4u, (dfmt == 35u || dfmt == 38u) ? 8u : 16u);
+    else {
+        uint bytes = 4u;
+        if (dfmt == 1u) bytes = 1u; else if (dfmt == 2u || dfmt == 3u || (dfmt >= 16u && dfmt <= 19u)) bytes = 2u;
+        else if (dfmt == 11u || dfmt == 12u) bytes = 8u; else if (dfmt == 13u) bytes = 12u; else if (dfmt == 14u) bytes = 16u;
+        slice = gcn_surface_bytes(tiling, pitch, height, bytes);
+    }
+    slice = (slice + 255ul) & ~255ul;
+    ulong base = ((ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8) + slice * ulong(index);
+    GCNRes8 moved = t;
+    moved.d[0] = uint(base >> 8);
+    moved.d[1] = (t.d[1] & ~0xffu) | uint((base >> 40) & 0xfful);
+    return moved;
+}
 // Linear 2D images (T# tiling index 8) and 1D micro-tiled ones. Other tilings read as 0.
 GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, ulong offset) {
     float4 native;

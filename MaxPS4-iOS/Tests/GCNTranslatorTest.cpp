@@ -80,6 +80,11 @@ int main(int argc, char** argv) {
     const auto derivatives=translateGCN(arena.memory,coverageProgram,ps);
     if (!derivatives) std::printf("%s\n", derivatives.error.c_str());
     assert(derivatives && derivatives.source.find("gcn_sample(M, t, sm, false, gf(v6), gf(v7))")!=std::string::npos);
+    // image_sample v[8:11], v[2:4] da: the slice (v4) picks the array layer or cube face.
+    arena.code(coverageProgram,{0xf0804f00,0x00400802,0xf800180f,0x0b0a0908,0xbf810000});
+    const auto layered=translateGCN(arena.memory,coverageProgram,ps);
+    if (!layered) std::printf("%s\n", layered.error.c_str());
+    assert(layered && layered.source.find("t = gcn_slice(t, gf(v4));")!=std::string::npos);
     GCNTranslateOptions fetch; fetch.stage = GCNStage::vertex; fetch.name = "vs_fetch";
     fetch.userCount = 4; fetch.userData[0] = std::uint32_t(fetchShader); fetch.userData[2] = std::uint32_t(vertexTable);
     const auto fetched = translateGCN(arena.memory, fetchVS, fetch);

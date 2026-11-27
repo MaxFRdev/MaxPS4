@@ -814,6 +814,10 @@ private:
         if (base == 34 || base == 35 || base == 42 || base == 43) first += 4;
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
+        // DA: an array or cube, its slice (or face) after the coordinates.
+        const bool array = (w >> 14) & 1;
+        if (array && op >= 32 && op < 64 && vaddr + first + 2 < 256) res += "t = gcn_slice(t, gf(" + v(vaddr + first + 2) + ")); ";
+        else if (array && op <= 2 && vaddr + 2 < 256) res += "t = gcn_slice(t, float(" + v(vaddr + 2) + ")); ";
         std::string call;
         if (op >= 32 && op < 64) {
             // A depth-compare sample (shadow maps) reads the depth without the
