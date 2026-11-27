@@ -156,8 +156,19 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         for (const auto& site : ps.sites) if (site.from[0]) ++scalarLoadsDirect;
         std::sort(sites.list.begin(), sites.list.end(), [](const GCNScalarSite& a, const GCNScalarSite& b) { return a.pc < b.pc; });
     }
+    unsigned uintSlots = 0, intSlots = 0;
+    if (d.colour) {
+        auto note = [&](unsigned slot, MTLPixelFormat f) {
+            const int kind = integerFormat(f);
+            if (kind == 1) uintSlots |= 1u << slot; else if (kind == 2) intSlots |= 1u << slot;
+        };
+        note(0, format);
+        for (unsigned k = 1; k < 8; ++k)
+            if (d.more[k - 1].base) note(k, targetFormat(d.more[k - 1].format, d.more[k - 1].number, d.more[k - 1].swap));
+    }
     std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
-                               gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_, colourSlots(d));
+                               gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_, colourSlots(d),
+                                                   uintSlots, intSlots);
     // Tests: a sample Metal's sampler refuses reads as zero instead of filtering in
     // software, which shows whether a draw really takes the native path.
     // Programs with many samples get the same: each inlined gcn_sample carries
@@ -187,7 +198,8 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         if (!exported) mask = 0;
         color.writeMask = ((mask & 1) ? MTLColorWriteMaskRed : 0) | ((mask & 2) ? MTLColorWriteMaskGreen : 0) |
                           ((mask & 4) ? MTLColorWriteMaskBlue : 0) | ((mask & 8) ? MTLColorWriteMaskAlpha : 0);
-        if (!d.colour || !((blendControl >> 30) & 1)) return true;
+        // Integer attachments cannot blend in Metal (GCN skips it for them too).
+        if (!d.colour || !((blendControl >> 30) & 1) || integerFormat(pixelFormat)) return true;
         const auto blend = decodePM4Blend(blendControl);
         auto alpha = blend.alpha;
         // Saturation has an alpha factor of one, independently of RGB.
@@ -1108,7 +1120,9 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
         id<MTLTexture> texture = rendered->second.texture;
         bool attached = texture == drawing;
         for (id<MTLTexture> other : drawingMore_) attached = attached || (other && texture == other);
-        if (texture && !attached && !rendered->second.fresh && texture.width >= width && texture.height >= height) {
+        // texture2d<float> cannot read an integer target.
+        if (texture && !attached && !rendered->second.fresh && texture.width >= width && texture.height >= height &&
+            !integerFormat(texture.pixelFormat)) {
             ++targetReads;
             return texture;
         }
@@ -1767,6 +1781,22 @@ MTLPixelFormat PM4MetalRenderer::targetFormat(unsigned format, unsigned number, 
     if (format == 0xa && swap == 1) // 8_8_8_8 with COMP_SWAP ALT: BGRA in memory.
         return number == 0 ? MTLPixelFormatBGRA8Unorm : number == 6 ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatInvalid;
     if (swap != 0) return MTLPixelFormatInvalid;
+    // Integer targets (NUMBER_TYPE 4 uint, 5 sint): the program's raw bits.
+    if (number == 4 || number == 5) {
+        const bool u = number == 4;
+        switch (format) {
+        case 0x1: return u ? MTLPixelFormatR8Uint : MTLPixelFormatR8Sint;
+        case 0x2: return u ? MTLPixelFormatR16Uint : MTLPixelFormatR16Sint;
+        case 0x3: return u ? MTLPixelFormatRG8Uint : MTLPixelFormatRG8Sint;
+        case 0x4: return u ? MTLPixelFormatR32Uint : MTLPixelFormatR32Sint;
+        case 0x5: return u ? MTLPixelFormatRG16Uint : MTLPixelFormatRG16Sint;
+        case 0xa: return u ? MTLPixelFormatRGBA8Uint : MTLPixelFormatRGBA8Sint;
+        case 0xb: return u ? MTLPixelFormatRG32Uint : MTLPixelFormatRG32Sint;
+        case 0xc: return u ? MTLPixelFormatRGBA16Uint : MTLPixelFormatRGBA16Sint;
+        case 0xe: return u ? MTLPixelFormatRGBA32Uint : MTLPixelFormatRGBA32Sint;
+        default: return MTLPixelFormatInvalid;
+        }
+    }
     switch (format) {
     case 0xa: return number == 0 ? MTLPixelFormatRGBA8Unorm : number == 1 ? MTLPixelFormatRGBA8Snorm :
                      number == 6 ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatInvalid;
@@ -1787,14 +1817,28 @@ MTLPixelFormat PM4MetalRenderer::targetFormat(unsigned format, unsigned number, 
     }
 }
 
+int PM4MetalRenderer::integerFormat(MTLPixelFormat format) {
+    switch (format) {
+    case MTLPixelFormatR8Uint: case MTLPixelFormatR16Uint: case MTLPixelFormatRG8Uint: case MTLPixelFormatR32Uint:
+    case MTLPixelFormatRG16Uint: case MTLPixelFormatRGBA8Uint: case MTLPixelFormatRG32Uint: case MTLPixelFormatRGBA16Uint:
+    case MTLPixelFormatRGBA32Uint: return 1;
+    case MTLPixelFormatR8Sint: case MTLPixelFormatR16Sint: case MTLPixelFormatRG8Sint: case MTLPixelFormatR32Sint:
+    case MTLPixelFormatRG16Sint: case MTLPixelFormatRGBA8Sint: case MTLPixelFormatRG32Sint: case MTLPixelFormatRGBA16Sint:
+    case MTLPixelFormatRGBA32Sint: return 2;
+    default: return 0;
+    }
+}
+
 unsigned PM4MetalRenderer::bytesPerPixel(MTLPixelFormat format) {
     switch (format) {
-    case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Snorm: return 1;
+    case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Snorm: case MTLPixelFormatR8Uint: case MTLPixelFormatR8Sint: return 1;
     case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Snorm: case MTLPixelFormatR16Float:
-    case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: return 2;
+    case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG8Sint:
+    case MTLPixelFormatR16Uint: case MTLPixelFormatR16Sint: return 2;
     case MTLPixelFormatRGBA16Float: case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRGBA16Snorm:
-    case MTLPixelFormatRG32Float: return 8;
-    case MTLPixelFormatRGBA32Float: return 16;
+    case MTLPixelFormatRG32Float: case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint:
+    case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA16Sint: return 8;
+    case MTLPixelFormatRGBA32Float: case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: return 16;
     case MTLPixelFormatInvalid: return 0;
     default: return 4; // 8_8_8_8 in any order or number, RG16, R32, RGB10A2, RG11B10.
     }

@@ -1244,11 +1244,15 @@ GCN_FN uint gcn_quad_shuffle(thread GCNQuad& Q, thread GCNLane& L, uint value, u
 // returns colour target 0.
 inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTranslation& ps, const std::string& vsName,
                                        const std::string& psName, std::uint32_t psInputAddr, const std::uint32_t inputCntl[32], bool nativeTextures = false,
-                                       unsigned colorTargets = 1) {
+                                       unsigned colorTargets = 1, unsigned uintTargets = 0, unsigned intTargets = 0) {
     // `colorTargets`: bit k, colour attachment k receives MRT k (0 when the
     // program does not export it). Target 0 alone keeps the float4 return.
+    // `uintTargets`/`intTargets`: attachments in an integer format, which
+    // receive the exported bits as they are (GCN exports raw 32-bit values to
+    // integer targets); they need the struct return for their type.
     colorTargets = (colorTargets | 1u) & 0xffu;
-    const bool mrt = colorTargets != 1u;
+    uintTargets &= colorTargets; intTargets &= colorTargets & ~uintTargets;
+    const bool mrt = colorTargets != 1u || uintTargets || intTargets;
     std::uint32_t flatParams = 0;
     for (unsigned a = 0; a < 32; ++a)
         if (((ps.attributes >> a) & 1) && ((ps.flat >> a) & 1) && !(inputCntl[a] & 0x20)) flatParams |= 1u << (inputCntl[a] & 0x1f);
@@ -1299,7 +1303,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     if (mrt) {
         s += "struct GCNFragmentMRT {";
         for (unsigned c = 0; c < 8; ++c)
-            if ((colorTargets >> c) & 1) s += " float4 c" + std::to_string(c) + " [[color(" + std::to_string(c) + ")]];";
+            if ((colorTargets >> c) & 1)
+                s += std::string((uintTargets >> c) & 1 ? " uint4" : (intTargets >> c) & 1 ? " int4" : " float4") + " c" + std::to_string(c) +
+                     " [[color(" + std::to_string(c) + ")]];";
         s += ps.mayKill ? " uint coverage [[sample_mask]]; };\n" : " };\n";
     }
     s += std::string("fragment ")+(mrt ? "GCNFragmentMRT" : ps.mayKill ? "GCNFragment" : "float4")+
@@ -1348,7 +1354,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         for (unsigned c = 0; c < 8; ++c) {
             if (!((colorTargets >> c) & 1)) continue;
             const bool exported = c == 0 || ((ps.colors >> c) & 1);
-            s += "    out.c" + std::to_string(c) + " = " + (exported ? "L.color[" + std::to_string(c) + "]" : std::string("float4(0.0f)")) + ";\n";
+            const std::string value = exported ? "L.color[" + std::to_string(c) + "]" : std::string("float4(0.0f)");
+            s += "    out.c" + std::to_string(c) + " = " + ((uintTargets >> c) & 1 ? "as_type<uint4>(" + value + ")" :
+                                                           (intTargets >> c) & 1 ? "as_type<int4>(" + value + ")" : value) + ";\n";
         }
         if (ps.mayKill) s += "    out.coverage = L.killed ? 0u : 0xffffffffu;\n";
         s += "    return out;\n}\n";

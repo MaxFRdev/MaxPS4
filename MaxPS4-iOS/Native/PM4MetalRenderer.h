@@ -148,6 +148,8 @@ public:
     unsigned fastClearsApplied = 0; // colour targets cleared for an eliminated fast clear
     // Bytes per pixel of a colour target format (0 for others).
     static unsigned bytesPerPixel(MTLPixelFormat format);
+    // 1 for an unsigned integer pixel format, 2 for a signed one, else 0.
+    static int integerFormat(MTLPixelFormat format);
     // f(address, texture) for every colour target.
     template <class F> void forEachTarget(F&& f) const { for (const auto& [address, t] : targets_) f(address, t.texture); }
     std::string error;

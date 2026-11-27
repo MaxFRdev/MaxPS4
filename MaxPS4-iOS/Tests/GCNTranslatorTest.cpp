@@ -85,6 +85,14 @@ int main(int argc, char** argv) {
     const auto layered=translateGCN(arena.memory,coverageProgram,ps);
     if (!layered) std::printf("%s\n", layered.error.c_str());
     assert(layered && layered.source.find("t = gcn_slice(t, gf(v4));")!=std::string::npos);
+    {
+        // An integer target gets the exported bits, typed, through the struct return.
+        std::uint32_t cntl[32] = {};
+        const std::string uintEntry = gcnMetalEntryPoints(embedded, quad, "vs_embedded", "ps_quad", 0x302, cntl, false, 1, 1);
+        assert(uintEntry.find("uint4 c0 [[color(0)]]") != std::string::npos && uintEntry.find("out.c0 = as_type<uint4>(L.color[0]);") != std::string::npos);
+        const std::string plain = gcnMetalEntryPoints(embedded, quad, "vs_embedded", "ps_quad", 0x302, cntl);
+        assert(plain.find("as_type<uint4>") == std::string::npos && plain.find("GCNFragmentMRT") == std::string::npos);
+    }
     GCNTranslateOptions fetch; fetch.stage = GCNStage::vertex; fetch.name = "vs_fetch";
     fetch.userCount = 4; fetch.userData[0] = std::uint32_t(fetchShader); fetch.userData[2] = std::uint32_t(vertexTable);
     const auto fetched = translateGCN(arena.memory, fetchVS, fetch);
