@@ -47,5 +47,20 @@ int main() {
             }
         }
     }
+    {
+        // gcn_slice: a 2D array's layer, clamped to BASE_ARRAY..LAST_ARRAY, one
+        // level 0 surface (rounded to 256 bytes) apart; 2D T#s and layer 0 unchanged.
+        rt::GCNRes8 t{{0x1000, 10u << 20, 3u | (1u << 14), (13u << 28) | (8u << 20), (4u << 13), 1u | (3u << 13), 0, 0}};
+        // 4x2 8_8_8_8, pitch 5, linear: 40 bytes a layer, 256 once rounded.
+        const auto layer2 = rt::gcn_slice(t, 2.2f);
+        assert(layer2.d[0] == 0x1002 && layer2.d[1] == t.d[1]);
+        assert(rt::gcn_slice(t, 9.0f).d[0] == 0x1003);          // clamped to LAST_ARRAY 3
+        assert(rt::gcn_slice(t, -4.0f).d[0] == 0x1001);         // clamped to BASE_ARRAY 1
+        rt::GCNRes8 flat = t; flat.d[3] = (9u << 28) | (8u << 20);
+        assert(rt::gcn_slice(flat, 2.0f).d[0] == 0x1000);       // a 2D T# has no layers
+        rt::GCNRes8 zero = t; zero.d[5] = 3u << 13;
+        assert(rt::gcn_slice(zero, 0.0f).d[0] == 0x1000);       // layer 0: the T# itself
+        ++cases;
+    }
     std::printf("PASS texture footprint: %u exact comparisons, padded pitch, formats, filters, wrap/border, packed/split/truncated/missing ranges\n", cases);
 }
