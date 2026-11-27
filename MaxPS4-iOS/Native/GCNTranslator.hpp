@@ -1157,9 +1157,15 @@ GCN_FN bool gcn_native_filter(texture2d<float> image, sampler q, bool usable, GC
         value = gcn_native_order(t, image.sample(q, uv, level(0.0f)));
         return true;
     }
-    if ((s.d[0] & 63u) != 18u) return false; // Both axes clamped.
+    // Larger than the T#: each axis clamped (stops at the T#'s last texel) or
+    // wrapped (folded into the T#'s size; a filter at the seam reads the
+    // target's padding row instead of the first one). Mirrored: not here.
+    const uint cx = s.d[0] & 7u, cy = (s.d[0] >> 3) & 7u;
+    if ((cx != 0u && cx != 2u) || (cy != 0u && cy != 2u)) return false;
     const float2 size = float2(float(w), float(h));
-    const float2 texel = clamp(un ? float2(u, v) : float2(u, v) * size, float2(0.5f), size - 0.5f);
+    float2 texel = un ? float2(u, v) : float2(u, v) * size;
+    if (cx == 2u) texel.x = clamp(texel.x, 0.5f, size.x - 0.5f); else texel.x -= floor(texel.x / size.x) * size.x;
+    if (cy == 2u) texel.y = clamp(texel.y, 0.5f, size.y - 0.5f); else texel.y -= floor(texel.y / size.y) * size.y;
     value = gcn_native_order(t, image.sample(q, texel / float2(float(iw), float(ih)), level(0.0f)));
     return true;
 }
