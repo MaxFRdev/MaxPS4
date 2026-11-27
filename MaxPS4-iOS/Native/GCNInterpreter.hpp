@@ -140,10 +140,11 @@ public:
     bool scc = false;
     std::vector<GCNExport> exports;
     std::string error;
-    // Resource scans: an instruction or format the interpreter lacks is
-    // skipped (its results left as they were) instead of ending the run, so
-    // the resources read after it are still found. Memory failures still end
-    // it. A run that skipped some returns true with `error` naming the first.
+    // Resource scans: an instruction, format or image kind the interpreter
+    // lacks is skipped (its results left as they were) instead of ending the
+    // run, so the resources read after it are still found. Memory failures
+    // still end it. A run that skipped some returns true with `error` naming
+    // the first.
     bool lenient = false;
     unsigned skipped = 0;
     // Pixel shaders: the parameter plane of attribute `attr`, channel `chan`.
@@ -198,8 +199,10 @@ public:
                 if (error.empty()) error = "unsupported " + gcnMnemonic(i);
                 char at[32]; std::snprintf(at, sizeof at, " at 0x%llx", (unsigned long long)pc);
                 error += at;
-                const bool missing = error.rfind("unsupported", 0) == 0 || error.find("format") != std::string::npos ||
-                                     error.rfind("LDS", 0) == 0;
+                // Everything but a memory failure (whose addresses would be
+                // garbage from then on) is something the interpreter lacks.
+                const bool missing = error.rfind("unread", 0) != 0 && error.rfind("unwrit", 0) != 0 &&
+                                     error.rfind("undecodable", 0) != 0 && error.rfind("image resource register range", 0) != 0;
                 if (!lenient || ended || !missing) return false;
                 if (first.empty()) first = error;
                 error.clear();
