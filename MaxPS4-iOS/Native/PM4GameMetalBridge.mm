@@ -462,7 +462,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
     }
     ++s.shown;
     const auto started = Clock::now();
-    id<MTLTexture>& slot = s.displayRing[s.displayNext++ % 3];
+    __strong id<MTLTexture>& slot = s.displayRing[s.displayNext++ % 3];
     if (!slot || slot.width != width || slot.height != height || slot.pixelFormat != source.pixelFormat) {
         auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
             width:width height:height mipmapped:NO];
