@@ -30,6 +30,7 @@ struct PM4DrawStats {
     // Constant engine (the submission's CCBs): CE RAM writes and loads, dumps
     // to guest memory, and the DE waits that ran the CE up to its next counter.
     unsigned ceWrites = 0, ceLoads = 0, ceDumps = 0, ceWaits = 0, ceIgnored = 0;
+    unsigned memoryWrites = 0; // WRITE_DATA to memory applied in stream order
     std::string error; // the first failure
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
@@ -54,6 +55,11 @@ struct PM4DrawStats {
             char line[256];
             std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u (dernier DMA_DATA : contrôle 0x%x, commande 0x%x) · appels de tampons : %u · dessins instanciés : %u",
                           fastClears, dmaCopies, lastDmaControl, lastDmaCommand, indirectBuffers, instancedDraws);
+            more += line;
+        }
+        if (memoryWrites) {
+            char line[64];
+            std::snprintf(line, sizeof line, " · écritures WRITE_DATA : %u", memoryWrites);
             more += line;
         }
         if (ceWrites || ceLoads || ceDumps || ceWaits || ceIgnored) {
@@ -255,6 +261,7 @@ public:
             case 0x2f: if (n >= 1) instances_ = std::max(1u, std::min(data[0], 1u << 16)); break;
             case 0x50: if (!dmaData(data, n)) ++stats_.ignored[0x50]; break;
             case 0x86: if (!ce_.empty()) { ++stats_.ceWaits; runConstantEngine(true); } break; // WAIT_ON_CE_COUNTER
+            case 0x37: writeData(data, n); break;
             case 0x3f: {
                 // INDIRECT_BUFFER: a call into another command buffer (IB_BASE,
                 // IB_SIZE in dwords), executed here in order with the same state.
@@ -361,6 +368,17 @@ private:
     std::vector<std::uint32_t> ce_;
     std::size_t cePos_ = 0;
     std::array<std::uint8_t, 0xc000> ceRam_{};
+    // WRITE_DATA to memory (DST_SEL 1, 2 or 5), where it is in the stream: the
+    // draws after it read what it wrote (the queue retires it again after the
+    // submission, for its labels). WR_ONE_ADDR writes every dword to one address.
+    void writeData(const std::uint32_t* data, std::size_t n) {
+        if (n < 4 || !memory_.write) return;
+        const unsigned dst = (data[0] >> 8) & 0xf;
+        if (dst != 1 && dst != 2 && dst != 5) return;
+        const std::uint64_t address = std::uint64_t(data[1]) | std::uint64_t(data[2]) << 32;
+        if ((data[0] >> 16) & 1) { if (memory_.write(address, &data[n - 1], 4)) ++stats_.memoryWrites; return; }
+        if (memory_.write(address, data + 3, 4 * (n - 3))) ++stats_.memoryWrites;
+    }
     // DMA_DATA (CP DMA): a copy or fill of guest memory in submission order,
     // so the draws after it see it (CoD updates its constant buffers this way:
     // without it a post-processing pass read zeros and wrote NaN). Memory to
