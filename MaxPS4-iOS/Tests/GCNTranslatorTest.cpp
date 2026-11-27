@@ -20,6 +20,21 @@ int main(int argc, char** argv) {
     if (!quad) std::printf("%s\n", quad.error.c_str());
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
+    {
+        // v_movrels/v_movreld/v_movrelsd: M0 selects among the VGPRs after the base.
+        constexpr uint64_t relative = 0x11900;
+        arena.code(relative, {0xbefc0382,                    // s_mov_b32 m0, 2
+                              0x7e028704,                    // v_movrels_b32 v1, v4   (v1 = v6)
+                              0x7e048502,                    // v_movreld_b32 v2, v2   (v4 = v2)
+                              0x7e0a8908,                    // v_movrelsd_b32 v5, v8  (v7 = v10)
+                              0xbf810000});
+        GCNTranslateOptions rel; rel.stage = GCNStage::vertex; rel.name = "vs_relative";
+        const auto moved = translateGCN(arena.memory, relative, rel);
+        if (!moved) std::printf("%s\n", moved.error.c_str());
+        assert(moved && moved.source.find("case 2u: r = v6;") != std::string::npos &&
+               moved.source.find("case 2u: v4 = r;") != std::string::npos &&
+               moved.source.find("case 2u: r = v10;") != std::string::npos && moved.source.find("case 2u: v7 = r;") != std::string::npos);
+    }
     constexpr uint64_t coverageProgram=0x11800;
     arena.code(coverageProgram,{0xbeeb03ff,7,0xbe94047e,0xbefe0a7e,0xbefe0414,0xf800180f,0,0xbf810000});
     const auto prologue=translateGCN(arena.memory,coverageProgram,ps);

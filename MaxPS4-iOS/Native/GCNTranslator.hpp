@@ -558,6 +558,29 @@ private:
         }
         if (op == 384 + 2) { setScalar(dst, source(src[0], i)); return out_.error.empty(); } // per-lane approximation
         if (op == 384 + 0 || op == 384 + 65) { body_ += "/* nop */"; return true; }
+        // v_movreld_b32 (v[dst + M0] = src0), v_movrels_b32 (dst = v[src0 + M0]),
+        // v_movrelsd_b32 (v[dst + M0] = v[src0 + M0]): registers are variables,
+        // so M0 selects among the 32 after the base (a small array, as games
+        // index them); outside that range a read gives 0 and a write is lost.
+        if (op == 384 + 66 || op == 384 + 67 || op == 384 + 68) {
+            constexpr unsigned span = 32;
+            const bool readRelative = op != 384 + 66, writeRelative = op != 384 + 67;
+            if (readRelative && src[0] < 256) return fail("v_movrels from a scalar operand");
+            const unsigned from = src[0] - 256;
+            std::string code = "{ if (" + E + ") { uint m = " + s(124) + "; uint r = 0u; ";
+            if (readRelative) {
+                code += "switch (m) { ";
+                for (unsigned k = 0; k < span && from + k < 256; ++k) code += "case " + std::to_string(k) + "u: r = " + v(from + k) + "; break; ";
+                code += "default: break; } ";
+            } else code += "r = " + source(src[0], i) + "; ";
+            if (writeRelative) {
+                code += "switch (m) { ";
+                for (unsigned k = 0; k < span && dst + k < 256; ++k) code += "case " + std::to_string(k) + "u: " + v(dst + k) + " = r; break; ";
+                code += "default: break; } ";
+            } else code += v(dst) + " = r; ";
+            body_ += code + "} }";
+            return out_.error.empty();
+        }
         std::string expr, carry;
         const std::string cin = (op >= 296 && op <= 298) ? (vop3 ? "(" + scalar64(src[2], i) + " & 1ul)" : "ulong(" + s(106) + " & 1u)") : "0ul";
         const std::string D = v(dst);
