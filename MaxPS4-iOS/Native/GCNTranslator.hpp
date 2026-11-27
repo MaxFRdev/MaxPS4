@@ -945,9 +945,10 @@ using namespace metal;
 struct GCNRes8 { uint d[8]; };
 struct GCNRes4 { uint d[4]; };
 #if GCN_NATIVE_TEXTURES
-// Up to four of a draw's T#s viewed as Metal textures (a video's Y, U and V
-// planes); bit k of `enabled` marks texture k valid, bit 4 + k its Metal
-// sampler, built on the CPU from S# `sdesc` (the one the draw samples it with).
+// Up to eight of a draw's T#s viewed as Metal textures (a video's Y, U and V
+// planes, a deferred light's G-buffer); `enabled` marks texture k valid (bit
+// k for 0-3, k + 4 for 4-7) and its Metal sampler (bit 4 + k, k + 8), built
+// on the CPU from S# `sdesc` (the one the draw samples it with).
 struct GCNNativeTexture {
     texture2d<float> image [[id(0)]];
     uint enabled [[id(1)]];
@@ -970,6 +971,26 @@ struct GCNNativeTexture {
     uint4 high3 [[id(18)]];
     sampler samp3 [[id(19)]];
     uint4 sdesc3 [[id(20)]];
+    texture2d<float> image4 [[id(21)]];
+    uint4 low4 [[id(22)]];
+    uint4 high4 [[id(23)]];
+    sampler samp4 [[id(24)]];
+    uint4 sdesc4 [[id(25)]];
+    texture2d<float> image5 [[id(26)]];
+    uint4 low5 [[id(27)]];
+    uint4 high5 [[id(28)]];
+    sampler samp5 [[id(29)]];
+    uint4 sdesc5 [[id(30)]];
+    texture2d<float> image6 [[id(31)]];
+    uint4 low6 [[id(32)]];
+    uint4 high6 [[id(33)]];
+    sampler samp6 [[id(34)]];
+    uint4 sdesc6 [[id(35)]];
+    texture2d<float> image7 [[id(36)]];
+    uint4 low7 [[id(37)]];
+    uint4 high7 [[id(38)]];
+    sampler samp7 [[id(39)]];
+    uint4 sdesc7 [[id(40)]];
 };
 #endif
 // Large ranges live in buffers of their own (buffer(5) up), shared by the
@@ -1092,7 +1113,7 @@ GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_loca
 GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 2ul, o)) *(device ushort*)(M.p + o) = ushort(v); }
 GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 1ul, o)) *(device uchar*)(M.p + o) = uchar(v); }
 #if GCN_NATIVE_TEXTURES
-// Which of the draw's Metal textures (0 to 3) views T# `t`, or -1. The CPU
+// Which of the draw's Metal textures (0 to 7) views T# `t`, or -1. The CPU
 // binds only T#s it can serve (nativeTexture): any format it bound matches.
 // A list of formats here (8_8_8_8, 5_6_5, 8, BC7) had left out the colour
 // targets in other formats (a 16-bit float scene, read back as guest memory
@@ -1105,6 +1126,10 @@ GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
     if ((enabled & 2u) && all(M.native->low1 == low) && all(M.native->high1 == high)) return 1;
     if ((enabled & 4u) && all(M.native->low2 == low) && all(M.native->high2 == high)) return 2;
     if ((enabled & 8u) && all(M.native->low3 == low) && all(M.native->high3 == high)) return 3;
+    if ((enabled & 0x100u) && all(M.native->low4 == low) && all(M.native->high4 == high)) return 4;
+    if ((enabled & 0x200u) && all(M.native->low5 == low) && all(M.native->high5 == high)) return 5;
+    if ((enabled & 0x400u) && all(M.native->low6 == low) && all(M.native->high6 == high)) return 6;
+    if ((enabled & 0x800u) && all(M.native->low7 == low) && all(M.native->high7 == high)) return 7;
     return -1;
 }
 // 5_6_5 viewed as B5G6R5Unorm: GCN's first component is the low 5 bits, Metal's blue.
@@ -1143,9 +1168,16 @@ GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4
 #if GCN_NATIVE_TEXTURES
     const int k = gcn_native_match(M, t);
     if (k < 0) return false;
-    return k == 0 ? gcn_native_read(M.native->image, t, x, y, value) :
-           k == 1 ? gcn_native_read(M.native->image1, t, x, y, value) :
-           k == 2 ? gcn_native_read(M.native->image2, t, x, y, value) : gcn_native_read(M.native->image3, t, x, y, value);
+    switch (k) {
+    case 0: return gcn_native_read(M.native->image, t, x, y, value);
+    case 1: return gcn_native_read(M.native->image1, t, x, y, value);
+    case 2: return gcn_native_read(M.native->image2, t, x, y, value);
+    case 3: return gcn_native_read(M.native->image3, t, x, y, value);
+    case 4: return gcn_native_read(M.native->image4, t, x, y, value);
+    case 5: return gcn_native_read(M.native->image5, t, x, y, value);
+    case 6: return gcn_native_read(M.native->image6, t, x, y, value);
+    default: return gcn_native_read(M.native->image7, t, x, y, value);
+    }
 #else
     return false;
 #endif
@@ -1155,12 +1187,19 @@ GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, flo
     const int k = gcn_native_match(M, t);
     if (k < 0) return false;
     const uint4 sd = uint4(s.d[0], s.d[1], s.d[2], s.d[3]);
-    const bool usable = ((M.native->enabled >> (4 + k)) & 1u) != 0u &&
-        all(sd == (k == 0 ? M.native->sdesc : k == 1 ? M.native->sdesc1 : k == 2 ? M.native->sdesc2 : M.native->sdesc3));
-    return k == 0 ? gcn_native_filter(M.native->image, M.native->samp, usable, t, s, unorm, u, v, value) :
-           k == 1 ? gcn_native_filter(M.native->image1, M.native->samp1, usable, t, s, unorm, u, v, value) :
-           k == 2 ? gcn_native_filter(M.native->image2, M.native->samp2, usable, t, s, unorm, u, v, value) :
-                    gcn_native_filter(M.native->image3, M.native->samp3, usable, t, s, unorm, u, v, value);
+    const uint4 want = k == 0 ? M.native->sdesc : k == 1 ? M.native->sdesc1 : k == 2 ? M.native->sdesc2 : k == 3 ? M.native->sdesc3 :
+                       k == 4 ? M.native->sdesc4 : k == 5 ? M.native->sdesc5 : k == 6 ? M.native->sdesc6 : M.native->sdesc7;
+    const bool usable = ((M.native->enabled >> uint(k < 4 ? 4 + k : 8 + k)) & 1u) != 0u && all(sd == want);
+    switch (k) {
+    case 0: return gcn_native_filter(M.native->image, M.native->samp, usable, t, s, unorm, u, v, value);
+    case 1: return gcn_native_filter(M.native->image1, M.native->samp1, usable, t, s, unorm, u, v, value);
+    case 2: return gcn_native_filter(M.native->image2, M.native->samp2, usable, t, s, unorm, u, v, value);
+    case 3: return gcn_native_filter(M.native->image3, M.native->samp3, usable, t, s, unorm, u, v, value);
+    case 4: return gcn_native_filter(M.native->image4, M.native->samp4, usable, t, s, unorm, u, v, value);
+    case 5: return gcn_native_filter(M.native->image5, M.native->samp5, usable, t, s, unorm, u, v, value);
+    case 6: return gcn_native_filter(M.native->image6, M.native->samp6, usable, t, s, unorm, u, v, value);
+    default: return gcn_native_filter(M.native->image7, M.native->samp7, usable, t, s, unorm, u, v, value);
+    }
 #else
     return false;
 #endif

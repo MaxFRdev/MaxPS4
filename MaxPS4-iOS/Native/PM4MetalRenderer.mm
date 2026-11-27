@@ -1462,21 +1462,25 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                                                                           argument(MTLDataTypeUInt4, 14), argument(MTLDataTypeUInt4, 15),
                                                                           argument(MTLDataTypeTexture, 16), argument(MTLDataTypeUInt4, 17),
                                                                           argument(MTLDataTypeUInt4, 18), argument(MTLDataTypeSampler, 19),
-                                                                          argument(MTLDataTypeUInt4, 20)]];
+                                                                          argument(MTLDataTypeUInt4, 20),
+                                                                          argument(MTLDataTypeTexture, 21), argument(MTLDataTypeUInt4, 22), argument(MTLDataTypeUInt4, 23), argument(MTLDataTypeSampler, 24), argument(MTLDataTypeUInt4, 25), argument(MTLDataTypeTexture, 26), argument(MTLDataTypeUInt4, 27), argument(MTLDataTypeUInt4, 28), argument(MTLDataTypeSampler, 29), argument(MTLDataTypeUInt4, 30), argument(MTLDataTypeTexture, 31), argument(MTLDataTypeUInt4, 32), argument(MTLDataTypeUInt4, 33), argument(MTLDataTypeSampler, 34), argument(MTLDataTypeUInt4, 35), argument(MTLDataTypeTexture, 36), argument(MTLDataTypeUInt4, 37), argument(MTLDataTypeUInt4, 38), argument(MTLDataTypeSampler, 39), argument(MTLDataTypeUInt4, 40)]];
         }
-        // Up to four T#s (a video's Y, U and V planes, Mortal Kombat 1's lighting),
-        // each at texture index 0, 4, 7 or 16 with its descriptor's halves after it.
-        id<MTLTexture> images[4] = {};
-        id<MTLSamplerState> samplers[4] = {};
-        std::array<std::uint32_t, 8> descriptors[4] = {};
-        std::array<std::uint32_t, 4> samplerWords[4] = {};
-        unsigned found = 0, sampled = 0;
+        // Up to eight T#s (a video's Y, U and V planes, Mortal Kombat 1's
+        // lighting, a deferred light's G-buffer: programs with many samples
+        // read any T# left out as zero), see GCNNativeTexture for the fields.
+        constexpr unsigned slotsMax = 8;
+        id<MTLTexture> images[slotsMax] = {};
+        id<MTLSamplerState> samplers[slotsMax] = {};
+        std::array<std::uint32_t, 8> descriptors[slotsMax] = {};
+        std::array<std::uint32_t, 4> samplerWords[slotsMax] = {};
+        unsigned found = 0, enabled = 0, filtered = 0;
         if (scanner_.images().empty()) ++nativeMisses[0];
-        for (std::size_t k = 0; k < scanner_.images().size() && found < 4; ++k) {
+        for (std::size_t k = 0; k < scanner_.images().size() && found < slotsMax; ++k) {
             const auto& t = scanner_.images()[k];
             if (!(images[found] = nativeTexture(t, memory, slots, drawState.ranges, drawState.rangeCount, target.texture))) continue;
             samplerWords[found] = scanner_.samplers()[k];
-            if ((samplers[found] = nativeSampler(samplerWords[found]))) sampled |= 16u << found;
+            enabled |= 1u << (found < 4 ? found : found + 4);
+            if ((samplers[found] = nativeSampler(samplerWords[found]))) { enabled |= 1u << (found < 4 ? found + 4 : found + 8); ++filtered; }
             descriptors[found++] = t;
         }
         id<MTLBuffer> arguments = nativeArguments_ ? uploadBuffer(nativeArguments_.encodedLength, commands) : nil;
@@ -1485,10 +1489,11 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
             return fail("native texture arguments");
         }
         [nativeArguments_ setArgumentBuffer:arguments offset:0];
-        *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = ((1u << found) - 1) | sampled;
-        nativeBound_ = found; nativeFiltered_ = __builtin_popcount(sampled);
-        static const NSUInteger fields[4] = {0, 4, 7, 16}, samplerFields[4] = {10, 11, 12, 19}, wordFields[4] = {13, 14, 15, 20};
-        for (unsigned k = 0; k < 4; ++k) {
+        *static_cast<std::uint32_t*>([nativeArguments_ constantDataAtIndex:1]) = enabled;
+        nativeBound_ = found; nativeFiltered_ = filtered;
+        static const NSUInteger fields[slotsMax] = {0, 4, 7, 16, 21, 26, 31, 36}, samplerFields[slotsMax] = {10, 11, 12, 19, 24, 29, 34, 39},
+                                wordFields[slotsMax] = {13, 14, 15, 20, 25, 30, 35, 40};
+        for (unsigned k = 0; k < slotsMax; ++k) {
             const NSUInteger at = fields[k], low = k ? at + 1 : 2;
             [nativeArguments_ setTexture:images[k] atIndex:at];
             [nativeArguments_ setSamplerState:samplers[k] atIndex:samplerFields[k]];
