@@ -288,15 +288,20 @@ private:
         std::map<LibraryKey, id<MTLLibrary>> libraries;
         std::map<LibraryKey, std::vector<std::function<void(id<MTLLibrary>, NSError*)>>> compiling;
         unsigned librariesShared = 0, librariesCompiled = 0;
-        // At most compileLimit library compiles in flight: hundreds started
-        // together (CoD's mission) left the iPhone's compiler service
-        // thrashing, each taking a minute. The rest wait their turn, in order.
-        static constexpr unsigned compileLimit = 3;
-        unsigned compilesRunning = 0;
+        // At most compileLimit compiles in flight, library or pipeline: hundreds
+        // started together (CoD's mission) left the iPhone's compiler service
+        // thrashing, each taking a minute, and pipeline creations, unbounded,
+        // still waited 98 s behind each other. The rest wait their turn, in
+        // order, a pipeline (its library done, a draw close to showing) first.
+        static constexpr unsigned compileLimit = 4;
+        unsigned compilesRunning = 0, pipelinesRunning = 0;
         std::deque<std::function<void()>> compileQueue;
-        void startCompile(std::function<void()> job) {
+        void startCompile(std::function<void()> job, bool urgent = false) {
             { std::lock_guard<std::mutex> lock(mutex);
-              if (compilesRunning >= compileLimit) { compileQueue.push_back(std::move(job)); return; }
+              if (compilesRunning >= compileLimit) {
+                  if (urgent) compileQueue.push_front(std::move(job)); else compileQueue.push_back(std::move(job));
+                  return;
+              }
               ++compilesRunning; }
             job();
         }

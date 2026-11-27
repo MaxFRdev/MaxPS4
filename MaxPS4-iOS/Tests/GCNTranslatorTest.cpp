@@ -35,6 +35,14 @@ int main(int argc, char** argv) {
                moved.source.find("case 2u: v4 = r;") != std::string::npos &&
                moved.source.find("case 2u: r = v10;") != std::string::npos && moved.source.find("case 2u: v7 = r;") != std::string::npos);
     }
+    {
+        // ds_swizzle_b32 v1, v0 offset:0x041f (bitmask: and 0x1f, or 0, xor 1).
+        constexpr uint64_t swizzle = 0x11a00;
+        arena.code(swizzle, {0xd8d4041f, 0x01000000, 0xbf810000});
+        const auto swapped = translateGCN(arena.memory, swizzle, ps);
+        if (!swapped) std::printf("%s\n", swapped.error.c_str());
+        assert(swapped && swapped.quad && swapped.source.find("(((L.quadLane & 0x1fu) | 0x0u) ^ 0x1u) & 3u") != std::string::npos);
+    }
     constexpr uint64_t coverageProgram=0x11800;
     arena.code(coverageProgram,{0xbeeb03ff,7,0xbe94047e,0xbefe0a7e,0xbefe0414,0xf800180f,0,0xbf810000});
     const auto prologue=translateGCN(arena.memory,coverageProgram,ps);

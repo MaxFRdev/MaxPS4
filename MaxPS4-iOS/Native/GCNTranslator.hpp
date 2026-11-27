@@ -720,11 +720,19 @@ private:
     bool ds(const Inst& in) {
         const GCNInstruction& i = in.i;
         const unsigned offset = i.word0 & 0xffff;
-        if (i.opcode != 53 || !(offset & 0x8000)) return fail("LDS access other than a quad swizzle");
+        if (i.opcode != 53) return fail("LDS access other than a swizzle");
         if (options_.stage != GCNStage::pixel) return fail("quad swizzle outside a pixel program");
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
+        // Quad mode (bit 15): two bits per lane pick the source lane. Bitmask
+        // mode: lane = ((lane & and) | or) ^ xor over groups of 32. Only the
+        // quad is visible here, so the low two bits of that lane are taken;
+        // exact whenever bits 2-4 are kept (and = 1xxx, or = xor = 0 there),
+        // the usual case (swaps and broadcasts within a quad).
+        std::string pick;
+        if (offset & 0x8000) pick = "(" + hex(offset & 0xff) + " >> (2u * L.quadLane)) & 3u";
+        else pick = "(((L.quadLane & " + hex(offset & 0x1f) + ") | " + hex((offset >> 5) & 0x1f) + ") ^ " + hex((offset >> 10) & 0x1f) + ") & 3u";
         // Every lane takes part (inactive ones contribute 0), so quads stay converged.
-        body_ += "{ uint lane = (" + hex(offset & 0xff) + " >> (2u * L.quadLane)) & 3u; uint got = gcn_quad_shuffle(Q, L, " +
+        body_ += "{ uint lane = " + pick + "; uint got = gcn_quad_shuffle(Q, L, " +
                  std::string(ex()) + " ? " + v(src) + " : 0u, lane); if (" + ex() + ") " + v(dst) + " = got; }";
         sregs_.insert(126);
         out_.quad = true;

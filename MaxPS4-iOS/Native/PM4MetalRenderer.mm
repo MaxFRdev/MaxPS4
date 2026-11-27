@@ -396,8 +396,8 @@ void PM4MetalRenderer::listCostly(std::uint64_t address) {
 std::string PM4MetalRenderer::pipelineStatus() const {
     std::lock_guard<std::mutex> lock(async_->mutex);
     // Which programs still run their size build, and what the queue is doing.
-    char queue[160];
-    std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées, %u en compilation, %zu en file", async_->librariesCompiled, async_->librariesShared, async_->compilesRunning, async_->compileQueue.size());
+    char queue[200];
+    std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées, %u en compilation (dont %u pipelines), %zu en file", async_->librariesCompiled, async_->librariesShared, async_->compilesRunning, async_->pipelinesRunning, async_->compileQueue.size());
     std::string defaults = queue;
     std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente", async_->later.size());
     defaults = async_->archiveReport() + defaults + queue;
@@ -1968,10 +1968,16 @@ void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
 void PM4MetalRenderer::AsyncPipelines::compile(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
                                                std::function<void(id<MTLRenderPipelineState>, NSError*)> done) {
     auto self = shared_from_this();
-    [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
-        if (state) self->remember(descriptor);
-        done(state, failed);
-    }];
+    // Through the compile limit, ahead of libraries waiting (see compileLimit).
+    startCompile([self, device, descriptor, done] {
+        { std::lock_guard<std::mutex> lock(self->mutex); ++self->pipelinesRunning; }
+        [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
+            { std::lock_guard<std::mutex> lock(self->mutex); --self->pipelinesRunning; }
+            self->compileDone();
+            if (state) self->remember(descriptor);
+            done(state, failed);
+        }];
+    }, true);
 }
 
 void PM4MetalRenderer::AsyncPipelines::remember(MTLRenderPipelineDescriptor* descriptor) {
