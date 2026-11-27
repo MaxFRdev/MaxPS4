@@ -1019,7 +1019,7 @@ GCN_FN void gcn_lane_init(thread GCNLane& L) {
 // starting at guest address `base` (rangeCount 0) or rangeCount copied ranges
 // as (guest start, length, offset in the buffer) triples; user SGPRs of each
 // stage; GCN_DRAW_* flags.
-struct GCNDrawState { ulong base; ulong size; uint vsUser[16]; uint psUser[17]; uint flags; uint rangeCount; ulong ranges[48]; };
+struct GCNDrawState { ulong base; ulong size; uint vsUser[16]; uint psUser[17]; uint flags; uint rangeCount; ulong ranges[48]; uint stepRate[2]; };
 #define GCN_DRAW_RECT_LIST 1u
 #define GCN_DRAW_FLIP_Y 2u
 #define GCN_DRAW_SITES 4u
@@ -1210,9 +1210,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     for (unsigned p = 0; p < 32; ++p)
         if ((vs.params >> p) & 1) s += "    L.param[" + std::to_string(p) + "] = float4(0.0f);\n";
     s += "    for (uint k = 0u; k < 16u; ++k) L.user[k] = D.vsUser[k];\n"
-         // v1/v2: the instance divided by VGT_INSTANCE_STEP_RATE_0/1, taken as
-         // 1 (the usual rate); v3: the instance.
-         "    L.vinit[0] = index; L.vinit[1] = iid; L.vinit[2] = iid; L.vinit[3] = iid;\n"
+         // v1/v2: the instance divided by VGT_INSTANCE_STEP_RATE_0/1 (0 in a
+         // state left unset reads as 1); v3: the instance.
+         "    L.vinit[0] = index; L.vinit[1] = iid / max(1u, D.stepRate[0]); L.vinit[2] = iid / max(1u, D.stepRate[1]); L.vinit[3] = iid;\n"
          "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u }; M.s = S;\n"
          "    " + vsName + "(L, M, Q);\n"
          "    GCNVaryings o; o.position = L.pos;\n";

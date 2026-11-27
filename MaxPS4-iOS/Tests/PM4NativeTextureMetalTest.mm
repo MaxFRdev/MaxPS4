@@ -22,8 +22,8 @@
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
-struct State { uint64_t base, size; uint32_t vs[16], ps[17], flags, count; uint64_t ranges[48]; };
-static_assert(sizeof(State) == 544, "GCNDrawState layout");
+struct State { uint64_t base, size; uint32_t vs[16], ps[17], flags, count; uint64_t ranges[48]; uint32_t stepRate[2]; };
+static_assert(sizeof(State) == 552, "GCNDrawState layout");
 id<MTLArgumentEncoder> nativeEncoder(id<MTLDevice> device) {
     auto argument = [](MTLDataType type, NSUInteger index) {
         MTLArgumentDescriptor* a = [MTLArgumentDescriptor argumentDescriptor];

@@ -24,8 +24,8 @@ static NSURL* archiveFolder() {
 }
 namespace {
 // Must match GCNDrawState in gcnMetalPrelude().
-struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; };
-static_assert(sizeof(DrawState) == 544, "GCNDrawState layout");
+struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; std::uint32_t stepRate[2]; };
+static_assert(sizeof(DrawState) == 552, "GCNDrawState layout");
 // Must match GCNDispatchState in gcnMetalComputeEntry().
 struct DispatchState { std::uint64_t base, size; std::uint32_t user[16], userCount, rsrc2, rangeCount, pad; std::uint64_t ranges[48]; };
 static_assert(sizeof(DispatchState) == 480, "GCNDispatchState layout");
@@ -1413,6 +1413,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
     [encoder setFrontFacingWinding:d.frontClockwise ? MTLWindingClockwise : MTLWindingCounterClockwise];
     if (depth) { ++depthDraws; if (!d.colour) ++depthOnlyDraws; }
     for (unsigned k = 0; k < 16; ++k) { drawState.vsUser[k] = d.vsUser[k]; drawState.psUser[k] = d.psUser[k]; }
+    drawState.stepRate[0] = d.stepRate[0]; drawState.stepRate[1] = d.stepRate[1];
     drawState.flags = (d.primitive == 0x11 ? rectList : 0) | (ys > 0 ? flipY : 0);
     // The pixel program's scalar values as this draw's scan read them. Always
     // bound for a program that declares them, even empty: the compiler may read

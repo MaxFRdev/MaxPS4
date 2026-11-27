@@ -119,6 +119,7 @@ struct PM4Draw {
     bool fastClear = false;
     std::uint32_t clearWords[2] = {};
     std::uint32_t instances = 1; // NUM_INSTANCES
+    std::uint32_t stepRate[2] = {1, 1}; // VGT_INSTANCE_STEP_RATE_0/1 (v1, v2 of the vertex program)
     float blendConstant[4] = {};                     // CB_BLEND_RED/GREEN/BLUE/ALPHA
     // False: a depth-only draw (no colour target, or mask 0); target is then 0
     // and pitch/height are the depth buffer's.
@@ -410,6 +411,7 @@ private:
         if (d.colour && !otherTargetFormats && (d.format != 0xa || d.number != 0)) { stats_.fail("colour target format"); return; }
         d.primitive = uconfig_[0x242];
         d.instances = instances_;
+        d.stepRate[0] = std::max(1u, context_[0x2a8]); d.stepRate[1] = std::max(1u, context_[0x2a9]);
         if (instances_ > 1) ++stats_.instancedDraws;
         if (d.primitive != 4 && d.primitive != 5 && d.primitive != 6 && d.primitive != 0x11) {
             stats_.fail("primitive type " + std::to_string(d.primitive)); return;

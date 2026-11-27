@@ -21,8 +21,8 @@
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
-struct State { uint64_t base, size; uint32_t vs[16], ps[17], flags, count; uint64_t ranges[48]; };
-static_assert(sizeof(State) == 544, "GCNDrawState layout");
+struct State { uint64_t base, size; uint32_t vs[16], ps[17], flags, count; uint64_t ranges[48]; uint32_t stepRate[2]; };
+static_assert(sizeof(State) == 552, "GCNDrawState layout");
 std::string replaced(std::string s, const std::string& from, const std::string& to) {
     std::size_t count = 0;
     for (std::size_t at = 0; (at = s.find(from, at)) != std::string::npos; at += to.size(), ++count) s.replace(at, from.size(), to);

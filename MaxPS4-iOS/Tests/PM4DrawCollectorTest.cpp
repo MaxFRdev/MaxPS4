@@ -93,8 +93,10 @@ int main() {
                0xc0003800, 0, 0xc0003800, 0,             // DRAW_INDEX_INDIRECT_MULTI twice
                0xc0055000, 0, 0, 0, 0, 0, 0,             // DMA_DATA
                0xc0004600, 0,                            // EVENT_WRITE: synchronization only
+               0xc0016900, 0x2a8, 3,                     // VGT_INSTANCE_STEP_RATE_0 3 (rate 1 left at 0)
                0xc0012d00, 3, 2});                       // DRAW_INDEX_AUTO
         assert(f.stats.failed == 0 && f.draws.size() == 1 && f.full[0].instances == 4 && f.stats.instancedDraws == 1);
+        assert(f.full[0].stepRate[0] == 3 && f.full[0].stepRate[1] == 1);
         assert(f.stats.ignored[0x24] == 1 && f.stats.ignored[0x2f] == 0 && f.stats.ignored[0x38] == 2 &&
                f.stats.ignored[0x50] == 1 && f.stats.ignored[0x46] == 0);
         assert(f.stats.ignoredReport() ==
