@@ -70,6 +70,47 @@ int main() {
         std::puts("PASS DMA_DATA copies and fills guest memory in submission order");
     }
     {
+        // The constant engine stream (a NOP marked ceMarker, as PS4GnmQueue
+        // puts the CCBs first) runs to its next counter at each DE wait: the
+        // first dump is read by the DMA between the waits, before the second.
+        std::vector<std::uint8_t> ram(256);
+        const std::uint64_t base = 0x20000;
+        auto inside = [&](std::uint64_t a, std::size_t n) { return a >= base && a - base + n <= ram.size(); };
+        GCNMemory memory{
+            [&](std::uint64_t a, void* out, std::size_t n) { return inside(a, n) && std::memcpy(out, ram.data() + (a - base), n); },
+            [&](std::uint64_t a, const void* in, std::size_t n) { return inside(a, n) && std::memcpy(ram.data() + (a - base), in, n); }};
+        PM4DrawStats stats;
+        PM4DrawCollector collector{memory, stats};
+        const std::uint32_t at = std::uint32_t(base + 0x40);
+        const std::vector<std::uint32_t> words = {
+            0xc0141000, PM4DrawCollector::ceMarker,                 // NOP: the CE stream
+            0xc0018100, 0x10, 0x11111111,                           //   WRITE_CONST_RAM
+            0xc0038300, 0x10, 1, at, 0,                             //   DUMP_CONST_RAM 1 dword
+            0xc0008400, 0,                                          //   INCREMENT_CE_COUNTER
+            0xc0018100, 0x10, 0x22222222,
+            0xc0038300, 0x10, 1, at, 0,
+            0xc0008400, 0,
+            0xc0008600, 0,                                          // WAIT_ON_CE_COUNTER
+            0xc0055000, 0, at, 0, at + 0x10, 0, 4,                  // DMA_DATA: keep the first dump
+            0xc0008600, 0,
+        };
+        collector.execute(words.data(), words.size(), [](const PM4Draw&) {});
+        std::uint32_t first = 0, second = 0;
+        std::memcpy(&first, ram.data() + 0x50, 4); std::memcpy(&second, ram.data() + 0x40, 4);
+        assert(first == 0x11111111 && second == 0x22222222);
+        assert(stats.ceWrites == 2 && stats.ceDumps == 2 && stats.ceWaits == 2 && stats.ceIgnored == 0 && stats.failed == 0);
+        assert(stats.depthReport().find("moteur de constantes : 2 écritures") != std::string::npos);
+        // Without a DE wait, the whole stream runs before the DCB.
+        const std::vector<std::uint32_t> ahead = {
+            0xc0081000, PM4DrawCollector::ceMarker, 0xc0018100, 0x20, 0x33333333, 0xc0038300, 0x20, 1, at + 8, 0,
+            0xc0055000, 0, at + 8, 0, at + 0x18, 0, 4,
+        };
+        collector.execute(ahead.data(), ahead.size(), [](const PM4Draw&) {});
+        std::memcpy(&first, ram.data() + 0x58, 4);
+        assert(first == 0x33333333);
+        std::puts("PASS constant engine: CE RAM writes dumped to memory, run along the DE's waits");
+    }
+    {
         // ELIMINATE_FAST_CLEAR (CB_COLOR_CONTROL MODE 2) draws nothing; the
         // target's next draw carries the clear (CB_COLOR0_CLEAR_WORD0/1), once.
         Fixture f;

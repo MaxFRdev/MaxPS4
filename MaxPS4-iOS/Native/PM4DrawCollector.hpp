@@ -27,6 +27,9 @@ struct PM4DrawStats {
     std::uint32_t lastDmaControl = 0, lastDmaCommand = 0; // the last DMA_DATA met
     unsigned indirectBuffers = 0; // INDIRECT_BUFFER calls executed
     unsigned instancedDraws = 0;  // draws of more than one instance
+    // Constant engine (the submission's CCBs): CE RAM writes and loads, dumps
+    // to guest memory, and the DE waits that ran the CE up to its next counter.
+    unsigned ceWrites = 0, ceLoads = 0, ceDumps = 0, ceWaits = 0, ceIgnored = 0;
     std::string error; // the first failure
     // Diagnostics: the registers of the last draw skipped for want of a colour
     // target, and the last dispatch (program address and group counts).
@@ -51,6 +54,12 @@ struct PM4DrawStats {
             char line[256];
             std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u (dernier DMA_DATA : contrôle 0x%x, commande 0x%x) · appels de tampons : %u · dessins instanciés : %u",
                           fastClears, dmaCopies, lastDmaControl, lastDmaCommand, indirectBuffers, instancedDraws);
+            more += line;
+        }
+        if (ceWrites || ceLoads || ceDumps || ceWaits || ceIgnored) {
+            char line[192];
+            std::snprintf(line, sizeof line, " · moteur de constantes : %u écritures, %u chargements, %u copies en mémoire, %u attentes, %u paquets ignorés",
+                          ceWrites, ceLoads, ceDumps, ceWaits, ceIgnored);
             more += line;
         }
         return text + more + (lastDepth.empty() ? std::string() : " · dernier : " + lastDepth);
@@ -173,6 +182,21 @@ public:
     void execute(const std::uint32_t* words, std::size_t count, Draw&& draw, Dispatch&& dispatch) {
         const auto parsed = decodePM4Type3(words, count);
         if (!parsed) { stats_.fail("unframed PM4 stream"); return; }
+        // The submission's constant engine stream comes first, in NOPs marked
+        // ceMarker (PS4GnmQueue). Without a DE wait on it, it runs up front
+        // (the CE runs ahead); otherwise each wait runs it to its next counter.
+        const bool top = depth_ == 0;
+        if (top) {
+            ce_.clear(); cePos_ = 0;
+            bool waits = false;
+            for (const auto& packet : parsed.packets) {
+                const std::uint32_t* data = words + packet.payloadWord;
+                if (packet.opcode == 0x10 && packet.payloadCount >= 1 && data[0] == ceMarker)
+                    ce_.insert(ce_.end(), data + 1, data + packet.payloadCount);
+                waits = waits || packet.opcode == 0x86;
+            }
+            if (!ce_.empty() && !waits) runConstantEngine(false);
+        }
         for (const auto& packet : parsed.packets) {
             const std::uint32_t* data = words + packet.payloadWord;
             const std::size_t n = packet.payloadCount;
@@ -230,6 +254,7 @@ public:
             // vertex program reads the instance in v3), until the next one.
             case 0x2f: if (n >= 1) instances_ = std::max(1u, std::min(data[0], 1u << 16)); break;
             case 0x50: if (!dmaData(data, n)) ++stats_.ignored[0x50]; break;
+            case 0x86: if (!ce_.empty()) { ++stats_.ceWaits; runConstantEngine(true); } break; // WAIT_ON_CE_COUNTER
             case 0x3f: {
                 // INDIRECT_BUFFER: a call into another command buffer (IB_BASE,
                 // IB_SIZE in dwords), executed here in order with the same state.
@@ -253,7 +278,10 @@ public:
                 break;
             }
         }
+        if (top && !ce_.empty()) { runConstantEngine(false); ce_.clear(); }
     }
+    // First word of the NOPs carrying a submission's constant engine stream.
+    static constexpr std::uint32_t ceMarker = 0x4543584d; // "MXCE"
     // Registers by offset from their bank base (context 0xa000, shader 0x2c00, uconfig 0xc000).
     std::uint32_t context(unsigned offset) const { return context_[offset & 0x3ff]; }
     // Also report draws that write no colour but write or clear a depth
@@ -264,6 +292,75 @@ public:
     bool otherTargetFormats = false;
 
 private:
+    // The constant engine: CE RAM (48 KiB, kept across submissions like the
+    // GPU's) filled by WRITE/LOAD_CONST_RAM and copied to guest memory by
+    // DUMP_CONST_RAM. Gnmx writes the shaders' resource and constant tables
+    // this way: without it they stayed zero (CoD's post-processing wrote NaN).
+    // Runs ce_ from cePos_, through its next INCREMENT_CE_COUNTER when toCounter.
+    void runConstantEngine(bool toCounter) {
+        while (cePos_ < ce_.size()) {
+            const std::uint32_t header = ce_[cePos_];
+            if ((header >> 30) == 2) { ++cePos_; continue; } // type-2 filler
+            const std::size_t n = ((header >> 16) & 0x3fff) + 1;
+            if ((header >> 30) != 3 || n > ce_.size() - cePos_ - 1) { cePos_ = ce_.size(); ++stats_.ceIgnored; return; }
+            const std::uint32_t* data = ce_.data() + cePos_ + 1;
+            const unsigned opcode = (header >> 8) & 0xff;
+            cePos_ += 1 + n;
+            if (constantPacket(opcode, data, n, 0)) continue;
+            if (opcode == 0x84 && toCounter) return; // INCREMENT_CE_COUNTER
+        }
+    }
+    // One CE packet; false for the counter and others with nothing to do here.
+    bool constantPacket(unsigned opcode, const std::uint32_t* data, std::size_t n, unsigned depth) {
+        switch (opcode) {
+        case 0x81: { // WRITE_CONST_RAM: byte offset, then the dwords
+            if (n < 2) break;
+            const std::size_t offset = data[0] & 0xfffc;
+            for (std::size_t k = 1; k < n && offset + 4 * k <= ceRam_.size(); ++k)
+                std::memcpy(ceRam_.data() + offset + 4 * (k - 1), &data[k], 4);
+            ++stats_.ceWrites;
+            return true;
+        }
+        case 0x80: { // LOAD_CONST_RAM: address, dwords, CE RAM byte offset
+            if (n < 4) break;
+            const std::uint64_t address = std::uint64_t(data[0]) | std::uint64_t(data[1]) << 32;
+            const std::size_t offset = data[3] & 0xfffc, bytes = std::size_t(data[2] & 0x7fff) * 4;
+            if (offset + bytes <= ceRam_.size() && memory_.read(address, ceRam_.data() + offset, bytes)) ++stats_.ceLoads;
+            else ++stats_.ceIgnored;
+            return true;
+        }
+        case 0x83: { // DUMP_CONST_RAM: CE RAM byte offset, dwords, address
+            if (n < 4 || !memory_.write) break;
+            const std::size_t offset = data[0] & 0xfffc, bytes = std::size_t(data[1] & 0x7fff) * 4;
+            const std::uint64_t address = std::uint64_t(data[2]) | std::uint64_t(data[3]) << 32;
+            if (offset + bytes <= ceRam_.size() && memory_.write(address, ceRam_.data() + offset, bytes)) ++stats_.ceDumps;
+            else ++stats_.ceIgnored;
+            return true;
+        }
+        case 0x33: { // INDIRECT_BUFFER_CONST: a CE command buffer, run whole
+            if (n < 3 || depth >= 4) break;
+            const std::uint64_t ib = (std::uint64_t(data[0]) & ~3ull) | std::uint64_t(data[1] & 0xffff) << 32;
+            const std::uint32_t size = data[2] & 0xfffff;
+            std::vector<std::uint32_t> nested(size);
+            if (!size || !memory_.read(ib, nested.data(), std::size_t(size) * 4)) break;
+            for (std::size_t at = 0; at < size;) {
+                const std::uint32_t header = nested[at];
+                if ((header >> 30) == 2) { ++at; continue; }
+                const std::size_t count = ((header >> 16) & 0x3fff) + 1;
+                if ((header >> 30) != 3 || count > size - at - 1) break;
+                constantPacket((header >> 8) & 0xff, nested.data() + at + 1, count, depth + 1);
+                at += 1 + count;
+            }
+            return true;
+        }
+        default: return false;
+        }
+        ++stats_.ceIgnored;
+        return true;
+    }
+    std::vector<std::uint32_t> ce_;
+    std::size_t cePos_ = 0;
+    std::array<std::uint8_t, 0xc000> ceRam_{};
     // DMA_DATA (CP DMA): a copy or fill of guest memory in submission order,
     // so the draws after it see it (CoD updates its constant buffers this way:
     // without it a post-processing pass read zeros and wrote NaN). Memory to

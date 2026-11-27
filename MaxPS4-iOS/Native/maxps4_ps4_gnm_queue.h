@@ -138,6 +138,34 @@ public:
                 if (!gpu::decodePM4Type3(words.data(),words.size())) return error(0x3013);
                 job.words.insert(job.words.end(),words.begin(),words.end());
             }
+            // The constant engine's buffers (CCBs, one per DCB, null or empty
+            // when unused) go first, in NOPs marked for the collector, which
+            // runs them along the DCB's waits on them (PM4DrawCollector::ceMarker).
+            if (constant_addresses && constant_sizes && kind_>=null) {
+                std::array<uint8_t,buffer_limit*8> ccb_addresses{};
+                std::array<uint8_t,buffer_limit*4> ccb_sizes{};
+                if (!memory_.read(constant_addresses,ccb_addresses.data(),count*8) ||
+                    !memory_.read(constant_sizes,ccb_sizes.data(),count*4)) return error(0x1000);
+                std::vector<uint32_t> prefix;
+                for(size_t i=0;i<count;++i) {
+                    const uint64_t address=ps4::get_le(ccb_addresses.data()+8*i,8);
+                    const uint64_t bytes=ps4::get_le(ccb_sizes.data()+4*i,4);
+                    if (!address || !bytes) continue;
+                    if ((address&3) || (bytes&3) || bytes/4>word_limit) return error(0x1000);
+                    std::vector<uint8_t> wire(size_t(bytes),0);
+                    if (!memory_.read(address,wire.data(),wire.size())) return error(0x1000);
+                    // NOP payloads hold at most 0x4000 dwords: the marker, then the stream.
+                    for (size_t at=0; at<wire.size()/4;) {
+                        const size_t chunk=std::min<size_t>(0x3fff,wire.size()/4-at);
+                        prefix.push_back(0xc0001000u | uint32_t(chunk)<<16); // NOP, chunk + 1 payload dwords
+                        prefix.push_back(gpu::PM4DrawCollector::ceMarker);
+                        for (size_t n=0;n<chunk;++n) prefix.push_back(uint32_t(ps4::get_le(wire.data()+4*(at+n),4)));
+                        at+=chunk;
+                    }
+                }
+                if (prefix.size()>word_limit-std::min<size_t>(word_limit,job.words.size())) return error(0x1000);
+                job.words.insert(job.words.begin(),prefix.begin(),prefix.end());
+            }
             submit_words_.store(job.words.size(), std::memory_order_relaxed);
             if (kind_>=null) {
                 if (flip && !prepared_flip(job.words,*flip)) return error(0x1000);
