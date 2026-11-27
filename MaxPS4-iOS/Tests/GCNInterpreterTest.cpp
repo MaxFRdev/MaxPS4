@@ -222,6 +222,16 @@ int main() {
         if (!small.run(0x10a00)) { std::printf("%s\n", small.error.c_str()); assert(false); }
         assert(f32(small.exports[0].value[0][0]) == 1 && f32(small.exports[0].value[1][0]) == 0.5f &&
                f32(small.exports[0].value[2][0]) == 2 && small.exports[0].value[3][0] == 0);
+        // A format the interpreter lacks (10_10_10_2) ends a run, unless lenient
+        // (resource scans): skipped, the run goes on to the export.
+        arena.code(0x10b80, {0x10b40, 4u << 16, 1, 0x47fac});        // dfmt 8
+        GCNWave strict(arena.memory, 1, &cache);
+        strict.s[2] = 0x10b80;
+        assert(!strict.run(0x10a00) && strict.error.find("buffer data format 8") == 0);
+        GCNWave lenient(arena.memory, 1, &cache);
+        lenient.lenient = true; lenient.s[2] = 0x10b80;
+        assert(lenient.run(0x10a00) && lenient.skipped == 1 && lenient.exports.size() == 1);
+        assert(lenient.error.find("ignoré x1 : buffer data format 8") == 0);
         // Unmapped code fails with a message instead of running garbage.
         GCNWave lost(arena.memory, 1);
         assert(!lost.run(0x30000) && lost.error == "unreadable code");

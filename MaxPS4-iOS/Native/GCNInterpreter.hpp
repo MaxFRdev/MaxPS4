@@ -140,6 +140,12 @@ public:
     bool scc = false;
     std::vector<GCNExport> exports;
     std::string error;
+    // Resource scans: an instruction or format the interpreter lacks is
+    // skipped (its results left as they were) instead of ending the run, so
+    // the resources read after it are still found. Memory failures still end
+    // it. A run that skipped some returns true with `error` naming the first.
+    bool lenient = false;
+    unsigned skipped = 0;
     // Pixel shaders: the parameter plane of attribute `attr`, channel `chan`.
     std::function<GCNAttributePlane(unsigned attr, unsigned chan)> attribute;
     GCNImageCache* images = nullptr;
@@ -169,7 +175,7 @@ public:
     // Reuse allocated lane/export storage, but never reuse runtime values or
     // callbacks. The owner decides the lifetime of the external code cache.
     void reset() {
-        s.fill(0); scc = false; exports.clear(); error.clear();
+        s.fill(0); scc = false; exports.clear(); error.clear(); skipped = 0;
         std::fill(v_.begin(), v_.end(), 0);
         attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false; scalarLoad = {};
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
@@ -178,6 +184,11 @@ public:
     // Runs from `pc` until s_endpgm. False with `error` set on anything not
     // implemented or invalid (unmapped code or data, unsupported formats).
     bool run(std::uint64_t pc, std::size_t maxInstructions = 1u << 20) {
+        std::string first;
+        auto finish = [&] {
+            if (skipped) error = "ignoré x" + std::to_string(skipped) + " : " + first;
+            return true;
+        };
         for (std::size_t steps = 0; steps < maxInstructions; ++steps) {
             GCNInstruction i;
             if (!fetch(pc, i)) return false;
@@ -187,9 +198,16 @@ public:
                 if (error.empty()) error = "unsupported " + gcnMnemonic(i);
                 char at[32]; std::snprintf(at, sizeof at, " at 0x%llx", (unsigned long long)pc);
                 error += at;
-                return false;
+                const bool missing = error.rfind("unsupported", 0) == 0 || error.find("format") != std::string::npos ||
+                                     error.rfind("LDS", 0) == 0;
+                if (!lenient || ended || !missing) return false;
+                if (first.empty()) first = error;
+                error.clear();
+                ++skipped;
+                pc = pc + 4ull * i.size;
+                continue;
             }
-            if (ended) return true;
+            if (ended) return finish();
             pc = next;
         }
         error = "instruction limit reached";

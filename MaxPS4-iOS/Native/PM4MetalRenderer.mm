@@ -1574,7 +1574,7 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                       d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3], (unsigned long long)d.ps);
         batchDraws += text;
         // The first vertex as the interpreter computes it (position, parameters).
-        if (!scanner_.vertexRan()) batchDraws += ", VS interpreté : " + scanner_.vertexError();
+        if (!scanner_.vertexError().empty()) batchDraws += ", VS interpreté : " + scanner_.vertexError();
         for (const auto& e : scanner_.vertexExports()) {
             if (e[0] != 12 && !(e[0] >= 32 && e[0] < 36)) continue;
             std::snprintf(text, sizeof text, ", %s%u (%g %g %g %g)", e[0] == 12 ? "pos" : "param", e[0] == 12 ? 0u : e[0] - 32,

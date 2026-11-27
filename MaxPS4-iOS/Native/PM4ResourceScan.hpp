@@ -47,7 +47,9 @@ struct PM4ScalarLoad { std::uint64_t pc, address; std::uint32_t count; std::arra
 class PM4ResourceScanner {
 public:
     explicit PM4ResourceScanner(const GCNMemory& memory, bool captureImages = false)
-        : memory_(memory), wave_(memory, 1, &cache_), captureImages_(captureImages) {}
+        : memory_(memory), wave_(memory, 1, &cache_), captureImages_(captureImages) {
+        wave_.lenient = true; // an unsupported instruction must not hide the resources after it
+    }
     PM4ResourceScanner(const PM4ResourceScanner&) = delete;
     PM4ResourceScanner& operator=(const PM4ResourceScanner&) = delete;
     // Valid until the next scan. Only storage is reused: code, descriptors and
