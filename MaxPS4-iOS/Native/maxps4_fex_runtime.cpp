@@ -3192,6 +3192,11 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
         (unsigned long long)last_repair_pc.load());
     std::string out = header;
     out += engine->libkernel.graphics().submit_activity();
+    if (const uint64_t spans = engine->libkernel.graphics().compute_spans_run()) {
+        char line[96];
+        std::snprintf(line, sizeof line, "Files de calcul asynchrones : %llu tranches exécutées\n", (unsigned long long)spans);
+        out += line;
+    }
     out += engine->libkernel.videoout().submit_activity();
     out += engine->libkernel.videoout().flip_activity();
     const uint64_t now = ProbeAddressSpace::now_ns();

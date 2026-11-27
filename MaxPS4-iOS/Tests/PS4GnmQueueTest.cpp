@@ -143,11 +143,15 @@ int main() {
     uint8_t label_bytes[8]{};
     assert(queue.submit(1,addresses,sizes,0,0,&interrupts)==0 && interrupts==1 && host.calls==1);
     assert(memory.read(labels,label_bytes,sizeof label_bytes) && ps4::get_le(label_bytes,8)!=0);
+    // An asynchronous compute ring span reaches the consumer too, before its labels.
+    put(labels,0,8);
+    assert(queue.compute(base,28+sizeof(sync))==1 && host.calls==2 && queue.compute_spans_run()==1);
+    assert(memory.read(labels,label_bytes,sizeof label_bytes) && ps4::get_le(label_bytes,8)!=0);
     put(labels,0,8); host.fail=true;
     assert(queue.submit(1,addresses,sizes,0,0,&interrupts)==PS4GnmQueue::error(0x10ff));
-    assert(interrupts==0 && host.calls==2 && queue.allowed()==0);
+    assert(interrupts==0 && host.calls==3 && queue.allowed()==0);
     assert(memory.read(labels,label_bytes,sizeof label_bytes) && ps4::get_le(label_bytes,8)==0);
-    assert(queue.submit(1,addresses,sizes,0,0)==PS4GnmQueue::error(0x10ff) && host.calls==2);
+    assert(queue.submit(1,addresses,sizes,0,0)==PS4GnmQueue::error(0x10ff) && host.calls==3);
     assert(queue.backend(PS4GnmQueue::none)==0 && queue.backend(PS4GnmQueue::host)==-EINVAL);
     assert(queue.host_consumer(&host,consume)==0 && queue.backend(PS4GnmQueue::host)==0);
     queue.reset(); assert(queue.backend(PS4GnmQueue::host)==-EINVAL);

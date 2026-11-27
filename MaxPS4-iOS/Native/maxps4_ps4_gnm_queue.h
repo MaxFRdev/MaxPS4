@@ -57,6 +57,7 @@ public:
     // True for both backends that retire work at submission (null, software).
     bool null_backend() { std::lock_guard<std::mutex> lock(lock_); return kind_>=null; }
     bool host_backend() { std::lock_guard<std::mutex> lock(lock_); return kind_==host; }
+    uint64_t compute_spans_run() const { return compute_spans_run_.load(std::memory_order_relaxed); }
     // Software backend counters and its first error (empty when none).
     gpu::PM4SoftwareRenderer::Stats software_stats() {
         std::lock_guard<std::mutex> lock(lock_);
@@ -190,9 +191,10 @@ public:
             jobs_.push_back(std::move(job)); ++next_; return 0;
         } catch(const std::bad_alloc&) { return error(0x1001); }
     }
-    // A compute ring span (sceGnmDingDong): its label and memory writes
-    // happen, its dispatches are not run yet, and nothing in it can fail the
-    // graphics queue. The interrupts it raises, or -1.
+    // A compute ring span (sceGnmDingDong): its dispatches run on the host
+    // backend (through the same consumer as the DCBs, before its labels, as
+    // the GPU does), its label and memory writes happen, and nothing in it can
+    // fail the graphics queue. The interrupts it raises, or -1.
     int64_t compute(uint64_t address, uint64_t bytes) {
         if (!address || (address&3) || !bytes || (bytes&3) || bytes/4>word_limit) return -1;
         try {
@@ -201,6 +203,12 @@ public:
             std::vector<uint32_t> words(wire.size()/4);
             for(size_t n=0;n<words.size();++n) words[n]=uint32_t(ps4::get_le(wire.data()+4*n,4));
             std::lock_guard<std::mutex> lock(lock_);
+            // An asynchronous compute queue's work (CoD's): run it, ignoring a
+            // failure, which belongs to the graphics queue's consumer state.
+            if (kind_==host && !failed_ && host_consumer_ && gpu::decodePM4Type3(words.data(),words.size())) {
+                ++compute_spans_run_;
+                host_consumer_(host_context_,words.data(),words.size());
+            }
             return retire(words);
         } catch(const std::bad_alloc&) { return -1; }
     }
@@ -298,6 +306,7 @@ private:
     bool sealed_=false, failed_=false;
     std::atomic<uint64_t> submit_generation_{0}, submit_since_ns_{0}, submit_words_{0};
     std::atomic<uint32_t> submit_stage_{0}, submit_buffers_{0};
+    std::atomic<uint64_t> compute_spans_run_{0}; // compute ring spans given to the host backend
     void* host_context_=nullptr;
     HostConsumer host_consumer_=nullptr;
 };
