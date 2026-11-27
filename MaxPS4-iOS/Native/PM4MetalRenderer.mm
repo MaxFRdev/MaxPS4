@@ -1615,7 +1615,20 @@ bool PM4MetalRenderer::encode(const PM4Draw& d, id<MTLCommandBuffer> commands) {
                     for (unsigned k = 0; k < 4; ++k) last.second[k] = colour[k];
                     std::snprintf(text, sizeof text, "\n  - %.1f s : PS 0x%llx dans 0x%llx, param0 (%.3g %.3g %.3g %.3g), blend 0x%x", now,
                                   (unsigned long long)d.ps, (unsigned long long)d.target, colour[0], colour[1], colour[2], colour[3], d.blend);
-                    fades.push_back(text);
+                    std::string fade = text;
+                    // The pixel program's widest scalar load (its constants): a
+                    // pass whose constants read as zero writes NaN or black.
+                    const PM4ScalarLoad* widest = nullptr;
+                    for (const auto& load : scanner_.scalarLoads()) if (!widest || load.count > widest->count) widest = &load;
+                    if (widest && widest->count >= 4) {
+                        std::snprintf(text, sizeof text, ", constantes 0x%llx :", (unsigned long long)widest->address);
+                        fade += text;
+                        for (unsigned k = 0; k < std::min(8u, widest->count); ++k) {
+                            std::snprintf(text, sizeof text, " %.4g", gcn_detail::f32(widest->words[k]));
+                            fade += text;
+                        }
+                    }
+                    fades.push_back(fade);
                     if (fades.size() > 24) fades.pop_front();
                 }
             }
