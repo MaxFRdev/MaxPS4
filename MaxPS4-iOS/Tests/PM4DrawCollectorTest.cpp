@@ -37,22 +37,139 @@ struct Fixture {
 }
 int main() {
     {
+        // INDIRECT_BUFFER runs the buffer it points to, in order, with the
+        // current state; an unreadable one is counted as lost.
+        Fixture f;
+        const std::uint32_t nested[3] = {0xc0012d00, 3, 2}; // DRAW_INDEX_AUTO, 3 vertices
+        std::memcpy(f.bytes.data(), nested, sizeof nested);
+        f.run({0xc0023f00, 0x10000, 0, 3, 0xc0023f00, 0x90000, 0, 3});
+        assert(f.full.size() == 1 && f.full[0].indices.size() == 3);
+        assert(f.stats.indirectBuffers == 1 && f.stats.ignored[0x3f] == 1 && f.stats.failed == 0);
+        std::puts("PASS INDIRECT_BUFFER calls run their buffer in order");
+    }
+    {
+        // DMA_DATA copies and fills guest memory in order; GDS stays ignored.
+        std::vector<std::uint8_t> ram(256);
+        for (unsigned k = 0; k < 16; ++k) ram[k] = std::uint8_t(k + 1);
+        const std::uint64_t base = 0x20000;
+        auto inside = [&](std::uint64_t a, std::size_t n) { return a >= base && a - base + n <= ram.size(); };
+        GCNMemory memory{
+            [&](std::uint64_t a, void* out, std::size_t n) { return inside(a, n) && std::memcpy(out, ram.data() + (a - base), n); },
+            [&](std::uint64_t a, const void* in, std::size_t n) { return inside(a, n) && std::memcpy(ram.data() + (a - base), in, n); }};
+        PM4DrawStats stats;
+        PM4DrawCollector collector{memory, stats};
+        const std::vector<std::uint32_t> words = {
+            0xc0055000, 0, std::uint32_t(base), 0, std::uint32_t(base + 0x20), 0, 8,                // copy 8 bytes
+            0xc0055000, 2u << 29, 0xaabbccdd, 0, std::uint32_t(base + 0x30), 0, 8,                 // fill 8 bytes
+            0xc0055000, 1u << 20, std::uint32_t(base), 0, 0x100, 0, 4,                              // to GDS: ignored
+            0xc0033700, 5u << 8, std::uint32_t(base + 0x40), 0, 0x12345678,                        // WRITE_DATA to memory
+            0xc0055000, 0, std::uint32_t(base + 0x40), 0, std::uint32_t(base + 0x48), 0, 4,         // then read by a copy
+            0xc0044100, std::uint32_t(base + 0x40), 0, std::uint32_t(base + 0x50), 0, 4,              // CP_DMA copy
+            0xc0055000, 0, std::uint32_t(base), 0, 0x2c4c * 4, 0, (1u << 27) | 8,                   // into VS user data 0-1
+        };
+        collector.execute(words.data(), words.size(), [](const PM4Draw&) {});
+        assert(std::memcmp(ram.data() + 0x20, ram.data(), 8) == 0);
+        assert(ram[0x30] == 0xdd && ram[0x33] == 0xaa && ram[0x37] == 0xaa && ram[0x38] == 0);
+        assert(stats.dmaCopies == 4 && stats.ignored[0x41] == 0 && ram[0x50] == 0x78 && stats.ignored[0x50] == 1 && stats.failed == 0 && stats.memoryWrites == 1);
+        assert(ram[0x48] == 0x78 && ram[0x4b] == 0x12);
+        assert(stats.dmaRegisterWrites == 1 && stats.lastDmaRegister == 0x2c4c);
+        std::puts("PASS DMA_DATA copies and fills guest memory in submission order");
+    }
+    {
+        // Indirect draws: SET_BASE 1, then the counts read from memory; the
+        // first vertex or base vertex and first instance land in the VS user
+        // SGPRs named by BASE_VTX_LOC and START_INST_LOC.
+        Fixture f;
+        const std::uint32_t args[9] = {3, 2, 5, 7, 3, 1, 1, 9, 0};
+        std::memcpy(f.bytes.data(), args, sizeof args);
+        const std::uint16_t indices[4] = {10, 11, 12, 13};
+        std::memcpy(f.bytes.data() + 40, indices, sizeof indices);
+        f.run({0xc0021100, 1, 0x10000, 0,                   // SET_BASE
+               0xc0032400, 0, 0x4d, 0x4e, 2,                // DRAW_INDIRECT
+               0xc0002a00, 0,                               // INDEX_TYPE 16-bit
+               0xc0012600, 0x10000 + 40, 0,                 // INDEX_BASE
+               0xc0032500, 16, 0x4d, 0x4e, 0});             // DRAW_INDEX_INDIRECT
+        assert(f.stats.failed == 0 && f.draws.size() == 2 && f.stats.indirectCalls == 2);
+        assert(f.draws[0] == std::vector<std::uint32_t>({0, 1, 2}) && f.full[0].instances == 2);
+        assert(f.full[0].vsUser[1] == 5 && f.full[0].vsUser[2] == 7);
+        assert(f.draws[1] == std::vector<std::uint32_t>({11, 12, 13}) && f.full[1].instances == 1 && f.full[1].vsUser[1] == 9);
+        f.run({0xc0032e00, 3, 0, 0x00050004, 0x00000006});   // DRAW_INDEX_IMMD: indices 4, 5, 6 in the packet
+        assert(f.draws.size() == 3 && f.draws[2] == std::vector<std::uint32_t>({4, 5, 6}) && f.stats.ignored[0x2e] == 0);
+        std::puts("PASS indirect draws read their counts, base vertex and first instance from memory");
+    }
+    {
+        // The constant engine stream (a NOP marked ceMarker, as PS4GnmQueue
+        // puts the CCBs first) runs to its next counter at each DE wait: the
+        // first dump is read by the DMA between the waits, before the second.
+        std::vector<std::uint8_t> ram(256);
+        const std::uint64_t base = 0x20000;
+        auto inside = [&](std::uint64_t a, std::size_t n) { return a >= base && a - base + n <= ram.size(); };
+        GCNMemory memory{
+            [&](std::uint64_t a, void* out, std::size_t n) { return inside(a, n) && std::memcpy(out, ram.data() + (a - base), n); },
+            [&](std::uint64_t a, const void* in, std::size_t n) { return inside(a, n) && std::memcpy(ram.data() + (a - base), in, n); }};
+        PM4DrawStats stats;
+        PM4DrawCollector collector{memory, stats};
+        const std::uint32_t at = std::uint32_t(base + 0x40);
+        const std::vector<std::uint32_t> words = {
+            0xc0141000, PM4DrawCollector::ceMarker,                 // NOP: the CE stream
+            0xc0018100, 0x10, 0x11111111,                           //   WRITE_CONST_RAM
+            0xc0038300, 0x10, 1, at, 0,                             //   DUMP_CONST_RAM 1 dword
+            0xc0008400, 0,                                          //   INCREMENT_CE_COUNTER
+            0xc0018100, 0x10, 0x22222222,
+            0xc0038300, 0x10, 1, at, 0,
+            0xc0008400, 0,
+            0xc0008600, 0,                                          // WAIT_ON_CE_COUNTER
+            0xc0055000, 0, at, 0, at + 0x10, 0, 4,                  // DMA_DATA: keep the first dump
+            0xc0008600, 0,
+        };
+        collector.execute(words.data(), words.size(), [](const PM4Draw&) {});
+        std::uint32_t first = 0, second = 0;
+        std::memcpy(&first, ram.data() + 0x50, 4); std::memcpy(&second, ram.data() + 0x40, 4);
+        assert(first == 0x11111111 && second == 0x22222222);
+        assert(stats.ceWrites == 2 && stats.ceDumps == 2 && stats.ceWaits == 2 && stats.ceIgnored == 0 && stats.failed == 0);
+        assert(stats.depthReport().find("moteur de constantes : 2 écritures") != std::string::npos);
+        // Without a DE wait, the whole stream runs before the DCB.
+        const std::vector<std::uint32_t> ahead = {
+            0xc0081000, PM4DrawCollector::ceMarker, 0xc0018100, 0x20, 0x33333333, 0xc0038300, 0x20, 1, at + 8, 0,
+            0xc0055000, 0, at + 8, 0, at + 0x18, 0, 4,
+        };
+        collector.execute(ahead.data(), ahead.size(), [](const PM4Draw&) {});
+        std::memcpy(&first, ram.data() + 0x58, 4);
+        assert(first == 0x33333333);
+        std::puts("PASS constant engine: CE RAM writes dumped to memory, run along the DE's waits");
+    }
+    {
+        // ELIMINATE_FAST_CLEAR (CB_COLOR_CONTROL MODE 2) draws nothing; the
+        // target's next draw carries the clear (CB_COLOR0_CLEAR_WORD0/1), once.
+        Fixture f;
+        f.run({0xc0016900, 0x202, 2u << 4, 0xc0026900, 0x323, 0x11223344, 0x55667788, 0xc0012d00, 3, 2});
+        assert(f.full.empty() && f.stats.fastClears == 1);
+        f.run({0xc0016900, 0x202, 1u << 4, 0xc0012d00, 3, 2, 0xc0012d00, 3, 2});
+        assert(f.full.size() == 2 && f.full[0].fastClear && !f.full[1].fastClear);
+        assert(f.full[0].clearWords[0] == 0x11223344 && f.full[0].clearWords[1] == 0x55667788 && f.full[0].target == 0x11000);
+        assert(f.stats.depthReport().find("effacements rapides : 1") != std::string::npos);
+        std::puts("PASS fast clear eliminations become a clear of the target's next draw");
+    }
+    {
         // Packets whose effect is lost are counted by name; sync packets and
-        // NUM_INSTANCES 1 are not, and the stream goes on to the next draw.
+        // NUM_INSTANCES are not, and the stream goes on to the next draw,
+        // which runs the 4 instances.
         Fixture f;
         assert(f.stats.ignoredReport().empty());
         f.run({0xc0032400, 0, 0, 0, 0,                   // DRAW_INDIRECT
                0xc0002f00, 1,                            // NUM_INSTANCES 1: nothing lost
-               0xc0002f00, 4,                            // NUM_INSTANCES 4: one instance drawn
+               0xc0002f00, 4,                            // NUM_INSTANCES 4
                0xc0003800, 0, 0xc0003800, 0,             // DRAW_INDEX_INDIRECT_MULTI twice
                0xc0055000, 0, 0, 0, 0, 0, 0,             // DMA_DATA
                0xc0004600, 0,                            // EVENT_WRITE: synchronization only
+               0xc0016900, 0x2a8, 3,                     // VGT_INSTANCE_STEP_RATE_0 3 (rate 1 left at 0)
                0xc0012d00, 3, 2});                       // DRAW_INDEX_AUTO
-        assert(f.stats.failed == 0 && f.draws.size() == 1);
-        assert(f.stats.ignored[0x24] == 1 && f.stats.ignored[0x2f] == 1 && f.stats.ignored[0x38] == 2 &&
+        assert(f.stats.failed == 0 && f.draws.size() == 1 && f.full[0].instances == 4 && f.stats.instancedDraws == 1);
+        assert(f.full[0].stepRate[0] == 3 && f.full[0].stepRate[1] == 1);
+        assert(f.stats.ignored[0x24] == 1 && f.stats.ignored[0x2f] == 0 && f.stats.ignored[0x38] == 2 &&
                f.stats.ignored[0x50] == 1 && f.stats.ignored[0x46] == 0);
         assert(f.stats.ignoredReport() ==
-               "\nPaquets non gérés : DRAW_INDIRECT ×1, NUM_INSTANCES > 1 ×1, DRAW_INDEX_INDIRECT_MULTI ×2, DMA_DATA ×1");
+               "\nPaquets non gérés : DRAW_INDIRECT ×1, DRAW_INDEX_INDIRECT_MULTI ×2, DMA_DATA ×1");
     }
     {
         // Depth state is only counted: Z enabled and written, back faces culled,
@@ -302,7 +419,7 @@ int main() {
     auto reject = [](const std::vector<std::uint32_t>& words, const char* error, unsigned reads = 0) {
         Fixture f;
         f.run(words);
-        assert(f.stats.failed == 1 && f.stats.error == error && f.draws.empty() && f.reads == reads);
+        assert(f.stats.failed == 1 && f.stats.error.rfind(error, 0) == 0 && f.draws.empty() && f.reads == reads);
     };
     reject({0xc0016900, 0x2a5, 1, 0xc0042700, 3, 0x10000, 0, 3, 0}, "primitive restart topology", 1);
     {

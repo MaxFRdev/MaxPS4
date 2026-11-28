@@ -6,7 +6,7 @@
 #include <cmath>
 #include <cstdio>
 using namespace maxps4::gpu;
-struct State { uint64_t base, size; uint32_t vs[16], ps[17], flags, count; uint64_t ranges[48]; };
+struct State { uint64_t base, size; uint32_t vs[16], ps[17], flags, count; uint64_t ranges[48]; uint32_t stepRate[2]; };
 int main() {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();

@@ -6,9 +6,12 @@
 #include "maxps4_ps4_user_service.h"
 #include "maxps4_ps4_pad.h"
 #include "maxps4_ps4_audio_out.h"
+#include "maxps4_ps4_ajm.h"
 #include "maxps4_ps4_gnm.h"
 #include "maxps4_ps4_gnm_queue.h"
+#include <algorithm>
 #include <array>
+#include <cstdio>
 #include <map>
 #include <string>
 #include <vector>
@@ -76,6 +79,9 @@ enum class PS4KernelService : uint32_t {
     save_init, save_term, save_mount2, save_umount,
     save_mount1, save_umount2, save_search, save_set_param, save_get_param, save_save_icon, save_load_icon,
     save_delete, save_mount_info, save_event, save_progress, save_memory_setup, save_memory_get, save_memory_set,
+    save_memory_setup2, save_memory_get2, save_memory_set2,
+    ajm_initialize, ajm_finalize, ajm_module_register, ajm_module_unregister, ajm_instance_create,
+    ajm_instance_destroy, ajm_job_control, ajm_job_run, ajm_batch_start, ajm_batch_wait,
     sema_create, sema_delete, sema_wait, sema_poll, sema_signal, sema_cancel,
     flag_create, flag_delete, flag_set, flag_clear, flag_wait, flag_poll, flag_cancel,
     process_counter, counter_frequency, kernel_sleep,
@@ -122,8 +128,11 @@ enum class PS4KernelService : uint32_t {
     gnm_ding_dong_marker, gnm_embedded_ps, gnm_compute_wait_address, gnm_compute_wait_semaphore,
     gnm_dispatch_indirect_mec, thread_getname,
     trophy_game_info, trophy_group_info, trophy_unlock_state, rtc_time_t,
-    attr_getschedparam, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_post, uuid_create,
-    net_pton, net_ntop
+    attr_getschedparam, thread_getschedparam, app_content_space, net_mac_address, net_ether_ntostr, mutex_reltimedlock, sem_init, sem_destroy, sem_wait, sem_post, sem_timedwait, sem_trywait, sem_getvalue, uuid_create,
+    net_pton, net_ntop,
+    // sceSystemServiceLoadExec(path, argv): the game replaces itself; the run
+    // ends like exit and the session boots `path` with argv[0] (runtime).
+    load_exec
 };
 // Token bit of a trampoline whose function follows the POSIX convention: -1
 // with the error in the calling thread's errno (__Error) instead of an Orbis
@@ -221,10 +230,25 @@ public:
     PS4VideoOut& videoout() { return videoout_; }
     PS4Pad& pad() { return pad_; }
     PS4AudioOut& audio() { return audio_; }
+    PS4Ajm& ajm() { return ajm_; }
     PS4GnmQueue& graphics() { return graphics_; }
     // The last console_limit bytes the game wrote to its stdout and stderr.
     std::string console() { std::lock_guard<std::mutex> guard(lock_); return std::string(console_.begin(), console_.end()); }
+    std::vector<std::string> batch_log_; // Last sceKernelBatchMap entries (lock_).
     static constexpr size_t console_limit = 4096;
+    // How much of the 5056 MiB of direct memory the game holds, for the stop
+    // report: "allouée X Mio en N blocs · libre Y Mio".
+    std::string direct_report() {
+        std::lock_guard<std::mutex> guard(lock_);
+        uint64_t used = 0, largest = 0;
+        for (const auto& [at, bytes] : direct_) { used += bytes; largest = std::max(largest, bytes); }
+        const uint64_t total = uint64_t(5056) << 20;
+        char line[160];
+        std::snprintf(line, sizeof line, "allouée %llu Mio en %zu blocs (le plus grand %llu Mio) · libre %llu Mio",
+                      (unsigned long long)(used >> 20), direct_.size(), (unsigned long long)(largest >> 20),
+                      (unsigned long long)((used < total ? total - used : 0) >> 20));
+        return line;
+    }
     static constexpr int32_t abort_status = 134; // As a process killed by SIGABRT.
 private:
     PS4GuestMemory& memory_;
@@ -234,6 +258,7 @@ private:
     PS4UserService user_service_;
     PS4Pad pad_;
     PS4AudioOut audio_;
+    PS4Ajm ajm_;
     PS4Gnm gnm_;
     PS4GnmQueue graphics_;
     uint64_t errno_table_ = 0, errno_table_size_ = 0, process_param_ = 0;

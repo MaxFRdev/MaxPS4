@@ -11,7 +11,7 @@
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
-struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; };
+struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; std::uint32_t stepRate[2]; };
 constexpr std::uint64_t matrixVS = 0x10000, imguiVS = 0x10100, fetch = 0x10200, ps = 0x10400, table = 0x10800, constants = 0x10e00, vertices = 0x1c000;
 }
 int main() {

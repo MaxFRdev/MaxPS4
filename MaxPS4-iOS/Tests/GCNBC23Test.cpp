@@ -60,12 +60,21 @@ int main() {
         auto swizzled=texture; swizzled.d[3]=(texture.d[3]&~0xfffu)|0x67u;
         const auto result=rt::gcn_image_load(memory,swizzled,1,1);
         assert(std::fabs(result[0]-expected(1,1,3))<0.000001f && result[2]==1 && result[3]==0);
-        for (unsigned number : {7u,9u}) {
-            auto invalid=texture; invalid.d[1]|=number<<26;
+        {
+            auto invalid=texture; invalid.d[1]|=7u<<26;
             GCNWave wave(arena.memory,1); std::copy_n(invalid.d,8,wave.s.begin());
             assert(!wave.run(program));
             const auto zero=rt::gcn_image_load(memory,invalid,0,0);
             for (unsigned c=0;c<4;++c) assert(zero[c]==0);
+        }
+        {
+            // sRGB (NFMT 9): colour channels converted to linear, alpha as is.
+            auto srgb=texture; srgb.d[1]|=9u<<26;
+            const auto plain=rt::gcn_image_load(memory,texture,0,0), linear=rt::gcn_image_load(memory,srgb,0,0);
+            for (unsigned c=0;c<4;++c) {
+                const float want=c==3 || plain[c]<=0.04045f ? (c==3 ? plain[c] : plain[c]/12.92f) : std::pow((plain[c]+0.055f)/1.055f,2.4f);
+                assert(std::fabs(linear[c]-want)<0.0001f);
+            }
         }
         auto invalid=texture; invalid.d[4]=0;
         GCNWave wave(arena.memory,1); std::copy_n(invalid.d,8,wave.s.begin()); assert(!wave.run(program));

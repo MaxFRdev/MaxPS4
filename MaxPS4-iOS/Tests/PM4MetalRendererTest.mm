@@ -280,6 +280,7 @@ int main() {
                 }
             };
             // Every pixel of the target must be `bgra`; `draws` reached the GPU.
+            unsigned lastPipelines = 0, lastShared = 0; // the last check's pipelines built, depth-only draws shared
             auto check = [&](const char* name, Scene& scene, const std::uint8_t (&bgra)[4], unsigned depthDraws, unsigned depthOnly) {
                 PM4DrawStats stats;
                 PM4DrawCollector sceneCollector(scene.arena.memory, stats);
@@ -304,6 +305,7 @@ int main() {
                 for (unsigned n = 0; n < width * height; ++n) std::memcpy(expected + 4 * n, bgra, 4);
                 readPixels(device, queue, renderer.target(depthTarget), pixels);
                 assert(compare(name, pixels, expected));
+                lastPipelines = renderer.pipelinesBuilt; lastShared = renderer.depthOnlyShared;
             };
             const std::uint8_t green[4] = {0, 255, 0, 255}, red[4] = {0, 0, 255, 255};
             {
@@ -332,6 +334,25 @@ int main() {
                 scene.ps(redPS); scene.triangle(0.8f, forward);
                 scene.ps(greenPS); scene.triangle(0.1f, forward);
                 check("depth-only pre-pass", scene, green, 3, 1);
+            }
+            {
+                // Depth-only draws with pixel programs that never discard: once
+                // each program is known (first draw), later ones share a single
+                // pipeline without it (3 built for 4 draws, 2 of them shared).
+                Scene scene;
+                scene.depthBufferOn();
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.st.set(0x69, 0x8e, {0});
+                scene.ps(greenPS); scene.triangle(0.4f, forward);
+                scene.ps(redPS); scene.triangle(0.3f, forward);
+                scene.ps(greenPS); scene.triangle(0.25f, forward);
+                scene.ps(redPS); scene.triangle(0.2f, forward);
+                scene.st.set(0x69, 0x8e, {0xf});
+                scene.ps(redPS); scene.triangle(0.5f, forward);
+                scene.ps(greenPS); scene.triangle(0.1f, forward);
+                check("depth-only draws share a pipeline", scene, green, 6, 4);
+                if (lastPipelines != 5 || lastShared != 2) std::printf("shared depth-only: %u pipelines, %u shared\n", lastPipelines, lastShared);
+                assert(lastPipelines == 5 && lastShared == 2); // 3 depth-only, then red and green with colour
             }
             {
                 // A depth clear (DB_RENDER_CONTROL) back to 1 lets a far triangle
@@ -399,7 +420,7 @@ int main() {
                 both.ps(redPS); both.triangle(0.5f, forward);
                 check("cull both faces", both, green, 0, 0);
             }
-            std::puts("PASS depth test, depth-only pre-pass with no pixel program, depth clear, face culling (both windings, flipped Y)");
+            std::puts("PASS depth test, depth-only pre-pass with no pixel program, depth-only draws sharing a pipeline, depth clear, face culling (both windings, flipped Y)");
             // Other colour target formats: the green triangle into 16_16_16_16 FLOAT
             // (8 bytes a pixel, halves 0, 1, 0, 1) and 2_10_10_10 UNORM (G and A all ones).
             for (const auto& [info, expected, bytes] : {std::tuple<std::uint32_t, std::uint64_t, unsigned>{(0xcu << 2) | (7u << 8), 0x3c0000003c000000ull, 8},
@@ -443,7 +464,12 @@ int main() {
             assert(PM4MetalRenderer::targetFormat(0xa, 0, 1) == MTLPixelFormatBGRA8Unorm);
             assert(PM4MetalRenderer::targetFormat(0xa, 6, 0) == MTLPixelFormatRGBA8Unorm_sRGB);
             assert(PM4MetalRenderer::targetFormat(0xc, 7, 1) == MTLPixelFormatInvalid);
-            assert(PM4MetalRenderer::targetFormat(0xa, 4, 0) == MTLPixelFormatInvalid); // UINT
+            // Integer targets: their Metal Uint/Sint formats; swapped ones stay out.
+            assert(PM4MetalRenderer::targetFormat(0xa, 4, 0) == MTLPixelFormatRGBA8Uint);
+            assert(PM4MetalRenderer::targetFormat(0x4, 5, 0) == MTLPixelFormatR32Sint);
+            assert(PM4MetalRenderer::targetFormat(0xa, 4, 1) == MTLPixelFormatInvalid);
+            assert(PM4MetalRenderer::integerFormat(MTLPixelFormatRGBA8Uint) == 1 && PM4MetalRenderer::integerFormat(MTLPixelFormatR32Sint) == 2 &&
+                   PM4MetalRenderer::integerFormat(MTLPixelFormatRGBA8Unorm) == 0);
             std::puts("PASS colour targets in 16_16_16_16 FLOAT and 2_10_10_10 UNORM");
         }
         // Blend the same foreground/background with all supported operations.
@@ -676,7 +702,8 @@ int main() {
             reader:^BOOL(uint64_t address, void* destination, size_t count) {
                 return reader->memory.read(address,destination,count);
             }];
-        assert(bridge && !bridge.failure);
+        assert(bridge && !bridge.failure && bridge.displayProbes);
+        bridge.displayProbes = NO; // the pass counts below exclude the diagnostic reads
         MaxPS4GameMetalBridge* profilingBridge = [[MaxPS4GameMetalBridge alloc] initWithDevice:device
             reader:^BOOL(uint64_t address, void* destination, size_t count) {
                 return reader->memory.read(address,destination,count);
@@ -697,6 +724,7 @@ int main() {
         assert([profilingBridge submit:s.words.data() count:s.words.size()]==0);
         const double normalSubmit=profilingBridge.submitMilliseconds-beforeSubmit;
         drainProfilingBridge();
+        [profilingBridge refreshReport];
         assert(profilingBridge.profiledDraws==0 && ![profilingBridge.report containsString:@"GPU par programme"]);
         // Frame timing is separately opt-in: it records bounded aggregate
         // samples and does not turn on the intrusive draw-by-draw profiler.
@@ -745,6 +773,7 @@ int main() {
         const bool bridgeB=compare("app bridge B",before,arena.bytes.data()+(targetB-Arena::start));
         assert(separateOK && bridgeA && bridgeB);
         assert([bridge submit:s.words.data() count:s.words.size()]==0);
+        [bridge refreshReport]; // the report is otherwise rebuilt at most every 250 ms
         assert([bridge.report containsString:@"5 passes"]);
         readback([bridge copyTargetAtAddress:targetB width:width height:height],after);
         assert(compare("batched app bridge",after,arena.bytes.data()+(targetB-Arena::start)));
@@ -839,6 +868,7 @@ int main() {
         assert(barrierFinished);
         if (!guestWrites.load()) std::printf("FAIL no guest write reached the barrier:\n%s\n", barrier.report.UTF8String);
         assert(guestWrites.load() >= 5);
+        [barrier refreshReport];
         assert([barrier.report containsString:@"Barrières compute : 5 ("] && [barrier.report containsString:@"CS 0x11000"]);
         std::puts("PASS compute barrier completes with submissions and display copies in flight");
         // The same with Gnmx's fill: no kernel, no barrier, into guest memory
@@ -866,11 +896,13 @@ int main() {
             assert([barrier submit:stream.words.data() count:stream.words.size()] == 0);
         };
         fill(fillGuest,64);
+        [barrier refreshReport];
         if (![barrier.report containsString:@"remplissages 1 "]) std::printf("FAIL fill not recognised:\n%s\n", barrier.report.UTF8String);
         assert([barrier.report containsString:@"Barrières compute : 5 ("] && [barrier.report containsString:@"remplissages 1 "]);
         std::uint32_t filled[2]; assert(computeArena.memory.read(fillGuest+63*4,filled,8));
         assert(filled[0] == fillValue && filled[1] == 0);
         fill(targetB,width*height);
+        [barrier refreshReport];
         assert([barrier.report containsString:@"remplissages 2 "]);
         std::uint8_t cleared[width*height*4]{};
         id<MTLTexture> filledTarget = [barrier copyTargetAtAddress:targetB width:width height:height];
@@ -878,13 +910,19 @@ int main() {
         readPixels(device,queue,filledTarget,cleared);
         for (unsigned n = 0; n < width*height; ++n) { std::uint32_t pixel; std::memcpy(&pixel,cleared+4*n,4); assert(pixel == fillValue); }
         fill(fillGuest,64,fillMulCS);
+        [barrier refreshReport];
         if (![barrier.report containsString:@"remplissages 3 "]) std::printf("FAIL multiplying fill not recognised:\n%s\n", barrier.report.UTF8String);
         assert([barrier.report containsString:@"remplissages 3 "]);
         std::puts("PASS fill dispatches reach guest memory and targets without a kernel");
+        // An unreadable stream is left out and reported; the game keeps running
+        // (40a2d326: CoD's loading screens ended on one unreadable draw).
         const uint32_t bad[]={0};
-        assert([bridge submit:bad count:1]!=0 && bridge.failure);
-        assert([bridge submit:s.words.data() count:s.words.size()]!=0);
-        std::puts("PASS app Metal bridge: persistent submissions, GPU completion, display copies, failure latch");
+        assert([bridge submit:bad count:1]==0 && !bridge.failure);
+        [bridge refreshReport];
+        if (![bridge.report containsString:@"Dernier dessin écarté"]) std::printf("FAIL refusal not reported:\n%s\n", bridge.report.UTF8String);
+        assert([bridge.report containsString:@"Dernier dessin écarté"]);
+        assert([bridge submit:s.words.data() count:s.words.size()]==0 && !bridge.failure);
+        std::puts("PASS app Metal bridge: persistent submissions, GPU completion, display copies, unreadable streams left out");
         // Scene A: green where the second draw's scissor allowed, gradient elsewhere.
         const std::uint8_t* a = arena.bytes.data() + (targetA - Arena::start);
         assert(a[1] == 255 && a[2] == 0 && a[4 * 8 + 2] == 135 && a[4 * 8 + 1] == 0);

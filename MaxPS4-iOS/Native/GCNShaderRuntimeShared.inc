@@ -85,6 +85,32 @@ GCN_FN uint gcn_convert(uint raw, uint bits, uint nfmt) {
     if (nfmt == 7u && bits == 16u) return gu(gcn_f16(raw));
     return raw;
 }
+// An sRGB channel (NFMT 9) to linear, as the texture unit converts it.
+GCN_FN float gcn_srgb_linear(float c) {
+    return c <= 0.04045f ? c / 12.92f : gcn_exp2(2.4f * gcn_log2((c + 0.055f) / 1.055f));
+}
+// An unsigned 10- or 11-bit float (5 exponent bits, `mbits` mantissa bits).
+GCN_FN uint gcn_ufloat(uint raw, uint mbits) {
+    uint e = raw >> mbits; uint m = raw & ((1u << mbits) - 1u);
+    if (e == 31u) return m != 0u ? 0x7fc00000u : 0x7f800000u;
+    if (e == 0u) return gu(gcn_ldexp(float(m), -14 - int(mbits)));
+    return gu(gcn_ldexp(float(m + (1u << mbits)), int(e) - 15 - int(mbits)));
+}
+// Packed buffer data formats, x in the low bits: 6 10_11_11 (x and y 11 bits,
+// z 10), 7 11_11_10 (x 10, y and z 11), 9 2_10_10_10 (x, y, z 10, w 2).
+GCN_FN uint gcn_packed_width(uint dfmt, uint c) {
+    if (dfmt == 9u) return c < 3u ? 10u : c == 3u ? 2u : 0u;
+    if (dfmt == 6u) return c < 2u ? 11u : c == 2u ? 10u : 0u;
+    if (dfmt == 7u) return c == 0u ? 10u : c < 3u ? 11u : 0u;
+    return 0u;
+}
+GCN_FN uint gcn_packed_component(uint word, uint dfmt, uint c, uint nfmt) {
+    uint shift = 0u; for (uint k = 0u; k < c; ++k) shift += gcn_packed_width(dfmt, k);
+    uint width = gcn_packed_width(dfmt, c);
+    uint raw = (word >> shift) & ((1u << width) - 1u);
+    if (nfmt == 7u) return width > 5u ? gcn_ufloat(raw, width - 5u) : gu(float(raw));
+    return gcn_convert(raw, width, nfmt);
+}
 // buffer_load_format_*: V# data/number format and DST_SEL applied.
 GCN_FN uint4 gcn_buffer_format(GCNMemory M, GCNRes4 r, uint index, uint voffset, uint soffset, uint inst, bool idxen, bool offen) {
     uint4 out;
@@ -101,9 +127,13 @@ GCN_FN uint4 gcn_buffer_format(GCNMemory M, GCNRes4 r, uint index, uint voffset,
     bool inside = stride != 0u ? idx < records : ulong(inst) + off < ulong(records);
     ulong address = base + soffset + inst + ulong(idx) * stride + off;
     uint4 comp = uint4(0u, 0u, 0u, 0u);
+    // Packed normals and colours (2_10_10_10, 10_11_11, 11_11_10): one dword.
+    bool packed = dfmt == 6u || dfmt == 7u || dfmt == 9u;
+    uint word = packed && inside ? gcn_ld32(M, address) : 0u;
     for (uint c = 0u; c < 4u; ++c) {
         uint raw = 0u;
-        if (inside && c < channels) {
+        if (packed) { if (inside && gcn_packed_width(dfmt, c) != 0u) comp[c] = gcn_packed_component(word, dfmt, c, nfmt); }
+        else if (inside && c < channels) {
             ulong at = address + c * (bits / 8u);
             raw = bits == 32u ? gcn_ld32(M, at) : bits == 16u ? gcn_ld16(M, at) : gcn_ld8(M, at);
             comp[c] = gcn_convert(raw, bits, nfmt);
@@ -200,6 +230,35 @@ GCN_FN ulong gcn_surface_bytes(uint tiling, uint pitch, uint height, uint bytes)
     if (!gcn_micro_tiled(tiling)) return ulong(pitch) * height * bytes;
     return ulong((pitch + 7u) >> 3) * ((height + 7u) >> 3) * 64ul * bytes;
 }
+// One slice of a 2D array or a cube (T# TYPE 13 or 11), from the instruction's
+// slice coordinate (DA set), between BASE_ARRAY and LAST_ARRAY: the T# moved
+// to that slice, each slice one level 0 surface rounded to 256 bytes. Slice
+// 0 keeps the T# itself, so a Metal texture bound for it still matches.
+GCN_FN GCNRes8 gcn_slice(GCNRes8 t, float coordinate) {
+    uint type = t.d[3] >> 28;
+    if (type != 11u && type != 13u) return t;
+    uint first = t.d[5] & 0x1fffu; uint last = (t.d[5] >> 13) & 0x1fffu;
+    if (last < first) last = first;
+    float rounded = gcn_rint(coordinate);
+    uint index = rounded <= float(first) ? first : rounded >= float(last) ? last : uint(rounded);
+    if (index == 0u) return t;
+    uint dfmt = (t.d[1] >> 20) & 0x3fu; uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u;
+    uint height = ((t.d[2] >> 14) & 0x3fffu) + 1u; uint tiling = (t.d[3] >> 20) & 0x1fu;
+    ulong slice;
+    if (dfmt >= 35u && dfmt <= 41u) slice = gcn_surface_bytes(tiling, (pitch + 3u) / 4u, (height + 3u) / 4u, (dfmt == 35u || dfmt == 38u) ? 8u : 16u);
+    else {
+        uint bytes = 4u;
+        if (dfmt == 1u) bytes = 1u; else if (dfmt == 2u || dfmt == 3u || (dfmt >= 16u && dfmt <= 19u)) bytes = 2u;
+        else if (dfmt == 11u || dfmt == 12u) bytes = 8u; else if (dfmt == 13u) bytes = 12u; else if (dfmt == 14u) bytes = 16u;
+        slice = gcn_surface_bytes(tiling, pitch, height, bytes);
+    }
+    slice = (slice + 255ul) & ~255ul;
+    ulong base = ((ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8) + slice * ulong(index);
+    GCNRes8 moved = t;
+    moved.d[0] = uint(base >> 8);
+    moved.d[1] = (t.d[1] & ~0xffu) | uint((base >> 40) & 0xfful);
+    return moved;
+}
 // Linear 2D images (T# tiling index 8) and 1D micro-tiled ones. Other tilings read as 0.
 GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, ulong offset) {
     float4 native;
@@ -210,7 +269,7 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
     if (tiling != 8u && !gcn_micro_tiled(tiling)) return float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (dfmt >= 35u && dfmt <= 39u) {
         uint number = (t.d[1] >> 26) & 15u;
-        if ((number != 0u && !(dfmt >= 38u && number == 1u)) || pitch < (t.d[2] & 0x3fffu) + 1u)
+        if ((number != 0u && !(dfmt >= 38u && number == 1u) && !(dfmt <= 37u && number == 9u)) || pitch < (t.d[2] & 0x3fffu) + 1u)
             return float4(0.0f, 0.0f, 0.0f, 0.0f);
         uint blockBytes = (dfmt == 35u || dfmt == 38u) ? 8u : 16u;
         ulong relative = gcn_element_offset(tiling, uint(x) / 4u, uint(y) / 4u, (pitch + 3u) / 4u, blockBytes);
@@ -237,11 +296,12 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
         float4 colour;
         for (uint c = 0u; c < 4u; ++c) colour[c] = gcn_bc1_component(endpoints, selectors, pixel, c, dfmt != 35u);
         if (dfmt != 35u) colour[3] = gcn_bc23_alpha(alphaLow, alphaHigh, pixel, dfmt == 37u);
+        if (number == 9u) for (uint c = 0u; c < 3u; ++c) colour[c] = gcn_srgb_linear(colour[c]);
         return gcn_texture_swizzle(t, colour);
     }
     uint bytes = 4u;
     if (dfmt == 1u) bytes = 1u; else if (dfmt == 2u || dfmt == 3u || (dfmt >= 16u && dfmt <= 19u)) bytes = 2u;
-    else if (dfmt == 14u) bytes = 16u;
+    else if (dfmt == 11u || dfmt == 12u) bytes = 8u; else if (dfmt == 13u) bytes = 12u; else if (dfmt == 14u) bytes = 16u;
     ulong relative = gcn_element_offset(tiling, uint(x), uint(y), pitch, bytes);
     ulong at = base + relative;
     ulong packed = offset + relative;
@@ -254,13 +314,30 @@ GCN_FN float4 gcn_texel_at(GCNMemory M, GCNRes8 t, int x, int y, bool resolved, 
     else if (dfmt == 3u) { c0 = float(raw & 0xffu) / 255.0f; c1 = float((raw >> 8) & 0xffu) / 255.0f; }
     else if (dfmt == 4u) c0 = nfmt == 7u ? gf(raw) : float(raw);
     else if (dfmt == 10u) { c0 = float(raw & 0xffu) / 255.0f; c1 = float((raw >> 8) & 0xffu) / 255.0f;
-                            c2 = float((raw >> 16) & 0xffu) / 255.0f; c3 = float((raw >> 24) & 0xffu) / 255.0f; }
+                            c2 = float((raw >> 16) & 0xffu) / 255.0f; c3 = float((raw >> 24) & 0xffu) / 255.0f;
+                            if (nfmt == 9u) { c0 = gcn_srgb_linear(c0); c1 = gcn_srgb_linear(c1); c2 = gcn_srgb_linear(c2); } }
     else if (dfmt == 16u) { c0 = float(raw & 31u) / 31.0f; c1 = float((raw >> 5) & 63u) / 63.0f; c2 = float((raw >> 11) & 31u) / 31.0f; }
     else if (dfmt == 17u) { c0 = float(raw & 1u); c1 = float((raw >> 1) & 31u) / 31.0f; c2 = float((raw >> 6) & 31u) / 31.0f; c3 = float((raw >> 11) & 31u) / 31.0f; }
     else if (dfmt == 18u) { c0 = float(raw & 31u) / 31.0f; c1 = float((raw >> 5) & 31u) / 31.0f; c2 = float((raw >> 10) & 31u) / 31.0f; c3 = float((raw >> 15) & 1u); }
     else if (dfmt == 19u) { c0 = float(raw & 15u) / 15.0f; c1 = float((raw >> 4) & 15u) / 15.0f; c2 = float((raw >> 8) & 15u) / 15.0f; c3 = float((raw >> 12) & 15u) / 15.0f; }
-    else if (dfmt == 14u) { c0 = gf(raw); c1 = gf(resolved ? gcn_packed32(M, packed + 4u) : gcn_ld32(M, at + 4u));
-        c2 = gf(resolved ? gcn_packed32(M, packed + 8u) : gcn_ld32(M, at + 8u)); c3 = gf(resolved ? gcn_packed32(M, packed + 12u) : gcn_ld32(M, at + 12u)); }
+    else if (dfmt == 14u || dfmt == 13u) { c0 = gf(raw); c1 = gf(resolved ? gcn_packed32(M, packed + 4u) : gcn_ld32(M, at + 4u));
+        c2 = gf(resolved ? gcn_packed32(M, packed + 8u) : gcn_ld32(M, at + 8u));
+        if (dfmt == 14u) c3 = gf(resolved ? gcn_packed32(M, packed + 12u) : gcn_ld32(M, at + 12u)); }
+    // 16_16, 16_16_16_16 (a 16-bit float scene), 32_32 and the packed formats,
+    // float when NFMT says so, else unorm.
+    else if (dfmt == 5u) { c0 = nfmt == 7u ? gcn_f16(raw & 0xffffu) : float(raw & 0xffffu) / 65535.0f;
+                           c1 = nfmt == 7u ? gcn_f16(raw >> 16) : float(raw >> 16) / 65535.0f; }
+    else if (dfmt == 12u) { uint high = resolved ? gcn_packed32(M, packed + 4u) : gcn_ld32(M, at + 4u);
+        c0 = nfmt == 7u ? gcn_f16(raw & 0xffffu) : float(raw & 0xffffu) / 65535.0f;
+        c1 = nfmt == 7u ? gcn_f16(raw >> 16) : float(raw >> 16) / 65535.0f;
+        c2 = nfmt == 7u ? gcn_f16(high & 0xffffu) : float(high & 0xffffu) / 65535.0f;
+        c3 = nfmt == 7u ? gcn_f16(high >> 16) : float(high >> 16) / 65535.0f; }
+    else if (dfmt == 11u) { c0 = gf(raw); c1 = gf(resolved ? gcn_packed32(M, packed + 4u) : gcn_ld32(M, at + 4u)); }
+    else if (dfmt == 6u || dfmt == 7u || dfmt == 9u) {
+        uint number = nfmt == 7u ? 7u : 0u;
+        c0 = gf(gcn_packed_component(raw, dfmt, 0u, number)); c1 = gf(gcn_packed_component(raw, dfmt, 1u, number));
+        c2 = gf(gcn_packed_component(raw, dfmt, 2u, number));
+        if (dfmt == 9u) c3 = gf(gcn_packed_component(raw, dfmt, 3u, number)); }
     return gcn_texture_swizzle(t, float4(c0, c1, c2, c3));
 }
 GCN_FN float4 gcn_texel(GCNMemory M, GCNRes8 t, int x, int y) { return gcn_texel_at(M, t, x, y, false, 0ul); }
@@ -346,11 +423,13 @@ GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u,
     }
     return gcn_sample_at(M, t, s, unorm, u, v, resolved, offset);
 }
-// image_store to a linear 2D image (tiling index 8): components in channel
-// order, those outside `dmask` stored as 0. Other formats and tilings: none.
+// image_store to a 2D image: components in channel order, those outside
+// `dmask` stored as 0. Every tile mode is stored linearly (rows of `pitch`
+// texels): the renderer holds a tiled image the kernel stores as a colour
+// target, copied linearly in and out of the kernel's memory. Other formats: none.
 GCN_FN void gcn_image_store(GCNMemory M, GCNRes8 t, uint x, uint y, uint4 value, uint dmask) {
     uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
-    if (((t.d[3] >> 20) & 0x1fu) != 8u || x >= w || y >= h) return;
+    if (x >= w || y >= h) return;
     ulong base = (ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8;
     uint dfmt = (t.d[1] >> 20) & 0x3fu; uint nfmt = (t.d[1] >> 26) & 15u; uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u;
     uint channels = 0u; uint bits = 32u;
@@ -378,5 +457,27 @@ GCN_FN float4 gcn_image_load(GCNMemory M, GCNRes8 t, uint x, uint y) {
     uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
     if (((t.d[3] >> 20) & 0x1fu) != 8u || x >= w || y >= h) return float4(0.0f, 0.0f, 0.0f, 0.0f);
     return gcn_texel(M, t, int(x), int(y));
+}
+// gcn_image_load in a compute kernel: a macro-tiled image is read linearly,
+// as the renderer copies colour targets into the kernel's memory (see
+// gcn_image_store); 1D micro tiling is still read through its tiles.
+GCN_FN float4 gcn_image_load_linear(GCNMemory M, GCNRes8 t, uint x, uint y) {
+    uint tiling = (t.d[3] >> 20) & 0x1fu;
+    if (tiling != 8u && !gcn_micro_tiled(tiling)) t.d[3] = (t.d[3] & ~(0x1fu << 20)) | (8u << 20);
+    if (gcn_micro_tiled(tiling)) {
+        uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
+        if (x >= w || y >= h) return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return gcn_texel(M, t, int(x), int(y));
+    }
+    return gcn_image_load(M, t, x, y);
+}
+// A depth-compare sample: the reference against the fetched depth by the
+// S# DEPTH_COMPARE_FUNC (0 never ... 7 always), 1.0 where it passes.
+GCN_FN float4 gcn_depth_compare(float4 c, float q, uint f) {
+    float z = c[0];
+    bool p = f == 7u || (f == 1u && q < z) || (f == 2u && q == z) || (f == 3u && q <= z) ||
+             (f == 4u && q > z) || (f == 5u && q != z) || (f == 6u && q >= z);
+    float r = p ? 1.0f : 0.0f;
+    return float4(r, r, r, r);
 }
 )

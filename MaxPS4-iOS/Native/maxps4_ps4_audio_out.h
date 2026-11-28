@@ -15,7 +15,7 @@ namespace maxps4 {
 // queues one buffer and returns once the previous one has played, as the
 // hardware does, so a game's audio thread runs at the real rate instead of
 // spinning. Each port keeps a stereo float ring that the host drains with
-// read(), mixing the ports; without a reader the oldest frames are dropped.
+// read(), mixing the ports; a full ring drops its oldest half at once.
 // 8-channel buffers are downmixed (front + half centre + half surround).
 // Volume, other port parameters and output time queries are not modelled.
 class PS4AudioOut final {
@@ -158,8 +158,13 @@ private:
     void push(Port& port, const std::vector<float>& stereo) {
         const size_t frames = stereo.size() / 2;
         for (size_t i = 0; i < frames; ++i) {
-            if (port.count == ring_frames) { // Full: drop the oldest frame.
-                port.head = (port.head + 1) % ring_frames; --port.count; ++stats_.dropped;
+            // Full (a reader slower than the game, or none): the oldest half
+            // goes at once. Dropping a frame per frame written cut every buffer
+            // the game sent (CoD: 432 790 frames, a click every 5 ms); this is
+            // one skip, then room for 125 ms of drift.
+            if (port.count == ring_frames) {
+                const size_t drop = ring_frames / 2;
+                port.head = (port.head + drop) % ring_frames; port.count -= drop; stats_.dropped += drop;
             }
             const size_t at = (port.head + port.count) % ring_frames;
             port.ring[2*at] = stereo[2*i]; port.ring[2*at+1] = stereo[2*i+1];

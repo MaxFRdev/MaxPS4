@@ -20,7 +20,10 @@
 //  * The result is sorted by name. The Orbis linker orders modules by their
 //    dependencies itself (PS4PKGRuntimePlan::orderModules).
 #pragma once
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <system_error>
@@ -114,6 +117,43 @@ inline std::vector<ModuleDecision> choose_modules(const std::vector<ModuleIdenti
                               : ModuleDecision{ModuleChoice::private_exports, {}};
     }
     return out;
+}
+
+
+// A launcher eboot.bin (Call of Duty: Modern Warfare Remastered, CUSA05379):
+// a small program that only calls sceSystemServiceLoadExec("/app0/default.elf")
+// (or default_mp.elf), replacing itself with the real game. MaxPS4 cannot
+// replace a running guest, so it boots that executable instead. A launcher is
+// an eboot.bin under 1 MiB that imports sceSystemServiceLoadExec (NID
+// JoBqSQt1yyA) and names an /app0 executable that exists (the update's first);
+// the first one it names wins (the single-player game for CoD). Empty when
+// eboot.bin is not one.
+inline std::filesystem::path launcher_target(const std::filesystem::path& eboot,
+                                             const std::filesystem::path& root,
+                                             const std::filesystem::path& update) {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(eboot, error);
+    if (error || size > (1u << 20)) return {};
+    std::ifstream in(eboot, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (bytes.find("JoBqSQt1yyA") == std::string::npos) return {};
+    for (size_t at = bytes.find("/app0/"); at != std::string::npos; at = bytes.find("/app0/", at + 1)) {
+        size_t end = at + 6;
+        while (end < bytes.size() && bytes[end] > 0x20 && bytes[end] < 0x7f) ++end;
+        const std::string name = bytes.substr(at + 6, end - at - 6);
+        auto ends = [&](const char* suffix) {
+            const std::string s(suffix);
+            return name.size() > s.size() && name.compare(name.size() - s.size(), s.size(), s) == 0;
+        };
+        if (name.empty() || name.find("..") != std::string::npos || name.find('/') != std::string::npos ||
+            !(ends(".elf") || ends(".self") || ends(".bin")) || name == "eboot.bin") continue;
+        for (const auto& folder : {update, root}) {
+            if (folder.empty()) continue;
+            const auto candidate = folder / name;
+            if (std::filesystem::is_regular_file(candidate, error)) return candidate;
+        }
+    }
+    return {};
 }
 
 } // namespace maxps4

@@ -254,11 +254,25 @@ int main() {
             std::memcpy(&params,stub+6,8); std::memcpy(&leave,stub+21,8);
             CHECK(leave==image.start()+34 && stub[34+8]==0x0f && stub[34+9]==0x05 && stub[34+10]==0xf4);
             size_t stackBytes=0; auto* stackLow=image.stack_host(stackBytes);
-            CHECK(params==reinterpret_cast<uintptr_t>(stackLow)+stackBytes-maxps4::GuestELF::entryParamsBytes);
+            CHECK(params==reinterpret_cast<uintptr_t>(stackLow)+stackBytes-maxps4::GuestELF::entryAreaBytes);
             CHECK(image.write_entry_params()==params);
             const auto* words=image.translate(params,32,4);
             uint64_t argv0=0; std::memcpy(&argv0,words+8,8);
             CHECK(words[0]==1 && argv0==params+32 && !std::memcmp(image.translate(argv0,10,4),"eboot.bin",10));
+            // A game booted in place of its launcher gets an empty argv[0].
+            image.entry_program="";
+            CHECK(image.write_entry_params()==params && *image.translate(argv0,1,4)==0);
+            image.entry_program="eboot.bin";
+            CHECK(image.write_entry_params()==params && !std::memcmp(image.translate(argv0,10,4),"eboot.bin",10));
+            // Per-game patches rewrite read-only code only where it holds the expected bytes.
+            const auto& root=image.module_records().front();
+            const uint64_t code=root.segments.front().address;
+            uint8_t before[4], after[4]={0x90,0x90,0x90,0x90}, wrong[4]={0xde,0xad,0xbe,0xef};
+            std::memcpy(before,image.translate(code,4,4),4);
+            CHECK(!image.patch(code,wrong,after,4) && !std::memcmp(image.translate(code,4,4),before,4));
+            CHECK(image.patch(code,before,after,4) && !std::memcmp(image.translate(code,4,4),after,4));
+            CHECK(!image.translate(code,4,2)); // still read-only for the guest
+            CHECK(image.patch(code,after,before,4) && !std::memcmp(image.translate(code,4,4),before,4));
             // Then the thread-return trampoline: MOV RDI,RAX; MOV EAX,thread_exit;
             // SYSCALL (an HLE gate site); HLT, where every child thread ends.
             const uint64_t back=image.thread_return();

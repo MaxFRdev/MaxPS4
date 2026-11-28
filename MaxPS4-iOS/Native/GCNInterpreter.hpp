@@ -140,6 +140,13 @@ public:
     bool scc = false;
     std::vector<GCNExport> exports;
     std::string error;
+    // Resource scans: an instruction, format or image kind the interpreter
+    // lacks is skipped (its results left as they were) instead of ending the
+    // run, so the resources read after it are still found. Memory failures
+    // still end it. A run that skipped some returns true with `error` naming
+    // the first.
+    bool lenient = false;
+    unsigned skipped = 0;
     // Pixel shaders: the parameter plane of attribute `attr`, channel `chan`.
     std::function<GCNAttributePlane(unsigned attr, unsigned chan)> attribute;
     GCNImageCache* images = nullptr;
@@ -160,6 +167,11 @@ public:
     // first active lane reads or writes (base when no lane is active).
     std::function<void(std::uint64_t base, std::uint64_t bytes, std::uint32_t stride, std::uint64_t address)> buffer;
 
+    // The group's LDS: ldsBytes usable (outside: reads 0, writes nothing),
+    // allocated by the first access. One wave runs here: s_barrier waits for nothing.
+    std::vector<std::uint32_t> lds;
+    unsigned ldsBytes = 65536;
+
     std::uint32_t& v(unsigned reg, unsigned lane) { return v_[std::size_t(reg & 0xff) * lanes_ + lane]; }
     std::uint64_t exec() const { return std::uint64_t(s[126]) | std::uint64_t(s[127]) << 32; }
     void setExec(std::uint64_t mask) { s[126] = std::uint32_t(mask); s[127] = std::uint32_t(mask >> 32); }
@@ -169,8 +181,10 @@ public:
     // Reuse allocated lane/export storage, but never reuse runtime values or
     // callbacks. The owner decides the lifetime of the external code cache.
     void reset() {
-        s.fill(0); scc = false; exports.clear(); error.clear();
+        s.fill(0); scc = false; exports.clear(); error.clear(); skipped = 0;
         std::fill(v_.begin(), v_.end(), 0);
+        if (ldsTouched_) { std::fill(lds.begin(), lds.end(), 0); ldsTouched_ = false; } // scans reset per draw
+        ldsBytes = 65536;
         attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false; scalarLoad = {};
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
@@ -178,6 +192,11 @@ public:
     // Runs from `pc` until s_endpgm. False with `error` set on anything not
     // implemented or invalid (unmapped code or data, unsupported formats).
     bool run(std::uint64_t pc, std::size_t maxInstructions = 1u << 20) {
+        std::string first;
+        auto finish = [&] {
+            if (skipped) error = "ignoré x" + std::to_string(skipped) + " : " + first;
+            return true;
+        };
         for (std::size_t steps = 0; steps < maxInstructions; ++steps) {
             GCNInstruction i;
             if (!fetch(pc, i)) return false;
@@ -187,9 +206,18 @@ public:
                 if (error.empty()) error = "unsupported " + gcnMnemonic(i);
                 char at[32]; std::snprintf(at, sizeof at, " at 0x%llx", (unsigned long long)pc);
                 error += at;
-                return false;
+                // Everything but a memory failure (whose addresses would be
+                // garbage from then on) is something the interpreter lacks.
+                const bool missing = error.rfind("unread", 0) != 0 && error.rfind("unwrit", 0) != 0 &&
+                                     error.rfind("undecodable", 0) != 0 && error.rfind("image resource register range", 0) != 0;
+                if (!lenient || ended || !missing) return false;
+                if (first.empty()) first = error;
+                error.clear();
+                ++skipped;
+                pc = pc + 4ull * i.size;
+                continue;
             }
-            if (ended) return true;
+            if (ended) return finish();
             pc = next;
         }
         error = "instruction limit reached";
@@ -201,6 +229,7 @@ private:
     unsigned lanes_;
     GCNCodeCache* cache_;
     std::vector<std::uint32_t> v_;
+    bool ldsTouched_ = false;
 
     bool fail(const std::string& message) { error = message; return false; }
     bool active(unsigned lane) const { return lane < lanes_ && ((exec() >> lane) & 1); }
@@ -424,6 +453,13 @@ private:
             else resource(address, 4ull * count);
         }
         std::uint32_t words[16];
+        // One read for the whole load when it is within its limit (a read goes
+        // through the game's memory lock: one per word cost resource scans dearly).
+        if (offset + 4ull * count <= limit && memory_.read(address, words, 4ull * count)) {
+            for (unsigned n = 0; n < count; ++n) setScalar(d + n, words[n]);
+            if (scalarLoad) scalarLoad(4ull * i.word, address, words, count);
+            return true;
+        }
         for (unsigned n = 0; n < count; ++n) {
             std::uint32_t value = 0;
             if (offset + 4 * n + 4 <= limit && !memory_.read(address + 4 * n, &value, 4)) return fail("unreadable scalar load");
@@ -520,6 +556,7 @@ private:
             case 264: r = u32(fa * fb); break;
             case 265: r = std::uint32_t(std::int64_t(std::int32_t(a << 8) / 256) * (std::int32_t(b << 8) / 256)); break;
             case 267: r = (a & 0xffffff) * (b & 0xffffff); break;
+            case 266: r = std::uint32_t(std::uint64_t(std::int64_t(std::int32_t(a << 8) / 256) * (std::int32_t(b << 8) / 256)) >> 32); break;
             case 268: r = std::uint32_t((std::uint64_t(a & 0xffffff) * (b & 0xffffff)) >> 32); break;
             case 271: r = u32(std::fmin(fa, fb)); break;
             case 272: r = u32(std::fmax(fa, fb)); break;
@@ -657,8 +694,77 @@ private:
         }
         return true;
     }
+    // LDS accesses, lane by lane in lane order (atomics return the value
+    // before this lane's operation), as GCNTranslator::ldsAccess.
+    bool ldsInside(std::uint32_t a) const { return a < ldsBytes && ldsBytes - a >= 4 && a < 65536; }
+    std::uint32_t ldsLoad(std::uint32_t a) { a &= ~3u; return ldsInside(a) ? lds[a >> 2] : 0; }
+    void ldsStore(std::uint32_t a, std::uint32_t value) { a &= ~3u; if (ldsInside(a)) lds[a >> 2] = value; }
+    bool ldsAccess(const GCNInstruction& i) {
+        if ((i.word0 >> 17) & 1) return fail("GDS access");
+        if (lds.empty()) lds.assign(16384, 0);
+        ldsTouched_ = true;
+        const unsigned op = i.opcode, addr = i.word1 & 0xff, d0 = (i.word1 >> 8) & 0xff, d1 = (i.word1 >> 16) & 0xff, dst = i.word1 >> 24;
+        const unsigned off0 = i.word0 & 0xff, off1 = (i.word0 >> 8) & 0xff, off = i.word0 & 0xffff;
+        const bool atomic = op <= 11 || op == 16 || (op >= 32 && op <= 43) || op == 45 || op == 48;
+        const bool known = op == 13 || op == 14 || op == 15 || op == 30 || op == 31 || op == 77 || op == 78 || op == 79 ||
+                           op == 54 || op == 55 || op == 56 || (op >= 57 && op <= 60) || op == 118 || op == 119 || op == 120 || atomic;
+        if (!known) return false;
+        for (unsigned lane = 0; lane < lanes_; ++lane) {
+            if (!active(lane)) continue;
+            const std::uint32_t a = v(addr, lane);
+            auto store = [&](unsigned bytes, unsigned reg) { ldsStore(a + bytes, v(reg, lane)); };
+            std::uint32_t got[4] = {};
+            unsigned count = 0;
+            if (op == 13) store(off, d0);
+            else if (op == 30 || op == 31) {
+                const std::uint32_t at = a + off, w = at & ~3u, bits = op == 30 ? 8 : 16, shift = (at & 3) * 8;
+                const std::uint32_t mask = std::uint32_t((1ull << bits) - 1) << shift;
+                if (ldsInside(w)) lds[w >> 2] = (lds[w >> 2] & ~mask) | ((v(d0, lane) << shift) & mask);
+            } else if (op == 14 || op == 15) { const unsigned k = op == 15 ? 256 : 4; store(off0 * k, d0); store(off1 * k, d1); }
+            else if (op == 77) { store(off, d0); store(off + 4, d0 + 1); }
+            else if (op == 78 || op == 79) {
+                const unsigned k = op == 79 ? 512 : 8;
+                store(off0 * k, d0); store(off0 * k + 4, d0 + 1); store(off1 * k, d1); store(off1 * k + 4, d1 + 1);
+            } else if (op == 54) { got[0] = ldsLoad(a + off); count = 1; }
+            else if (op >= 57 && op <= 60) {
+                const std::uint32_t at = a + off, bits = op <= 58 ? 8 : 16;
+                std::uint32_t r = (ldsLoad(at) >> ((at & 3) * 8)) & ((1u << bits) - 1);
+                if ((op == 57 || op == 59) && ((r >> (bits - 1)) & 1)) r |= ~((1u << bits) - 1);
+                got[0] = r; count = 1;
+            } else if (op == 55 || op == 56) { const unsigned k = op == 56 ? 256 : 4; got[0] = ldsLoad(a + off0 * k); got[1] = ldsLoad(a + off1 * k); count = 2; }
+            else if (op == 118) { got[0] = ldsLoad(a + off); got[1] = ldsLoad(a + off + 4); count = 2; }
+            else if (op == 119 || op == 120) {
+                const unsigned k = op == 120 ? 512 : 8;
+                got[0] = ldsLoad(a + off0 * k); got[1] = ldsLoad(a + off0 * k + 4);
+                got[2] = ldsLoad(a + off1 * k); got[3] = ldsLoad(a + off1 * k + 4); count = 4;
+            } else {
+                const unsigned kind = op == 45 ? 13 : op & 31;
+                const std::uint32_t at = (a + off) & ~3u, data = v(d0, lane), data2 = v(d1, lane);
+                if (!ldsInside(at)) { if (op >= 32) { got[0] = 0; count = 1; } }
+                else {
+                    std::uint32_t& p = lds[at >> 2];
+                    const std::uint32_t old = p;
+                    switch (kind) {
+                    case 0: p = old + data; break;           case 1: p = old - data; break;
+                    case 2: p = data - old; break;           case 3: p = old >= data ? 0 : old + 1; break;
+                    case 4: p = (old == 0 || old > data) ? data : old - 1; break;
+                    case 5: p = std::int32_t(old) < std::int32_t(data) ? old : data; break;
+                    case 6: p = std::int32_t(old) > std::int32_t(data) ? old : data; break;
+                    case 7: p = old < data ? old : data; break; case 8: p = old > data ? old : data; break;
+                    case 9: p = old & data; break;           case 10: p = old | data; break;
+                    case 11: p = old ^ data; break;          case 13: p = data; break;
+                    case 16: p = old == data ? data2 : old; break;
+                    default: break;
+                    }
+                    if (op >= 32) { got[0] = old; count = 1; }
+                }
+            }
+            for (unsigned k = 0; k < count; ++k) v(dst + k, lane) = got[k];
+        }
+        return true;
+    }
     bool ds(const GCNInstruction& i) {
-        if (i.opcode != 53) return false; // only ds_swizzle_b32 (no LDS is modelled)
+        if (i.opcode != 53) return ldsAccess(i);
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
         const unsigned offset = i.word0 & 0xffff;
         std::array<std::uint32_t, 64> r{};
@@ -681,6 +787,28 @@ private:
         case 13: channels = 3; bits = 32; return true; case 14: channels = 4; bits = 32; return true;
         default: return false;
         }
+    }
+    // Packed data formats, x in the low bits (as gcn_packed_width): 6 10_11_11,
+    // 7 11_11_10, 9 2_10_10_10 (normals); 0 past the format's components.
+    static unsigned packedWidth(unsigned dfmt, unsigned c) {
+        if (dfmt == 9) return c < 3 ? 10 : c == 3 ? 2 : 0;
+        if (dfmt == 6) return c < 2 ? 11 : c == 2 ? 10 : 0;
+        if (dfmt == 7) return c == 0 ? 10 : c < 3 ? 11 : 0;
+        return 0;
+    }
+    static std::uint32_t packedComponent(std::uint32_t word, unsigned dfmt, unsigned c, unsigned nfmt) {
+        unsigned shift = 0;
+        for (unsigned k = 0; k < c; ++k) shift += packedWidth(dfmt, k);
+        const unsigned width = packedWidth(dfmt, c);
+        const std::uint32_t raw = (word >> shift) & ((1u << width) - 1);
+        if (nfmt == 7) {
+            if (width <= 5) return gcn_detail::u32(float(raw));
+            const unsigned mbits = width - 5, e = raw >> mbits, m = raw & ((1u << mbits) - 1);
+            if (e == 31) return m ? 0x7fc00000u : 0x7f800000u;
+            if (e == 0) return gcn_detail::u32(std::ldexp(float(m), -14 - int(mbits)));
+            return gcn_detail::u32(std::ldexp(float(m + (1u << mbits)), int(e) - 15 - int(mbits)));
+        }
+        return convertIn(raw, width, nfmt);
     }
     static std::uint32_t convertIn(std::uint32_t raw, unsigned bits, unsigned nfmt) {
         const std::uint32_t max = bits == 32 ? ~0u : ((1u << bits) - 1);
@@ -715,7 +843,9 @@ private:
         else if (op == 14 || op == 30) count = 4; else if (op == 15 || op == 31) count = 3;
         else return false;
         unsigned channels = 1, bits = 32;
-        if (format && !bufferLayout(dfmt, channels, bits)) return fail("buffer data format " + std::to_string(dfmt));
+        const bool packed = format && packedWidth(dfmt, 0);
+        if (packed && store) return fail("packed buffer store format " + std::to_string(dfmt));
+        if (format && !packed && !bufferLayout(dfmt, channels, bits)) return fail("buffer data format " + std::to_string(dfmt));
         if (resource) resource(base, stride ? std::uint64_t(records) * stride : records);
         if (store && stored) stored(base, stride ? std::uint64_t(records) * stride : records);
         if (buffer) {
@@ -734,7 +864,7 @@ private:
             const std::uint32_t voffset = offen ? v(vaddr + (idxen ? 1 : 0), lane) : 0;
             const std::uint64_t address = base + soffset + instOffset + std::uint64_t(index) * stride + voffset;
             const bool inside = stride ? index < records : std::uint64_t(instOffset) + voffset < records;
-            const unsigned bytes = format ? channels * bits / 8 : count * 4;
+            const unsigned bytes = packed ? 4 : format ? channels * bits / 8 : count * 4;
             if (store) {
                 if (!inside) continue;
                 std::uint8_t data[16] = {};
@@ -753,7 +883,11 @@ private:
             if (inside && !memory_.read(address, data, bytes)) return fail("unreadable buffer load");
             if (!format) { for (unsigned c = 0; c < count; ++c) std::memcpy(&v(vdata + c, lane), data + 4 * c, 4); continue; }
             std::uint32_t component[4] = {0, 0, 0, 0};
-            for (unsigned c = 0; c < channels; ++c) {
+            if (packed) {
+                std::uint32_t word = 0;
+                std::memcpy(&word, data, 4);
+                for (unsigned c = 0; c < 4; ++c) component[c] = inside && packedWidth(dfmt, c) ? packedComponent(word, dfmt, c, nfmt) : 0;
+            } else for (unsigned c = 0; c < channels; ++c) {
                 std::uint32_t raw = 0;
                 std::memcpy(&raw, data + c * bits / 8, bits / 8);
                 component[c] = inside ? convertIn(raw, bits, nfmt) : 0;
@@ -773,7 +907,8 @@ private:
     static bool imageBytes(unsigned dfmt, unsigned& bytes) {
         switch (dfmt) {
         case 1: bytes = 1; return true; case 2: case 3: case 16: case 17: case 18: case 19: bytes = 2; return true;
-        case 4: case 5: case 10: bytes = 4; return true; case 11: case 12: bytes = 8; return true;
+        case 4: case 5: case 6: case 7: case 9: case 10: bytes = 4; return true; case 11: case 12: bytes = 8; return true;
+        case 13: bytes = 12; return true;
         case 14: bytes = 16; return true; case 35: case 38: bytes = 8; return true; case 36: case 37: case 39: bytes = 16; return true; default: return false;
         }
     }
@@ -838,16 +973,36 @@ private:
         case 2: c[0] = t.nfmt == 7 ? gcn_detail::f16(raw & 0xffff) : unorm(raw & 0xffff, 16); break;
         case 3: c[0] = unorm(raw & 0xff, 8); c[1] = unorm((raw >> 8) & 0xff, 8); break;
         case 4: c[0] = t.nfmt == 7 ? gcn_detail::f32(raw) : float(raw); break;
-        case 10: for (unsigned n = 0; n < 4; ++n) c[n] = unorm((raw >> (8 * n)) & 0xff, 8); break;
+        case 10:
+            for (unsigned n = 0; n < 4; ++n) c[n] = unorm((raw >> (8 * n)) & 0xff, 8);
+            // sRGB (NFMT 9): colour channels to linear, as the texture unit does.
+            if (t.nfmt == 9)
+                for (unsigned n = 0; n < 3; ++n) c[n] = c[n] <= 0.04045f ? c[n] / 12.92f : std::pow((c[n] + 0.055f) / 1.055f, 2.4f);
+            break;
         case 16: c[0] = unorm(raw & 31, 5); c[1] = unorm((raw >> 5) & 63, 6); c[2] = unorm((raw >> 11) & 31, 5); break;
         case 17: c[0] = unorm(raw & 1, 1); c[1] = unorm((raw >> 1) & 31, 5); c[2] = unorm((raw >> 6) & 31, 5); c[3] = unorm((raw >> 11) & 31, 5); break;
         case 18: c[0] = unorm(raw & 31, 5); c[1] = unorm((raw >> 5) & 31, 5); c[2] = unorm((raw >> 10) & 31, 5); c[3] = unorm((raw >> 15) & 1, 1); break;
         case 19: for (unsigned n = 0; n < 4; ++n) c[n] = unorm((raw >> (4 * n)) & 15, 4); break;
         case 14: for (unsigned n = 0; n < 4; ++n) std::memcpy(&c[n], data + 4 * n, 4); break;
+        case 13: for (unsigned n = 0; n < 3; ++n) std::memcpy(&c[n], data + 4 * n, 4); break;
+        case 11: for (unsigned n = 0; n < 2; ++n) std::memcpy(&c[n], data + 4 * n, 4); break;
+        // 16_16 and 16_16_16_16 (a 16-bit float scene): float when NFMT says so, else unorm.
+        case 5: case 12:
+            for (unsigned n = 0; n < (t.dfmt == 5 ? 2u : 4u); ++n) {
+                std::uint16_t half = 0;
+                std::memcpy(&half, data + 2 * n, 2);
+                c[n] = t.nfmt == 7 ? gcn_detail::f16(half) : unorm(half, 16);
+            }
+            break;
+        case 6: case 7: case 9:
+            for (unsigned n = 0; n < (t.dfmt == 9 ? 4u : 3u); ++n) c[n] = gcn_detail::f32(packedComponent(raw, t.dfmt, n, t.nfmt == 7 ? 7 : 0));
+            break;
         default: return fail("image data format " + std::to_string(t.dfmt));
         }
-        if (t.dfmt != 4 && t.dfmt != 14 && !(t.dfmt >= 38 && t.dfmt <= 39 && t.nfmt == 1) && t.nfmt != 0 && t.nfmt != 7 && t.nfmt != 9)
-            return fail("image number format " + std::to_string(t.nfmt));
+        if (t.nfmt == 9 && t.dfmt >= 35 && t.dfmt <= 37) // sRGB BC1-3: colour to linear
+            for (unsigned n = 0; n < 3; ++n) c[n] = c[n] <= 0.04045f ? c[n] / 12.92f : std::pow((c[n] + 0.055f) / 1.055f, 2.4f);
+        // Other number formats (snorm, integers) read as their unorm or float
+        // bits: approximate, where failing stopped the whole resource scan.
         for (unsigned n = 0; n < 4; ++n) {
             const unsigned sel = t.sel[n];
             out[n] = sel >= 4 ? c[sel - 4] : sel == 1 ? 1.0f : 0.0f;
@@ -913,7 +1068,12 @@ private:
                 (d[2] & 0x3fff) + 1, ((d[2] >> 14) & 0x3fff) + 1, ((d[4] >> 13) & 0x3fff) + 1,
                 (d[1] >> 20) & 0x3f, (d[1] >> 26) & 15, (d[3] >> 20) & 0x1f, d[3] >> 28,
                 {d[3] & 7, (d[3] >> 3) & 7, (d[3] >> 6) & 7, (d[3] >> 9) & 7}};
-        if (t.type != 9) return fail("image type " + std::to_string(t.type));
+        // 1D, 2D, 3D, cube and arrays read their first slice here; the range
+        // noted covers every layer (cube faces, array layers, 3D depth slices),
+        // which the translated programs reach through gcn_slice.
+        if (t.type < 8 || t.type > 13) return fail("image type " + std::to_string(t.type));
+        const std::uint32_t lastLayer = (d[5] >> 13) & 0x1fff, depth3d = (d[4] & 0x1fff) + 1;
+        const std::uint64_t layers = t.type >= 11 ? std::uint64_t(lastLayer) + 1 : t.type == 10 ? depth3d : 1;
         // Preserve the destination address even when its tiled layout cannot
         // be interpreted by this CPU-side resource scan. The renderer uses
         // this to refuse unsupported writes instead of silently dropping them.
@@ -944,10 +1104,11 @@ private:
         unsigned bytes;
         if (!imageBytes(t.dfmt, bytes)) return fail("image data format " + std::to_string(t.dfmt));
         if (t.dfmt >= 35 && t.dfmt <= 39 &&
-            ((t.nfmt != 0 && !(t.dfmt >= 38 && t.nfmt == 1)) || t.pitch < t.width))
+            ((t.nfmt != 0 && !(t.dfmt >= 38 && t.nfmt == 1) && !(t.dfmt <= 37 && t.nfmt == 9)) || t.pitch < t.width))
             return fail("BC" + std::to_string(t.dfmt - 34) +
                 (t.dfmt >= 38 ? " requires UNORM/SNORM and pitch >= width" : " requires UNORM and pitch >= width"));
-        if (resource) resource(t.base, imageSize(t, bytes));
+        const std::uint64_t layerBytes = (imageSize(t, bytes) + 255) & ~std::uint64_t(255);
+        if (resource) resource(t.base, layers > 1 ? layerBytes * layers : imageSize(t, bytes));
         if (i.opcode == 8 && stored) stored(t.base, imageSize(t, bytes));
         if (imageResource) {
             imageSampler = {};

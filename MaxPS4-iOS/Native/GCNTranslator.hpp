@@ -18,9 +18,12 @@
 #include "GCNDecoder.hpp"
 #include "GCNInterpreter.hpp"
 #include <array>
+#include <cctype>
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace maxps4::gpu {
@@ -44,6 +47,12 @@ struct GCNTranslation {
     std::uint8_t colors = 0;     // pixel: MRTs exported
     bool position = false, quad = false, mayKill = false;
     bool stores = false;         // compute: writes guest memory
+    unsigned ldsApproximated = 0; // pixel LDS accesses read as 0 / dropped (no LDS outside compute)
+    // compute: reads or writes LDS, or waits at s_barrier. The function then
+    // takes the group's LDS after Q (GCN_TG gcn_lds_word* T, uint ldsBytes),
+    // and every branch is decided for the whole thread group (gcn_group_any),
+    // so that each thread reaches each barrier.
+    bool lds = false;
     // pixel: the scalar loads, each with `2 + count` words at `offset` of the
     // draw's table of scalar values (address, then words: gcn_site_hit).
     std::vector<GCNScalarSite> sites;
@@ -70,6 +79,9 @@ public:
                       (i.encoding==GCNEncoding::sopp && i.opcode==0))) break;
                 pc+=4*i.size;
             }
+            if (options_.stage == GCNStage::compute)
+                for (const auto& [at, in] : code_)
+                    if (in.i.encoding == GCNEncoding::ds || (in.i.encoding == GCNEncoding::sopp && in.i.opcode == 10)) out_.lds = true;
             emit(entry);
             out_.mayKill=execMayKill_ || (restoresEntryExec_ &&
                 (scalarWrites_[savedEntryExec_]!=1 || scalarWrites_[savedEntryExec_+1]!=1));
@@ -155,16 +167,82 @@ private:
         }
         return true;
     }
-    // No branch back and no jump through a register: each block can only lead to
-    // a later one, so the blocks can run in address order without a loop.
-    bool forwardOnly(std::uint64_t entry) const {
-        if (entry != *leaders_.begin()) return false;
-        for (const auto& item : code_) {
-            const GCNInstruction& i = item.second.i;
-            if (i.encoding == GCNEncoding::sop1 && (i.opcode == 32 || i.opcode == 33)) return false;
-            if (i.encoding == GCNEncoding::sopp && (i.opcode == 2 || (i.opcode >= 4 && i.opcode <= 9)) &&
-                branchTarget(item.first, i) <= item.first) return false;
+    // The blocks a block can lead to: branch targets, the next block, a
+    // called fetch shader, or (s_setpc_b64) the block after its one call.
+    std::vector<std::uint64_t> successors(std::uint64_t leader) const {
+        std::vector<std::uint64_t> out;
+        for (std::uint64_t pc = leader;;) {
+            const auto found = code_.find(pc);
+            if (found == code_.end()) return out;
+            const GCNInstruction& i = found->second.i;
+            const std::uint64_t next = pc + 4ull * i.size;
+            if (i.encoding == GCNEncoding::sopp) {
+                if (i.opcode == 1) return out;
+                if (i.opcode == 2) { out.push_back(branchTarget(pc, i)); return out; }
+                if (i.opcode >= 4 && i.opcode <= 9) { out.push_back(branchTarget(pc, i)); out.push_back(next); return out; }
+            }
+            if (i.encoding == GCNEncoding::sop1 && i.opcode == 33) {
+                const auto call = calls_.find(pc);
+                if (call != calls_.end()) out.push_back(call->second);
+                return out;
+            }
+            if (i.encoding == GCNEncoding::sop1 && i.opcode == 32) {
+                for (const auto& [at, target] : calls_) {
+                    const auto c = code_.find(at);
+                    if (c != code_.end()) out.push_back(at + 4ull * c->second.i.size);
+                }
+                return out;
+            }
+            if (leaders_.count(next)) { out.push_back(next); return out; }
+            pc = next;
         }
+    }
+    // An order of the blocks in which each one can only lead to a later one,
+    // so that they run in that order without a loop (false if none is found):
+    // address order, a called fetch shader's blocks (one call at most) moved
+    // to just after the calling block.
+    bool forwardOrder(std::uint64_t entry, std::vector<std::uint64_t>& order) const {
+        if (calls_.size() > 1) return false;
+        std::set<std::uint64_t> callee;
+        std::uint64_t caller = 0;
+        if (!calls_.empty()) {
+            const auto [at, target] = *calls_.begin();
+            caller = *std::prev(leaders_.upper_bound(at));
+            std::vector<std::uint64_t> work{target};
+            while (!work.empty()) {
+                const std::uint64_t block = work.back(); work.pop_back();
+                if (!callee.insert(block).second) continue;
+                const auto found = code_.find(block);
+                // A callee block ending in s_setpc_b64 returns: not followed further.
+                bool returns = false;
+                for (std::uint64_t pc = block; found != code_.end();) {
+                    const auto in = code_.find(pc);
+                    if (in == code_.end()) break;
+                    const GCNInstruction& i = in->second.i;
+                    if (i.encoding == GCNEncoding::sop1 && i.opcode == 32) { returns = true; break; }
+                    const std::uint64_t next = pc + 4ull * i.size;
+                    if (leaders_.count(next) || (i.encoding == GCNEncoding::sopp && (i.opcode == 1 || i.opcode == 2 || (i.opcode >= 4 && i.opcode <= 9))) ||
+                        (i.encoding == GCNEncoding::sop1 && i.opcode == 33)) break;
+                    pc = next;
+                }
+                if (!returns) for (const auto next : successors(block)) work.push_back(next);
+            }
+            if (callee.count(caller) || callee.count(entry)) return false;
+        }
+        order.clear();
+        for (const auto leader : leaders_) {
+            if (callee.count(leader)) continue;
+            order.push_back(leader);
+            if (leader == caller && !callee.empty()) order.insert(order.end(), callee.begin(), callee.end());
+        }
+        if (order.size() != leaders_.size() || order.front() != entry) return false;
+        std::map<std::uint64_t, std::size_t> position;
+        for (std::size_t k = 0; k < order.size(); ++k) position[order[k]] = k;
+        for (std::size_t k = 0; k < order.size(); ++k)
+            for (const auto next : successors(order[k])) {
+                const auto found = position.find(next);
+                if (found == position.end() || found->second <= k) return false;
+            }
         return true;
     }
     std::size_t index(std::uint64_t address) const { return std::size_t(std::distance(leaders_.begin(), leaders_.find(address))); }
@@ -207,6 +285,9 @@ private:
     static const char* ex() { return "((s126 & 1u) != 0u)"; }
     // A wave-level decision: per quad in pixel programs, per lane otherwise
     // (Metal has no quad operations in vertex functions).
+    // A branch condition: for the whole thread group where barriers must
+    // stay converged (out_.lds), true if any thread's is.
+    std::string decide(const std::string& cond) { return out_.lds ? "gcn_group_any(T, " + cond + ")" : "(" + cond + ")"; }
     std::string any(const std::string& cond) {
         if (options_.stage != GCNStage::pixel) return "(" + cond + ")";
         out_.quad = true;
@@ -217,11 +298,12 @@ private:
     void emit(std::uint64_t entry) {
         // The loop hides from Metal that a block runs at most once: every register
         // stays live around it. `break` leaves a block in both forms.
-        const bool inOrder = inOrder_ = options_.stage == GCNStage::pixel && !options_.dispatcher && forwardOnly(entry);
+        std::vector<std::uint64_t> order;
+        const bool inOrder = inOrder_ = !options_.dispatcher && forwardOrder(entry, order);
+        if (!inOrder) order.assign(leaders_.begin(), leaders_.end());
         for (unsigned n = 0; n < 128; ++n) known_[n] = n + 1;
-        std::size_t k = 0;
-        for (const auto leader : leaders_) {
-            const std::string number = std::to_string(k++);
+        for (const auto leader : order) {
+            const std::string number = std::to_string(index(leader));
             body_ += inOrder ? "    if (pc == " + number + "u) do {\n" : "    case " + number + "u: {\n";
             std::uint64_t pc = leader;
             if (inOrder && leader != entry) known_ = incoming_[leader];
@@ -244,7 +326,8 @@ private:
             }
             body_ += inOrder ? "    } while (false);\n" : "    }\n";
         }
-        std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) {\n"
+        std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q" +
+                           std::string(out_.lds ? ", GCN_TG gcn_lds_word* T, uint ldsBytes" : "") + ") {\n"
                            "    uint gcn_hint = 0u; (void)gcn_hint;\n";
         for (const auto n : sregs_) {
             std::string init = "0u";
@@ -275,6 +358,7 @@ private:
         case GCNEncoding::vintrp: return vintrp(in);
         case GCNEncoding::ds: return ds(in);
         case GCNEncoding::mubuf: return mubuf(in);
+        case GCNEncoding::mtbuf: return mubuf(in);
         case GCNEncoding::mimg: return mimg(in);
         case GCNEncoding::exp: return exportOp(in);
         default: return false;
@@ -417,16 +501,19 @@ private:
             flowTo(branchTarget(pc, i)); flowTo(next);
         };
         switch (i.opcode) {
-        case 0: case 10: case 12: case 13: case 14: case 15: case 16: case 17: case 19: case 20: case 21: case 22:
+        case 10:
+            if (out_.lds) { body_ += "gcn_barrier();"; return true; }
+            body_ += "/* " + in.name + " */"; return true;
+        case 0: case 12: case 13: case 14: case 15: case 16: case 17: case 19: case 20: case 21: case 22:
             body_ += "/* " + in.name + " */"; return true;
         case 1: body_ += "running = false; break;"; ended = true; return true;
         case 2: flowTo(branchTarget(pc, i)); body_ += "pc = " + std::to_string(index(branchTarget(pc, i))) + "u; break;"; ended = true; return true;
-        case 4: branch("!scc"); return true;
-        case 5: branch("scc"); return true;
-        case 6: branch("!" + any(s(106) + " != 0u || " + s(107) + " != 0u")); return true;
-        case 7: branch(any(s(106) + " != 0u || " + s(107) + " != 0u")); return true;
-        case 8: branch("!" + any(s(126) + " != 0u || " + s(127) + " != 0u")); return true;
-        case 9: branch(any(s(126) + " != 0u || " + s(127) + " != 0u")); return true;
+        case 4: branch("!" + decide("scc")); return true;
+        case 5: branch(decide("scc")); return true;
+        case 6: branch("!" + decide(any(s(106) + " != 0u || " + s(107) + " != 0u"))); return true;
+        case 7: branch(decide(any(s(106) + " != 0u || " + s(107) + " != 0u"))); return true;
+        case 8: branch("!" + decide(any(s(126) + " != 0u || " + s(127) + " != 0u"))); return true;
+        case 9: branch(decide(any(s(126) + " != 0u || " + s(127) + " != 0u"))); return true;
         default: return false;
         }
     }
@@ -556,7 +643,41 @@ private:
             return out_.error.empty();
         }
         if (op == 384 + 2) { setScalar(dst, source(src[0], i)); return out_.error.empty(); } // per-lane approximation
+        // v_readlane_b32 (an SGPR from one lane's VGPR): this lane's, like
+        // v_readfirstlane. v_writelane_b32 (one lane's VGPR from an SGPR): in a
+        // pixel program the quad lane named by the selector's low bits, else
+        // every lane (the selected one is not known per lane outside quads).
+        if (op == 257) { setScalar(dst, source(src[0], i)); return out_.error.empty(); }
+        if (op == 258) {
+            const std::string value = source(src[0], i), lane = source(src[1], i);
+            if (options_.stage == GCNStage::pixel) body_ += "if (((" + lane + ") & 3u) == L.quadLane) " + v(dst) + " = " + value + ";";
+            else body_ += v(dst) + " = " + value + ";";
+            return out_.error.empty();
+        }
         if (op == 384 + 0 || op == 384 + 65) { body_ += "/* nop */"; return true; }
+        // v_movreld_b32 (v[dst + M0] = src0), v_movrels_b32 (dst = v[src0 + M0]),
+        // v_movrelsd_b32 (v[dst + M0] = v[src0 + M0]): registers are variables,
+        // so M0 selects among the 32 after the base (a small array, as games
+        // index them); outside that range a read gives 0 and a write is lost.
+        if (op == 384 + 66 || op == 384 + 67 || op == 384 + 68) {
+            constexpr unsigned span = 32;
+            const bool readRelative = op != 384 + 66, writeRelative = op != 384 + 67;
+            if (readRelative && src[0] < 256) return fail("v_movrels from a scalar operand");
+            const unsigned from = src[0] - 256;
+            std::string code = "{ if (" + E + ") { uint m = " + s(124) + "; uint r = 0u; ";
+            if (readRelative) {
+                code += "switch (m) { ";
+                for (unsigned k = 0; k < span && from + k < 256; ++k) code += "case " + std::to_string(k) + "u: r = " + v(from + k) + "; break; ";
+                code += "default: break; } ";
+            } else code += "r = " + source(src[0], i) + "; ";
+            if (writeRelative) {
+                code += "switch (m) { ";
+                for (unsigned k = 0; k < span && dst + k < 256; ++k) code += "case " + std::to_string(k) + "u: " + v(dst + k) + " = r; break; ";
+                code += "default: break; } ";
+            } else code += v(dst) + " = r; ";
+            body_ += code + "} }";
+            return out_.error.empty();
+        }
         std::string expr, carry;
         const std::string cin = (op >= 296 && op <= 298) ? (vop3 ? "(" + scalar64(src[2], i) + " & 1ul)" : "ulong(" + s(106) + " & 1u)") : "0ul";
         const std::string D = v(dst);
@@ -567,6 +688,8 @@ private:
         case 261: expr = "gu(fb - fa)"; break;
         case 263: expr = "(fa == 0.0f || fb == 0.0f) ? 0u : gu(fa * fb)"; break;
         case 264: expr = "gu(fa * fb)"; break;
+        case 265: expr = "uint(int(a << 8) >> 8) * uint(int(b << 8) >> 8)"; break;
+        case 266: expr = "uint(ulong(long(int(a << 8) >> 8) * long(int(b << 8) >> 8)) >> 32)"; break;
         case 267: expr = "(a & 0xffffffu) * (b & 0xffffffu)"; break;
         case 268: expr = "uint((ulong(a & 0xffffffu) * ulong(b & 0xffffffu)) >> 32)"; break;
         case 271: expr = "gu(gcn_fmin(fa, fb))"; break;
@@ -589,6 +712,12 @@ private:
         case 288: expr = "gu(fa * gf(" + hex(i.literal) + ") + fb)"; break;
         case 289: expr = "gu(fa * fb + gf(" + hex(i.literal) + "))"; break;
         case 290: expr = "gcn_popcount(a) + b"; break;
+        // v_mbcnt_lo/hi: lanes of the mask below this one, plus b. One lane
+        // per invocation: in a pixel quad the lane is its quad position (the
+        // usual mbcnt_lo(-1, 0) then mbcnt_hi(-1, ...) lane id gives 0-3),
+        // elsewhere 0; no lane is in the high half.
+        case 291: expr = "gcn_popcount(a & ((1u << L.quadLane) - 1u)) + b"; break;
+        case 292: expr = "b"; break;
         case 293: carry = "ulong t = ulong(a) + ulong(b); r = uint(t); co = uint(t >> 32);"; break;
         case 294: carry = "r = a - b; co = b > a ? 1u : 0u;"; break;
         case 295: carry = "r = b - a; co = a > b ? 1u : 0u;"; break;
@@ -687,14 +816,86 @@ private:
         sregs_.insert(126);
         return true;
     }
+    // LDS in a compute program: the group's words at T, ldsBytes of them
+    // usable (outside: reads 0, writes and atomics nothing). Addresses are
+    // v[addr] + offset, in bytes; two-address forms use offset0 and offset1 in
+    // elements (st64: 64 elements).
+    bool ldsAccess(const Inst& in) {
+        const GCNInstruction& i = in.i;
+        if ((i.word0 >> 17) & 1) return fail("GDS access: " + in.name);
+        const unsigned op = i.opcode, addr = i.word1 & 0xff, d0 = (i.word1 >> 8) & 0xff, d1 = (i.word1 >> 16) & 0xff, dst = i.word1 >> 24;
+        const unsigned off0 = i.word0 & 0xff, off1 = (i.word0 >> 8) & 0xff, off = i.word0 & 0xffff;
+        auto at = [&](unsigned bytes) { return "a + " + std::to_string(bytes) + "u"; };
+        std::string b;
+        auto store = [&](unsigned bytes, unsigned reg) { b += "gcn_lds_store(T, ldsBytes, " + at(bytes) + ", " + v(reg) + "); "; };
+        auto load = [&](unsigned bytes, unsigned reg) { b += v(reg) + " = gcn_lds_load(T, ldsBytes, " + at(bytes) + "); "; };
+        if (op == 13) store(off, d0);
+        else if (op == 30 || op == 31) b += "gcn_lds_store_bits(T, ldsBytes, " + at(off) + ", " + v(d0) + ", " + (op == 30 ? "8u" : "16u") + "); ";
+        else if (op == 14 || op == 15) { const unsigned k = op == 15 ? 256 : 4; store(off0 * k, d0); store(off1 * k, d1); }
+        else if (op == 77) { store(off, d0); store(off + 4, d0 + 1); }
+        else if (op == 78 || op == 79) {
+            const unsigned k = op == 79 ? 512 : 8;
+            store(off0 * k, d0); store(off0 * k + 4, d0 + 1); store(off1 * k, d1); store(off1 * k + 4, d1 + 1);
+        } else if (op == 54) load(off, dst);
+        else if (op >= 57 && op <= 60)
+            b += v(dst) + " = gcn_lds_load_bits(T, ldsBytes, " + at(off) + ", " + (op <= 58 ? "8u" : "16u") + ", " + (op == 57 || op == 59 ? "true" : "false") + "); ";
+        else if (op == 55 || op == 56) { const unsigned k = op == 56 ? 256 : 4; load(off0 * k, dst); load(off1 * k, dst + 1); }
+        else if (op == 118) { load(off, dst); load(off + 4, dst + 1); }
+        else if (op == 119 || op == 120) {
+            const unsigned k = op == 120 ? 512 : 8;
+            load(off0 * k, dst); load(off0 * k + 4, dst + 1); load(off1 * k, dst + 2); load(off1 * k + 4, dst + 3);
+        } else if (op <= 11 || op == 16 || (op >= 32 && op <= 43) || op == 45 || op == 48) {
+            // Atomics: 0 add, 1 sub, 2 rsub, 3 inc, 4 dec, 5/6 signed min/max,
+            // 7/8 unsigned min/max, 9 and, 10 or, 11 xor, 13 exchange, 16
+            // compare-store (data0 compared, data1 stored); +32 returns the old value.
+            const unsigned kind = op == 45 ? 13 : op & 31;
+            const std::string call = "gcn_lds_atomic(T, ldsBytes, " + at(off) + ", " + std::to_string(kind) + "u, " + v(d0) + ", " +
+                                     (kind == 16 ? v(d1) : std::string("0u")) + ")";
+            b += (op >= 32 ? v(dst) + " = " : std::string()) + call + "; ";
+        } else return fail("unsupported LDS access: " + in.name);
+        // The address is read before any destination is written.
+        body_ += "if (" + std::string(ex()) + ") { uint a = " + v(addr) + "; " + b + "}";
+        sregs_.insert(126);
+        return out_.error.empty();
+    }
     bool ds(const Inst& in) {
         const GCNInstruction& i = in.i;
         const unsigned offset = i.word0 & 0xffff;
-        if (i.opcode != 53 || !(offset & 0x8000)) return fail("LDS access other than a quad swizzle");
+        if (i.opcode != 53) {
+            // Other LDS accesses in a pixel program (CoD left 3857 draws out over
+            // one): no LDS here, so reads and returning atomics give 0 and
+            // writes are dropped, rather than losing the draw. Compute still fails.
+            if (options_.stage == GCNStage::compute) return ldsAccess(in);
+            if (options_.stage != GCNStage::pixel) return fail("LDS access other than a swizzle: " + in.name);
+            const unsigned op = i.opcode, dst = i.word1 >> 24;
+            unsigned returned = 0;
+            if (op == 54 || (op >= 57 && op <= 60)) returned = 1;            // ds_read_b32, u8/i8/u16/i16
+            else if (op == 55 || op == 56 || op == 118) returned = 2;        // read2_b32 (st64), read_b64
+            else if (op == 119 || op == 120) returned = 4;                   // read2_b64 (st64)
+            else if (op >= 32 && op <= 52) returned = 1;                     // 32-bit atomics returning
+            else if (op >= 96 && op <= 116) returned = 2;                    // 64-bit atomics returning
+            body_ += "/* " + in.name + ": no LDS */";
+            if (returned) {
+                body_ += " if (" + std::string(ex()) + ") {";
+                for (unsigned k = 0; k < returned && dst + k < 256; ++k) body_ += " " + v(dst + k) + " = 0u;";
+                body_ += " }";
+                sregs_.insert(126);
+            }
+            ++out_.ldsApproximated;
+            return true;
+        }
         if (options_.stage != GCNStage::pixel) return fail("quad swizzle outside a pixel program");
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
+        // Quad mode (bit 15): two bits per lane pick the source lane. Bitmask
+        // mode: lane = ((lane & and) | or) ^ xor over groups of 32. Only the
+        // quad is visible here, so the low two bits of that lane are taken;
+        // exact whenever bits 2-4 are kept (and = 1xxx, or = xor = 0 there),
+        // the usual case (swaps and broadcasts within a quad).
+        std::string pick;
+        if (offset & 0x8000) pick = "(" + hex(offset & 0xff) + " >> (2u * L.quadLane)) & 3u";
+        else pick = "(((L.quadLane & " + hex(offset & 0x1f) + ") | " + hex((offset >> 5) & 0x1f) + ") ^ " + hex((offset >> 10) & 0x1f) + ") & 3u";
         // Every lane takes part (inactive ones contribute 0), so quads stay converged.
-        body_ += "{ uint lane = (" + hex(offset & 0xff) + " >> (2u * L.quadLane)) & 3u; uint got = gcn_quad_shuffle(Q, L, " +
+        body_ += "{ uint lane = " + pick + "; uint got = gcn_quad_shuffle(Q, L, " +
                  std::string(ex()) + " ? " + v(src) + " : 0u, lane); if (" + ex() + ") " + v(dst) + " = got; }";
         sregs_.insert(126);
         out_.quad = true;
@@ -715,7 +916,13 @@ private:
         else if (op == 13 || op == 29) count = 2; else if (op == 14 || op == 30) count = 4; else if (op == 15 || op == 31) count = 3;
         else return fail("unsupported buffer access");
         if (store && options_.stage != GCNStage::compute) return fail("buffer store outside a compute program");
-        const std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + s(rsrc + 3) + "}}; ";
+        // tbuffer_*_format (MTBUF, opcodes 0-7 like MUBUF's format ones): the
+        // instruction's DFMT (bits 19-22) and NFMT (23-25) replace the V#'s
+        // NUM_FORMAT (word 3 bits 12-14) and DATA_FORMAT (15-18).
+        std::string word3 = s(rsrc + 3);
+        if (i.encoding == GCNEncoding::mtbuf)
+            word3 = "((" + word3 + " & ~0x7f000u) | " + std::to_string(((w >> 23) & 7) << 12 | ((w >> 19) & 15) << 15) + "u)";
+        const std::string res = "GCNRes4 r = {{" + s(rsrc) + ", " + s(rsrc + 1) + ", " + s(rsrc + 2) + ", " + word3 + "}}; ";
         const std::string index = idxen ? v(vaddr) : "0u", voffset = offen ? v(vaddr + (idxen ? 1 : 0)) : "0u";
         const std::string args = index + ", " + voffset + ", " + scalar(w1 >> 24, i) + ", " + std::to_string(w & 0xfff) + "u, " +
                                  (idxen ? "true" : "false") + ", " + (offen ? "true" : "false");
@@ -752,22 +959,49 @@ private:
         const std::uint32_t w = i.word0, w1 = i.word1;
         const unsigned vaddr = w1 & 0xff, vdata = (w1 >> 8) & 0xff;
         const unsigned rsrc = ((w1 >> 16) & 0x1f) * 4, samp = ((w1 >> 21) & 0x1f) * 4, dmask = (w >> 8) & 15;
-        const unsigned op = i.opcode;
+        const unsigned raw = i.opcode;
+        // image_gather4* (64-95) address like the matching image_sample*
+        // (32-63); image_sample_cd* (104-111) like image_sample_d*.
+        const bool gather = raw >= 64 && raw < 96;
+        unsigned op = gather ? raw - 32 : raw;
+        if (raw >= 104 && raw < 112) op = 34 + ((raw & 2) ? 8 : 0) + (raw >= 108 ? 16 : 0);
         unsigned first = 0;
-        if (op == 37 || op == 38 || op == 53 || op == 54) first = 1;
+        // Address order: offset (_O), bias (_B), depth reference (_C),
+        // derivatives (_D, 2D: four), coordinates.
+        const bool compare = (op >= 40 && op < 48) || (op >= 56 && op < 64);
+        const unsigned base = op & ~16u;
+        if (base == 37 || base == 38 || base == 45 || base == 46) first = 1;
         if (op >= 48 && op < 64) first += 1;
-        // _d variants: the 2D derivatives (ds/dx, dt/dx, ds/dy, dt/dy) come before the coordinates.
-        if (op == 34 || op == 35 || op == 50 || op == 51) first += 4;
-        if ((op >= 40 && op < 48) || (op >= 56 && op < 64)) return fail("depth-compare sampling");
+        const unsigned reference = first;
+        if (compare) first += 1;
+        if (base == 34 || base == 35 || base == 42 || base == 43) first += 4;
         std::string res = "GCNRes8 t = {{";
         for (unsigned n = 0; n < 8; ++n) res += s(rsrc + n) + (n < 7 ? ", " : "}}; ");
+        // DA: an array or cube, its slice (or face) after the coordinates.
+        const bool array = (w >> 14) & 1;
+        if (array && op >= 32 && op < 64 && vaddr + first + 2 < 256) res += "t = gcn_slice(t, gf(" + v(vaddr + first + 2) + ")); ";
+        else if (array && op <= 2 && vaddr + 2 < 256) res += "t = gcn_slice(t, float(" + v(vaddr + 2) + ")); ";
         std::string call;
         if (op >= 32 && op < 64) {
-            res += "GCNRes4 sm = {{" + s(samp) + ", " + s(samp + 1) + ", " + s(samp + 2) + ", " + s(samp + 3) + "}}; ";
+            // A depth-compare sample (shadow maps) reads the depth without the
+            // S# comparison, then compares the reference with it by the S#
+            // DEPTH_COMPARE_FUNC: 1.0 where it passes, 0.0 where not.
+            res += "GCNRes4 sm = {{" + s(samp) + (compare ? " & ~0x7000u" : "") + ", " + s(samp + 1) + ", " + s(samp + 2) + ", " + s(samp + 3) + "}}; ";
             call = "gcn_sample(M, t, sm, " + std::string(((w >> 12) & 1) ? "true" : "false") + ", gf(" + v(vaddr + first) + "), gf(" +
                    v(vaddr + first + 1) + "))";
-        } else if (op == 0 || op == 1) {
-            call = "gcn_image_load(M, t, " + v(vaddr) + ", " + v(vaddr + 1) + ")";
+            if (compare)
+                call = "gcn_depth_compare(" + call + ", gf(" + v(vaddr + reference) + "), (" + s(samp) + " >> 12) & 7u)";
+        } else if (op == 0 || op == 1 || op == 2) {
+            // image_load_mip reads level 0 like image_load.
+            call = std::string(options_.stage == GCNStage::compute ? "gcn_image_load_linear" : "gcn_image_load") + "(M, t, " +
+                   v(vaddr) + ", " + v(vaddr + 1) + ")";
+        } else if (op == 96) {
+            // image_get_lod: level 0 (MaxPS4 textures have no mip chain).
+            body_ += "if (" + std::string(ex()) + ") { ";
+            for (unsigned n = 0, out = 0; n < 4; ++n)
+                if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = 0u; ";
+            body_ += "}";
+            return out_.error.empty();
         } else if (op == 8 || op == 9) {
             // image_store(_mip): the enabled components, in order, from vdata.
             if (options_.stage != GCNStage::compute) return fail("image store outside a compute program");
@@ -786,10 +1020,18 @@ private:
             body_ += "}";
             sregs_.insert(126);
             return out_.error.empty();
-        } else return fail("unsupported image access " + in.name);
+        } else return fail("unsupported image access " + in.name + " (opcode " + std::to_string(raw) + ")");
         body_ += "if (" + std::string(ex()) + ") { " + res + "float4 c = " + call + "; ";
-        for (unsigned n = 0, out = 0; n < 4; ++n)
-            if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(c[" + std::to_string(n) + "]); ";
+        if (gather) {
+            // image_gather4: the dmask component of the 2x2 footprint, in four
+            // registers. Approximated by the filtered sample, four times.
+            unsigned component = 0;
+            while (component < 3 && !((dmask >> component) & 1)) ++component;
+            for (unsigned n = 0; n < 4; ++n) body_ += v(vdata + n) + " = gu(c[" + std::to_string(component) + "]); ";
+        } else {
+            for (unsigned n = 0, out = 0; n < 4; ++n)
+                if ((dmask >> n) & 1) body_ += v(vdata + out++) + " = gu(c[" + std::to_string(n) + "]); ";
+        }
         body_ += "}";
         sregs_.insert(126);
         return out_.error.empty();
@@ -815,7 +1057,9 @@ private:
             body_ += "if (" + E + ") { L.color[" + std::to_string(target) + "] = " + value + "; L.colorWritten |= " +
                      std::to_string(1u << target) + "u; }";
             if (done) body_ += " else L.killed = true;";
-        } else if (target == 9) {
+        } else if (target == 8 || target == 9) {
+            // MRTZ (8): a depth/stencil export, approximated by the
+            // rasterized depth; like NULL (9) it still ends the pixel.
             if (done) body_ += "if (!" + E + ") L.killed = true;";
         } else if (target == 12) { out_.position = true; body_ += "L.pos = " + value + ";"; }
         else if (target >= 32 && target < 64) {
@@ -836,10 +1080,14 @@ inline GCNTranslation translateGCN(const GCNMemory& memory, std::uint64_t entry,
 // gcnMetalPrelude()). Buffers: 0 guest memory, writable: one window at
 // `base` or rangeCount copied ranges, as for draws; 1 GCNDispatchState. COMPUTE_PGM_RSRC2 (rsrc2) enables the thread group ids,
 // which follow the user SGPRs, and the thread id components beyond x.
-inline std::string gcnMetalComputeEntry(const std::string& name) {
-    return "struct GCNDispatchState { ulong base; ulong size; uint user[16]; uint userCount; uint rsrc2; uint rangeCount; uint pad; ulong ranges[48]; };\n"
+// With `lds` (GCNTranslation::lds): threadgroup memory 0 holds 16 bytes for
+// gcn_group_any, then the program's LDS, of `ldsBytes` (the state's last
+// 32-bit word before the ranges) bytes.
+inline std::string gcnMetalComputeEntry(const std::string& name, bool lds = false) {
+    return "struct GCNDispatchState { ulong base; ulong size; uint user[16]; uint userCount; uint rsrc2; uint rangeCount; uint ldsBytes; ulong ranges[48]; };\n"
            "kernel void gcn_compute(uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]],\n"
-           "    device uchar* mem [[buffer(0)]], constant GCNDispatchState& D [[buffer(1)]]) {\n"
+           "    device uchar* mem [[buffer(0)]], constant GCNDispatchState& D [[buffer(1)]]" +
+           std::string(lds ? ", threadgroup atomic_uint* gcn_group [[threadgroup(0)]]" : "") + ") {\n"
            "    GCNLane L; gcn_lane_init(L);\n"
            "    uint n = min(D.userCount, 16u);\n"
            "    for (uint k = 0u; k < n; ++k) L.user[k] = D.user[k];\n"
@@ -848,7 +1096,7 @@ inline std::string gcnMetalComputeEntry(const std::string& name) {
            "    if ((D.rsrc2 & 0x200u) != 0u && n < 20u) L.user[n++] = group.z;\n"
            "    L.vinit[0] = local.x; L.vinit[1] = local.y; L.vinit[2] = local.z;\n"
            "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u };\n"
-           "    " + name + "(L, M, Q);\n}\n";
+           "    " + name + (lds ? "(L, M, Q, gcn_group + 4, D.ldsBytes);\n}\n" : "(L, M, Q);\n}\n");
 }
 
 // One past the highest bit set in `bits` (at least 1): an array size.
@@ -869,9 +1117,10 @@ using namespace metal;
 struct GCNRes8 { uint d[8]; };
 struct GCNRes4 { uint d[4]; };
 #if GCN_NATIVE_TEXTURES
-// Up to four of a draw's T#s viewed as Metal textures (a video's Y, U and V
-// planes); bit k of `enabled` marks texture k valid, bit 4 + k its Metal
-// sampler, built on the CPU from S# `sdesc` (the one the draw samples it with).
+// Up to eight of a draw's T#s viewed as Metal textures (a video's Y, U and V
+// planes, a deferred light's G-buffer); `enabled` marks texture k valid (bit
+// k for 0-3, k + 4 for 4-7) and its Metal sampler (bit 4 + k, k + 8), built
+// on the CPU from S# `sdesc` (the one the draw samples it with).
 struct GCNNativeTexture {
     texture2d<float> image [[id(0)]];
     uint enabled [[id(1)]];
@@ -894,6 +1143,26 @@ struct GCNNativeTexture {
     uint4 high3 [[id(18)]];
     sampler samp3 [[id(19)]];
     uint4 sdesc3 [[id(20)]];
+    texture2d<float> image4 [[id(21)]];
+    uint4 low4 [[id(22)]];
+    uint4 high4 [[id(23)]];
+    sampler samp4 [[id(24)]];
+    uint4 sdesc4 [[id(25)]];
+    texture2d<float> image5 [[id(26)]];
+    uint4 low5 [[id(27)]];
+    uint4 high5 [[id(28)]];
+    sampler samp5 [[id(29)]];
+    uint4 sdesc5 [[id(30)]];
+    texture2d<float> image6 [[id(31)]];
+    uint4 low6 [[id(32)]];
+    uint4 high6 [[id(33)]];
+    sampler samp6 [[id(34)]];
+    uint4 sdesc6 [[id(35)]];
+    texture2d<float> image7 [[id(36)]];
+    uint4 low7 [[id(37)]];
+    uint4 high7 [[id(38)]];
+    sampler samp7 [[id(39)]];
+    uint4 sdesc7 [[id(40)]];
 };
 #endif
 // Large ranges live in buffers of their own (buffer(5) up), shared by the
@@ -918,6 +1187,68 @@ GCN_FN device const uchar* gcn_at(GCNMemory M, ulong o) {
             k == 4u ? M.s.x[3] : k == 5u ? M.s.x[4] : M.s.x[5]) + o;
 }
 struct GCNQuad { uint unused; };
+// A compute program's LDS (GCNTranslation::lds): the group's words, every
+// access atomic so that atomics and plain accesses mix; the 16 bytes before
+// T hold gcn_group_any's vote.
+#define GCN_TG threadgroup
+typedef atomic_uint gcn_lds_word;
+GCN_FN void gcn_barrier() { threadgroup_barrier(mem_flags::mem_threadgroup); }
+GCN_FN bool gcn_group_any(threadgroup atomic_uint* T, bool b) {
+    threadgroup atomic_uint* vote = T - 4;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    atomic_store_explicit(vote, 0u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (b) atomic_fetch_or_explicit(vote, 1u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return atomic_load_explicit(vote, memory_order_relaxed) != 0u;
+}
+GCN_FN bool gcn_lds_inside(uint bytes, uint a) { return a < bytes && bytes - a >= 4u; }
+GCN_FN uint gcn_lds_load(threadgroup atomic_uint* T, uint bytes, uint a) {
+    a &= ~3u;
+    return gcn_lds_inside(bytes, a) ? atomic_load_explicit(T + (a >> 2), memory_order_relaxed) : 0u;
+}
+GCN_FN void gcn_lds_store(threadgroup atomic_uint* T, uint bytes, uint a, uint value) {
+    a &= ~3u;
+    if (gcn_lds_inside(bytes, a)) atomic_store_explicit(T + (a >> 2), value, memory_order_relaxed);
+}
+GCN_FN uint gcn_lds_load_bits(threadgroup atomic_uint* T, uint bytes, uint a, uint bits, bool sign) {
+    uint r = (gcn_lds_load(T, bytes, a) >> ((a & 3u) * 8u)) & ((1u << bits) - 1u);
+    if (sign && ((r >> (bits - 1u)) & 1u) != 0u) r |= ~((1u << bits) - 1u);
+    return r;
+}
+GCN_FN void gcn_lds_store_bits(threadgroup atomic_uint* T, uint bytes, uint a, uint value, uint bits) {
+    uint w = a & ~3u;
+    if (!gcn_lds_inside(bytes, w)) return;
+    uint shift = (a & 3u) * 8u, mask = ((1u << bits) - 1u) << shift;
+    atomic_fetch_and_explicit(T + (w >> 2), ~mask, memory_order_relaxed);
+    atomic_fetch_or_explicit(T + (w >> 2), (value << shift) & mask, memory_order_relaxed);
+}
+// The old value; `kind` as GCNTranslator::ldsAccess.
+GCN_FN uint gcn_lds_atomic(threadgroup atomic_uint* T, uint bytes, uint a, uint kind, uint data, uint data2) {
+    a &= ~3u;
+    if (!gcn_lds_inside(bytes, a)) return 0u;
+    threadgroup atomic_uint* p = T + (a >> 2);
+    threadgroup atomic_int* q = (threadgroup atomic_int*)p;
+    switch (kind) {
+    case 0u: return atomic_fetch_add_explicit(p, data, memory_order_relaxed);
+    case 1u: return atomic_fetch_sub_explicit(p, data, memory_order_relaxed);
+    case 5u: return uint(atomic_fetch_min_explicit(q, int(data), memory_order_relaxed));
+    case 6u: return uint(atomic_fetch_max_explicit(q, int(data), memory_order_relaxed));
+    case 7u: return atomic_fetch_min_explicit(p, data, memory_order_relaxed);
+    case 8u: return atomic_fetch_max_explicit(p, data, memory_order_relaxed);
+    case 9u: return atomic_fetch_and_explicit(p, data, memory_order_relaxed);
+    case 10u: return atomic_fetch_or_explicit(p, data, memory_order_relaxed);
+    case 11u: return atomic_fetch_xor_explicit(p, data, memory_order_relaxed);
+    case 13u: return atomic_exchange_explicit(p, data, memory_order_relaxed);
+    default: break;
+    }
+    uint old = atomic_load_explicit(p, memory_order_relaxed);
+    for (;;) {
+        uint next = kind == 2u ? data - old : kind == 3u ? (old >= data ? 0u : old + 1u) :
+                    kind == 4u ? ((old == 0u || old > data) ? data : old - 1u) : kind == 16u ? (old == data ? data2 : old) : old;
+        if (atomic_compare_exchange_weak_explicit(p, &old, next, memory_order_relaxed, memory_order_relaxed)) return old;
+    }
+}
 struct GCNLane {
     uint user[20]; uint vinit[24]; bool exec; uint quadLane;
     float4 attr[GCN_ATTRS];
@@ -943,7 +1274,7 @@ GCN_FN void gcn_lane_init(thread GCNLane& L) {
 // starting at guest address `base` (rangeCount 0) or rangeCount copied ranges
 // as (guest start, length, offset in the buffer) triples; user SGPRs of each
 // stage; GCN_DRAW_* flags.
-struct GCNDrawState { ulong base; ulong size; uint vsUser[16]; uint psUser[17]; uint flags; uint rangeCount; ulong ranges[48]; };
+struct GCNDrawState { ulong base; ulong size; uint vsUser[16]; uint psUser[17]; uint flags; uint rangeCount; ulong ranges[48]; uint stepRate[2]; };
 #define GCN_DRAW_RECT_LIST 1u
 #define GCN_DRAW_FLIP_Y 2u
 #define GCN_DRAW_SITES 4u
@@ -1016,16 +1347,23 @@ GCN_FN void gcn_st32(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_loca
 GCN_FN void gcn_st16(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 2ul, o)) *(device ushort*)(M.p + o) = ushort(v); }
 GCN_FN void gcn_st8(GCNMemory M, ulong a, uint v) { ulong o = 0ul; if (gcn_locate(M, a, 1ul, o)) *(device uchar*)(M.p + o) = uchar(v); }
 #if GCN_NATIVE_TEXTURES
-// Which of the draw's Metal textures (0 to 3) views T# `t`, or -1.
+// Which of the draw's Metal textures (0 to 7) views T# `t`, or -1. The CPU
+// binds only T#s it can serve (nativeTexture): any format it bound matches.
+// A list of formats here (8_8_8_8, 5_6_5, 8, BC7) had left out the colour
+// targets in other formats (a 16-bit float scene, read back as guest memory
+// that never holds it), BC1-5 and the micro-tiled images the CPU decoded.
 GCN_FN int gcn_native_match(GCNMemory M, GCNRes8 t) {
-    const uint dfmt = (t.d[1] >> 20) & 63u;
-    if (!M.native || M.native->enabled == 0u || (dfmt != 10u && dfmt != 16u && dfmt != 1u && dfmt != 41u)) return -1;
+    if (!M.native || M.native->enabled == 0u) return -1;
     const uint4 low = uint4(t.d[0],t.d[1],t.d[2],t.d[3]), high = uint4(t.d[4],t.d[5],t.d[6],t.d[7]);
     const uint enabled = M.native->enabled;
     if ((enabled & 1u) && all(M.native->low == low) && all(M.native->high == high)) return 0;
     if ((enabled & 2u) && all(M.native->low1 == low) && all(M.native->high1 == high)) return 1;
     if ((enabled & 4u) && all(M.native->low2 == low) && all(M.native->high2 == high)) return 2;
     if ((enabled & 8u) && all(M.native->low3 == low) && all(M.native->high3 == high)) return 3;
+    if ((enabled & 0x100u) && all(M.native->low4 == low) && all(M.native->high4 == high)) return 4;
+    if ((enabled & 0x200u) && all(M.native->low5 == low) && all(M.native->high5 == high)) return 5;
+    if ((enabled & 0x400u) && all(M.native->low6 == low) && all(M.native->high6 == high)) return 6;
+    if ((enabled & 0x800u) && all(M.native->low7 == low) && all(M.native->high7 == high)) return 7;
     return -1;
 }
 // 5_6_5 viewed as B5G6R5Unorm: GCN's first component is the low 5 bits, Metal's blue.
@@ -1053,9 +1391,15 @@ GCN_FN bool gcn_native_filter(texture2d<float> image, sampler q, bool usable, GC
         value = gcn_native_order(t, image.sample(q, uv, level(0.0f)));
         return true;
     }
-    if ((s.d[0] & 63u) != 18u) return false; // Both axes clamped.
+    // Larger than the T#: each axis clamped (stops at the T#'s last texel) or
+    // wrapped (folded into the T#'s size; a filter at the seam reads the
+    // target's padding row instead of the first one). Mirrored: not here.
+    const uint cx = s.d[0] & 7u, cy = (s.d[0] >> 3) & 7u;
+    if ((cx != 0u && cx != 2u) || (cy != 0u && cy != 2u)) return false;
     const float2 size = float2(float(w), float(h));
-    const float2 texel = clamp(un ? float2(u, v) : float2(u, v) * size, float2(0.5f), size - 0.5f);
+    float2 texel = un ? float2(u, v) : float2(u, v) * size;
+    if (cx == 2u) texel.x = clamp(texel.x, 0.5f, size.x - 0.5f); else texel.x -= floor(texel.x / size.x) * size.x;
+    if (cy == 2u) texel.y = clamp(texel.y, 0.5f, size.y - 0.5f); else texel.y -= floor(texel.y / size.y) * size.y;
     value = gcn_native_order(t, image.sample(q, texel / float2(float(iw), float(ih)), level(0.0f)));
     return true;
 }
@@ -1064,9 +1408,16 @@ GCN_FN bool gcn_native_texel(GCNMemory M, GCNRes8 t, int x, int y, thread float4
 #if GCN_NATIVE_TEXTURES
     const int k = gcn_native_match(M, t);
     if (k < 0) return false;
-    return k == 0 ? gcn_native_read(M.native->image, t, x, y, value) :
-           k == 1 ? gcn_native_read(M.native->image1, t, x, y, value) :
-           k == 2 ? gcn_native_read(M.native->image2, t, x, y, value) : gcn_native_read(M.native->image3, t, x, y, value);
+    switch (k) {
+    case 0: return gcn_native_read(M.native->image, t, x, y, value);
+    case 1: return gcn_native_read(M.native->image1, t, x, y, value);
+    case 2: return gcn_native_read(M.native->image2, t, x, y, value);
+    case 3: return gcn_native_read(M.native->image3, t, x, y, value);
+    case 4: return gcn_native_read(M.native->image4, t, x, y, value);
+    case 5: return gcn_native_read(M.native->image5, t, x, y, value);
+    case 6: return gcn_native_read(M.native->image6, t, x, y, value);
+    default: return gcn_native_read(M.native->image7, t, x, y, value);
+    }
 #else
     return false;
 #endif
@@ -1076,12 +1427,19 @@ GCN_FN bool gcn_native_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, flo
     const int k = gcn_native_match(M, t);
     if (k < 0) return false;
     const uint4 sd = uint4(s.d[0], s.d[1], s.d[2], s.d[3]);
-    const bool usable = ((M.native->enabled >> (4 + k)) & 1u) != 0u &&
-        all(sd == (k == 0 ? M.native->sdesc : k == 1 ? M.native->sdesc1 : k == 2 ? M.native->sdesc2 : M.native->sdesc3));
-    return k == 0 ? gcn_native_filter(M.native->image, M.native->samp, usable, t, s, unorm, u, v, value) :
-           k == 1 ? gcn_native_filter(M.native->image1, M.native->samp1, usable, t, s, unorm, u, v, value) :
-           k == 2 ? gcn_native_filter(M.native->image2, M.native->samp2, usable, t, s, unorm, u, v, value) :
-                    gcn_native_filter(M.native->image3, M.native->samp3, usable, t, s, unorm, u, v, value);
+    const uint4 want = k == 0 ? M.native->sdesc : k == 1 ? M.native->sdesc1 : k == 2 ? M.native->sdesc2 : k == 3 ? M.native->sdesc3 :
+                       k == 4 ? M.native->sdesc4 : k == 5 ? M.native->sdesc5 : k == 6 ? M.native->sdesc6 : M.native->sdesc7;
+    const bool usable = ((M.native->enabled >> uint(k < 4 ? 4 + k : 8 + k)) & 1u) != 0u && all(sd == want);
+    switch (k) {
+    case 0: return gcn_native_filter(M.native->image, M.native->samp, usable, t, s, unorm, u, v, value);
+    case 1: return gcn_native_filter(M.native->image1, M.native->samp1, usable, t, s, unorm, u, v, value);
+    case 2: return gcn_native_filter(M.native->image2, M.native->samp2, usable, t, s, unorm, u, v, value);
+    case 3: return gcn_native_filter(M.native->image3, M.native->samp3, usable, t, s, unorm, u, v, value);
+    case 4: return gcn_native_filter(M.native->image4, M.native->samp4, usable, t, s, unorm, u, v, value);
+    case 5: return gcn_native_filter(M.native->image5, M.native->samp5, usable, t, s, unorm, u, v, value);
+    case 6: return gcn_native_filter(M.native->image6, M.native->samp6, usable, t, s, unorm, u, v, value);
+    default: return gcn_native_filter(M.native->image7, M.native->samp7, usable, t, s, unorm, u, v, value);
+    }
 #else
     return false;
 #endif
@@ -1116,11 +1474,15 @@ GCN_FN uint gcn_quad_shuffle(thread GCNQuad& Q, thread GCNLane& L, uint value, u
 // returns colour target 0.
 inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTranslation& ps, const std::string& vsName,
                                        const std::string& psName, std::uint32_t psInputAddr, const std::uint32_t inputCntl[32], bool nativeTextures = false,
-                                       unsigned colorTargets = 1) {
+                                       unsigned colorTargets = 1, unsigned uintTargets = 0, unsigned intTargets = 0) {
     // `colorTargets`: bit k, colour attachment k receives MRT k (0 when the
     // program does not export it). Target 0 alone keeps the float4 return.
+    // `uintTargets`/`intTargets`: attachments in an integer format, which
+    // receive the exported bits as they are (GCN exports raw 32-bit values to
+    // integer targets); they need the struct return for their type.
     colorTargets = (colorTargets | 1u) & 0xffu;
-    const bool mrt = colorTargets != 1u;
+    uintTargets &= colorTargets; intTargets &= colorTargets & ~uintTargets;
+    const bool mrt = colorTargets != 1u || uintTargets || intTargets;
     std::uint32_t flatParams = 0;
     for (unsigned a = 0; a < 32; ++a)
         if (((ps.attributes >> a) & 1) && ((ps.flat >> a) & 1) && !(inputCntl[a] & 0x20)) flatParams |= 1u << (inputCntl[a] & 0x1f);
@@ -1134,7 +1496,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     for (unsigned p = 0; p < 32; ++p)
         if ((vs.params >> p) & 1) s += "    L.param[" + std::to_string(p) + "] = float4(0.0f);\n";
     s += "    for (uint k = 0u; k < 16u; ++k) L.user[k] = D.vsUser[k];\n"
-         "    L.vinit[0] = index; L.vinit[3] = iid;\n"
+         // v1/v2: the instance divided by VGT_INSTANCE_STEP_RATE_0/1 (0 in a
+         // state left unset reads as 1); v3: the instance.
+         "    L.vinit[0] = index; L.vinit[1] = iid / max(1u, D.stepRate[0]); L.vinit[2] = iid / max(1u, D.stepRate[1]); L.vinit[3] = iid;\n"
          "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u }; M.s = S;\n"
          "    " + vsName + "(L, M, Q);\n"
          "    GCNVaryings o; o.position = L.pos;\n";
@@ -1169,7 +1533,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
     if (mrt) {
         s += "struct GCNFragmentMRT {";
         for (unsigned c = 0; c < 8; ++c)
-            if ((colorTargets >> c) & 1) s += " float4 c" + std::to_string(c) + " [[color(" + std::to_string(c) + ")]];";
+            if ((colorTargets >> c) & 1)
+                s += std::string((uintTargets >> c) & 1 ? " uint4" : (intTargets >> c) & 1 ? " int4" : " float4") + " c" + std::to_string(c) +
+                     " [[color(" + std::to_string(c) + ")]];";
         s += ps.mayKill ? " uint coverage [[sample_mask]]; };\n" : " };\n";
     }
     s += std::string("fragment ")+(mrt ? "GCNFragmentMRT" : ps.mayKill ? "GCNFragment" : "float4")+
@@ -1218,7 +1584,9 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         for (unsigned c = 0; c < 8; ++c) {
             if (!((colorTargets >> c) & 1)) continue;
             const bool exported = c == 0 || ((ps.colors >> c) & 1);
-            s += "    out.c" + std::to_string(c) + " = " + (exported ? "L.color[" + std::to_string(c) + "]" : std::string("float4(0.0f)")) + ";\n";
+            const std::string value = exported ? "L.color[" + std::to_string(c) + "]" : std::string("float4(0.0f)");
+            s += "    out.c" + std::to_string(c) + " = " + ((uintTargets >> c) & 1 ? "as_type<uint4>(" + value + ")" :
+                                                           (intTargets >> c) & 1 ? "as_type<int4>(" + value + ")" : value) + ";\n";
         }
         if (ps.mayKill) s += "    out.coverage = L.killed ? 0u : 0xffffffffu;\n";
         s += "    return out;\n}\n";
@@ -1236,5 +1604,109 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         replace("D.rangeCount }", "D.rangeCount, &N }");
     }
     return s;
+}
+// Metal compiles every function of a library's source: the prelude (47 KB:
+// the software sampler, tiling, every format) went into each pipeline, a
+// depth-only vertex program of 2 KB included. Keeps the functions (GCN_FN or
+// inline) the entry points reach, directly or through others, and drops the
+// rest and the comments. Source it cannot parse comes back unchanged.
+inline std::string gcnPruneMetal(const std::string& in) {
+    std::string s;
+    s.reserve(in.size());
+    for (std::size_t i = 0; i < in.size();) {
+        if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '/') {
+            std::size_t e = in.find('\n', i);
+            if (e == std::string::npos) e = in.size();
+            // A comment ending in a backslash continues: kept as it is.
+            if (in[e - 1] == '\\') s.append(in, i, e - i);
+            i = e;
+        } else if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '*') {
+            const std::size_t e = in.find("*/", i + 2);
+            if (e == std::string::npos) return in;
+            s += ' ';
+            i = e + 2;
+        } else s += in[i++];
+    }
+    auto word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+    const std::size_t n = s.size();
+    // Skips a preprocessor line (with its continuations) starting at i.
+    auto directiveEnd = [&](std::size_t i) {
+        for (;;) {
+            std::size_t e = s.find('\n', i);
+            if (e == std::string::npos) return n;
+            if (e == 0 || s[e - 1] != '\\') return e;
+            i = e + 1;
+        }
+    };
+    auto lineStart = [&](std::size_t i) {
+        while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t')) --i;
+        return i == 0 || s[i - 1] == '\n';
+    };
+    struct Def { std::string name; std::size_t begin, body, end; };
+    std::vector<Def> defs;
+    int depth = 0;
+    for (std::size_t i = 0; i < n;) {
+        const char c = s[i];
+        if (c == '#' && lineStart(i)) { i = directiveEnd(i); continue; }
+        if (c == '{') ++depth;
+        else if (c == '}') { if (--depth < 0) return in; }
+        else if (depth == 0 && (s.compare(i, 7, "GCN_FN ") == 0 || s.compare(i, 7, "inline ") == 0) && (i == 0 || !word(s[i - 1]))) {
+            const std::size_t open = s.find('(', i);
+            if (open == std::string::npos) return in;
+            std::size_t last = open;
+            while (last > i && !word(s[last - 1])) --last;
+            std::size_t first = last;
+            while (first > i && word(s[first - 1])) --first;
+            if (first == last) return in;
+            std::size_t j = open;
+            int inner = 0;
+            for (; j < n; ++j) {
+                if (s[j] == '#' && lineStart(j)) { j = directiveEnd(j); if (j == n) break; continue; }
+                if (s[j] == ';' && inner == 0) break;
+                if (s[j] == '{') ++inner;
+                else if (s[j] == '}' && --inner == 0) break;
+            }
+            if (j >= n) return in;
+            defs.push_back({s.substr(first, last - first), i, last, j + 1});
+            i = j + 1;
+            continue;
+        }
+        ++i;
+    }
+    if (depth != 0 || defs.empty()) return in;
+    std::unordered_map<std::string, std::vector<std::size_t>> byName;
+    for (std::size_t k = 0; k < defs.size(); ++k) byName[defs[k].name].push_back(k);
+    std::vector<std::string> work;
+    std::unordered_set<std::string> kept;
+    auto scan = [&](std::size_t from, std::size_t to) {
+        for (std::size_t i = from; i < to;) {
+            if (!word(s[i])) { ++i; continue; }
+            std::size_t e = i;
+            while (e < to && word(s[e])) ++e;
+            if (!std::isdigit(static_cast<unsigned char>(s[i]))) {
+                std::string id = s.substr(i, e - i);
+                if (byName.count(id) && kept.insert(id).second) work.push_back(std::move(id));
+            }
+            i = e;
+        }
+    };
+    std::size_t at = 0;
+    for (const auto& d : defs) { scan(at, d.begin); at = d.end; }
+    scan(at, n);
+    while (!work.empty()) {
+        const std::string name = std::move(work.back());
+        work.pop_back();
+        for (std::size_t k : byName[name]) scan(defs[k].body, defs[k].end);
+    }
+    std::string out;
+    out.reserve(n);
+    at = 0;
+    for (const auto& d : defs) {
+        if (kept.count(d.name)) continue;
+        out.append(s, at, d.begin - at);
+        at = d.end;
+    }
+    out.append(s, at, n - at);
+    return out;
 }
 } // namespace maxps4::gpu

@@ -16,23 +16,67 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <string>
+#include <unordered_map>
 
 namespace maxps4::gpu {
 struct PM4Range { std::uint64_t base = 0, size = 0; };
+
+// At most `limit` ranges covering all of `ranges`: the two neighbours with the
+// smallest gap between them are joined (gap included) until few enough are
+// left. A draw's state holds 16 ranges; CoD's scene draws read more.
+inline std::vector<PM4Range> coalesceRanges(std::vector<PM4Range> ranges, std::size_t limit) {
+    std::sort(ranges.begin(), ranges.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
+    while (limit && ranges.size() > limit) {
+        std::size_t best = 0;
+        std::uint64_t bestGap = UINT64_MAX;
+        for (std::size_t k = 0; k + 1 < ranges.size(); ++k) {
+            const std::uint64_t end = ranges[k].base + ranges[k].size;
+            const std::uint64_t gap = ranges[k + 1].base > end ? ranges[k + 1].base - end : 0;
+            if (gap < bestGap) { bestGap = gap; best = k; }
+        }
+        const std::uint64_t end = std::max(ranges[best].base + ranges[best].size, ranges[best + 1].base + ranges[best + 1].size);
+        ranges[best].size = end - ranges[best].base;
+        ranges.erase(ranges.begin() + std::ptrdiff_t(best) + 1);
+    }
+    return ranges;
+}
 
 struct PM4ScalarLoad { std::uint64_t pc, address; std::uint32_t count; std::array<std::uint32_t, 16> words; };
 
 class PM4ResourceScanner {
 public:
     explicit PM4ResourceScanner(const GCNMemory& memory, bool captureImages = false)
-        : memory_(memory), wave_(memory, 1, &cache_), captureImages_(captureImages) {}
+        : memory_(memory), wave_(memory, 1, &cache_), captureImages_(captureImages) {
+        wave_.lenient = true; // an unsupported instruction must not hide the resources after it
+    }
     PM4ResourceScanner(const PM4ResourceScanner&) = delete;
     PM4ResourceScanner& operator=(const PM4ResourceScanner&) = delete;
     // Valid until the next scan. Only storage is reused: code, descriptors and
     // guest values are read again on every draw. Not a concurrent scanner.
+    // Decoded instructions are kept from draw to draw (CoD's missions: 44 us a
+    // draw, mostly re-reading and decoding the same programs through the guest
+    // memory reader); they are dropped when a program's first words change.
     const std::vector<PM4Range>& scan(const PM4Draw& d) {
+        checkCode(d.vs); checkCode(d.ps);
+        if (d.vsUserCount >= 2) checkCode(std::uint64_t(d.vsUser[0]) | std::uint64_t(d.vsUser[1]) << 32);
+        return scanDraw(d);
+    }
+private:
+    std::unordered_map<std::uint64_t, std::array<std::uint32_t, 8>> heads_;
+    void checkCode(std::uint64_t address) {
+        if (!address) return;
+        std::array<std::uint32_t, 8> head{};
+        if (!memory_.read(address, head.data(), sizeof head)) return;
+        const auto known = heads_.find(address);
+        if (known != heads_.end() && known->second == head) return;
+        // Another program where one was: every decoded instruction may be stale.
+        if (known != heads_.end() || cache_.size() > (1u << 20)) { cache_.clear(); heads_.clear(); }
+        heads_[address] = head;
+    }
+    const std::vector<PM4Range>& scanDraw(const PM4Draw& d) {
     constexpr std::uint64_t largest = 256ull << 20;
-    found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); scalarLoads_.clear();
+    found_.clear(); merged_.clear(); images_.clear(); samplers_.clear(); scalarLoads_.clear();
     auto note = [&](std::uint64_t base, std::uint64_t bytes) {
         if (bytes && bytes <= largest && base + bytes > base) found_.push_back({base, bytes});
     };
@@ -112,11 +156,13 @@ public:
     }
     return merged_;
     }
+public:
     // A dispatch: one lane (group 0, thread 0) of its program, whose stores
     // are not written; their resources are also given by stored(). Images
     // the program addresses are captured whatever captureImages.
     const std::vector<PM4Range>& scan(const PM4Dispatch& c) {
-        found_.clear(); merged_.clear(); cache_.clear(); images_.clear(); samplers_.clear(); scalarLoads_.clear(); stored_.clear(); dispatchError_.clear();
+        checkCode(c.program);
+        found_.clear(); merged_.clear(); images_.clear(); samplers_.clear(); scalarLoads_.clear(); stored_.clear(); dispatchError_.clear();
         constexpr std::uint64_t largest = 256ull << 20;
         auto& wave = wave_;
         wave.reset();

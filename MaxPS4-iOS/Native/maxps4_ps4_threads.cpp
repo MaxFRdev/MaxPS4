@@ -1,6 +1,7 @@
 #include "maxps4_ps4_threads.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 
 namespace maxps4 {
 using namespace ps4;
@@ -825,6 +826,30 @@ Error PS4Threads::sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bo
     sema.count -= count;
     return ok;
 }
+Error PS4Threads::sema_wait_until(uint64_t handle, std::chrono::system_clock::time_point deadline) {
+    std::unique_lock<std::mutex> lock(guard_);
+    auto found = std::find_if(semas_.begin(), semas_.end(), [&](const Sema& s) { return s.token && s.token == handle; });
+    if (found == semas_.end()) return srch;
+    Sema& sema = *found;
+    if (sema.count >= 1) { --sema.count; return ok; }
+    const uint64_t generation = sema.generation;
+    ++sema.waiters;
+    auto ready = [&] { return interrupted_ || sema.token != handle || sema.generation != generation || sema.count >= 1; };
+    const bool done = changed_.wait_until(lock, deadline, ready);
+    if (sema.token == handle) --sema.waiters;
+    if (interrupted_) return intr;
+    if (sema.token != handle || sema.generation != generation) return canceled;
+    if (!done || sema.count < 1) return timedout;
+    --sema.count;
+    return ok;
+}
+Error PS4Threads::sema_value(uint64_t handle, int32_t& value) {
+    std::lock_guard<std::mutex> lock(guard_);
+    auto found = std::find_if(semas_.begin(), semas_.end(), [&](const Sema& s) { return s.token && s.token == handle; });
+    if (found == semas_.end()) return srch;
+    value = found->count;
+    return ok;
+}
 Error PS4Threads::sema_signal(uint64_t handle, int32_t count) {
     {
         std::lock_guard<std::mutex> lock(guard_);
@@ -927,3 +952,33 @@ Error PS4Threads::flag_cancel(uint64_t handle, uint64_t pattern, uint64_t waiter
     return ok;
 }
 } // namespace maxps4
+
+std::string maxps4::PS4Threads::describe_mutex(uint64_t slot) {
+    std::lock_guard<std::mutex> lock(guard_);
+    const Mutex* mutex = lookup(slot);
+    if (!mutex) return {};
+    return "détenu par le thread " + std::to_string(mutex->owner) + ", type " + std::to_string(mutex->type) +
+           ", " + std::to_string(mutex->count) + " fois";
+}
+std::string maxps4::PS4Threads::describe_sema(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(guard_);
+    for (const auto& sema : semas_)
+        if (sema.token && sema.token == handle)
+            return "compte " + std::to_string(sema.count) + "/" + std::to_string(sema.max) +
+                   ", " + std::to_string(sema.waiters) + " en attente";
+    return {};
+}
+std::string maxps4::PS4Threads::describe_equeue(uint64_t handle) {
+    std::lock_guard<std::mutex> lock(guard_);
+    const Equeue* queue = find_equeue(handle);
+    if (!queue) return {};
+    std::string out;
+    for (const auto& event : queue->events) {
+        if (!event.used) continue;
+        char item[64];
+        std::snprintf(item, sizeof item, "%s%d/0x%llx%s", out.empty() ? "" : " ", int(event.filter),
+                      (unsigned long long)event.id, event.triggered ? "!" : "");
+        out += item;
+    }
+    return out.empty() ? "aucun événement" : "événements " + out;
+}

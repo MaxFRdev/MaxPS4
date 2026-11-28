@@ -78,6 +78,7 @@ struct GameMetalState {
     id<MTLSharedEvent> displayEvent;
     std::atomic<uint64_t> displayEventValue{0};
     std::string error;
+    std::string drawRefusal;
     // Keep at most two render submissions ahead of the GPU. Metal preserves
     // queue order; upload buffers remain owned by their command buffers.
     std::deque<id<MTLCommandBuffer>> inflight;
@@ -85,9 +86,14 @@ struct GameMetalState {
     // Display copies: flipped buffers found among the colour targets or not
     // (then what the game shows was never drawn by Metal), and the last one.
     unsigned shown = 0, absent = 0;
-    uint64_t lastShown = 0;
+    uint64_t lastShown = 0, otherShown = 0; // The last flipped buffer, and the one before it.
+    // Display copies, reused in turn (a new 8 MB texture every frame cost
+    // milliseconds of CPU): three, as a swap chain, while their size holds.
+    id<MTLTexture> displayRing[3] = {nil, nil, nil};
+    unsigned displayNext = 0;
     // Compute dispatches run as kernels, or refused (and skipped) with the last reason.
     unsigned computeRun = 0, computeRefused = 0;
+    std::map<std::string, unsigned> computeReasons; // refusals by reason (addresses removed)
     // Waits for compute results inside submissions, and how long batches took.
     unsigned barriers = 0, batchBarriers = 0, mostBarriers = 0, batches = 0, slowBatches = 0;
     double barrierMs = 0;
@@ -116,37 +122,104 @@ struct GameMetalState {
     std::atomic<unsigned> phaseDraw{0};
     std::atomic<unsigned long long> phasePS{0};
     void enter(int p) { phase = p; phaseSince = Clock::now().time_since_epoch().count(); }
+    // The report (thousands of lines with program listings) was rebuilt on
+    // every submission and every displayed frame, under the lock: ~12 ms a
+    // frame. It is rebuilt at most every 250 ms, and at once after a failure.
+    Clock::time_point reportAt{};
+    bool reportDue() {
+        const auto now = Clock::now();
+        if (error.empty() && now - reportAt < std::chrono::milliseconds(250)) return false;
+        reportAt = now; return true;
+    }
+    // The report's C++ strings hold UTF-8 (accents, "·"): %s read them in the
+    // system's C string encoding and printed "test√©s"; they go through %@.
+    static NSString* U(const std::string& text) { return [NSString stringWithUTF8String:text.c_str()] ?: @""; }
     NSString* report() const {
         const unsigned* m = renderer.nativeMisses;
         NSString* native = nativeTextures ? [NSString stringWithFormat:
-            @"\nTextures natives : %u dessins, %u textures (%u images rendues par le GPU) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%s",
-            renderer.nativeDraws, renderer.nativeViews, renderer.targetReads, m[0], m[1], m[2], m[3], m[4],
-            renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", renderer.nativeLastMiss.c_str()] : @"";
+            @"\nTextures natives : %u dessins, %u textures (%u images rendues par le GPU, %u liaisons réutilisées) · refus : %u sans T#, %u format, %u hors plage, %u alignement, %u vue Metal%@%@",
+            renderer.nativeDraws, renderer.nativeViews, renderer.targetReads, renderer.nativeArgumentsShared, m[0], m[1], m[2], m[3], m[4],
+            renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", U(renderer.nativeLastMiss)] : @"";
         const std::string refusal = renderer.pipelineError();
         const std::string pending = renderer.pipelineStatus();
-        native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés · lectures directes %u sur %u%s%s%s%@",
-            renderer.pipelinesBuilt, renderer.pipelinesReplaced, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
+        native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés · %u dessins de profondeur sans programme pixel (%u programmes non traduits) · traduction GCN %.0f ms, %u réutilisées, %u remises à plus tard%@ · lectures directes %u sur %u%@%@%@%@",
+            renderer.pipelinesBuilt, renderer.pipelinesReplaced, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred, renderer.depthOnlyShared, renderer.depthOnlyUntranslated,
+            renderer.translateMs, renderer.translationsReused, renderer.translationsPutOff,
+            renderer.encodedDraws ? [NSString stringWithFormat:@"\nCoût CPU par dessin : %.0f µs (analyse %.0f µs, copies %.0f µs, nouveaux buffers %.0f µs, textures décodées %.0f µs : %u) sur %u dessins, %.1f s en tout",
+                1000 * renderer.encodeMs / renderer.encodedDraws, 1000 * renderer.scanMs / renderer.encodedDraws,
+                1000 * renderer.copyMs / renderer.encodedDraws, 1000 * renderer.allocateMs / renderer.encodedDraws,
+                1000 * renderer.textureMs / renderer.encodedDraws, renderer.texturesDecoded,
+                renderer.encodedDraws, renderer.encodeMs / 1000] : @"",
             renderer.scalarLoadsDirect, renderer.scalarLoadsAll,
-            refusal.empty() ? "" : " · dernier refus : ", refusal.c_str(), pending.c_str(), native];
-        native = [NSString stringWithFormat:@"\nBarrières compute : %u (%u au plus par lot) · remplissages %u (%u refus%s%s) · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%s%s%@",
-            barriers, mostBarriers, renderer.fillsDone, renderer.fillsRefused, renderer.fillRefusal.empty() ? "" : ", dernier : ", renderer.fillRefusal.c_str(), barrierMs, renderer.dispatchCopyMs, double(renderer.dispatchCopyBytes) / (1 << 20),
+            U(refusal.empty() ? "" : " · dernier refus : "), U(refusal), U(pending), native];
+        if (renderer.untranslatedDraws)
+            native = [NSString stringWithFormat:@"\nProgrammes non traduits : %u dessins écartés · dernier : %@ · par raison :%@%@",
+                renderer.untranslatedDraws, U(renderer.lastUntranslated), U(renderer.untranslatedSummary()), native];
+        native = [NSString stringWithFormat:@"\nBarrières compute : %u (%u au plus par lot) · remplissages %u (%u refus%@%@) · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%@%@%@",
+            barriers, mostBarriers, renderer.fillsDone, renderer.fillsRefused, U(renderer.fillRefusal.empty() ? "" : ", dernier : "), U(renderer.fillRefusal), barrierMs, renderer.dispatchCopyMs, double(renderer.dispatchCopyBytes) / (1 << 20),
             renderer.writebackMs, double(renderer.writebackBytes) / (1 << 20), batches, slowBatches,
-            programCosts.empty() ? "" : "\nGPU par programme, un lot :", programCosts.c_str(), native];
-        return [NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés, %u grandes zones partagées (%u lues sans copie)\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%s%s · %u kernels · %u images synchronisées · dernier : %s\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%s\nÉchantillons dessinés par dessin (dernier lot) :%s\nDessins du dernier lot :%s\nProgrammes des premiers dessins :%s\nDernier ignoré : %s\nDernier calcul : %s\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@%@",
+            U(programCosts.empty() ? "" : "\nGPU par programme, un lot :"), U(programCosts), native];
+        native = [NSString stringWithFormat:@"\nDerniers dessins dans l'image affichée 0x%llx :%@%@",
+            (unsigned long long)lastShown, U(renderer.drawsInto(lastShown)), native];
+        if (renderer.coalescedDraws || renderer.rangeRefusedDraws)
+            native = [NSString stringWithFormat:@"\nDessins de plus de 16 zones mémoire : %u avec zones jointes, %u écartés (plus de 8 Mio à copier en trop)%@",
+                renderer.coalescedDraws, renderer.rangeRefusedDraws, native];
+        if (renderer.nativeOnlyPrograms)
+            native = [NSString stringWithFormat:@"\nProgrammes sans échantillonnage logiciel (%zu échantillons ou plus) : %u%@",
+                renderer.manySamples, renderer.nativeOnlyPrograms, native];
+        if (const std::string probes = renderer.gpuProbes(); !probes.empty())
+            native = [NSString stringWithFormat:@"\nPixel central lu sur le GPU après chaque dessin (octets de la texture) :%@%@", U(probes), native];
+        if (!renderer.fades.empty()) {
+            std::string fades;
+            for (const auto& line : renderer.fades) fades += line;
+            native = [NSString stringWithFormat:@"\nQuads plein écran au fil du temps :%@%@", U(fades), native];
+        }
+        if (otherShown)
+            native = [NSString stringWithFormat:@"\nDerniers dessins dans l'image affichée avant 0x%llx :%@%@",
+                (unsigned long long)otherShown, U(renderer.drawsInto(otherShown)), native];
+        // What most likely keeps the image from showing, first: the rest of the
+        // report is hundreds of lines.
+        std::string summary;
+        auto point = [&](const std::string& text) { summary += "\n  - " + text; };
+        if (renderer.pipelinesPending() > 50 || renderer.drawsDeferred > 10000)
+            point("compilation Metal en retard : " + std::to_string(renderer.pipelinesPending()) + " pipelines en attente, " +
+                  std::to_string(renderer.drawsDeferred) + " dessins reportés (la scène manque tant qu'ils compilent)");
+        if (renderer.untranslatedDraws)
+            point(std::to_string(renderer.untranslatedDraws) + " dessins écartés, programme non traduit : " + renderer.lastUntranslated);
+        if (computeRefused) {
+            std::string reasons;
+            for (const auto& [why, count] : computeReasons) reasons += "\n      " + std::to_string(count) + " × " + why;
+            point(std::to_string(computeRefused) + " calculs refusés, par raison :" + reasons);
+        }
+        if (const std::string lost = stats.ignoredReport(); !lost.empty()) point("paquets PM4 sans effet" + lost);
+        if (targetPixels.find(" 224 7 63 252") != std::string::npos || targetPixels.find(" 0 126 0 126") != std::string::npos)
+            point("une cible contient des NaN (une passe a lu des constantes ou une image à zéro)");
+        if (renderer.rangeRefusedDraws) point(std::to_string(renderer.rangeRefusedDraws) + " dessins écartés : trop de mémoire à copier");
+        if (!error.empty()) point("rendu arrêté : " + error);
+        NSString* head = summary.empty() ? @"" : [NSString stringWithFormat:@"À regarder d'abord :%@\n", U(summary)];
+        return [head stringByAppendingString:[NSString stringWithFormat:@"Metal : %u dessins, %u rendus, %u échecs, %u passes, %u buffers créés, %u réutilisés, %u grandes zones partagées (%u lues sans copie)\nIgnorés : %u dessins sans cible couleur · %zu cibles\nCalculs : %u reçus, %u exécutés, %u sans effet visible, %u refusés%@%@ · %u kernels (%u avec LDS) · %u images synchronisées · dernier : %@\nPixel central affiché : R %u V %u B %u A %u\nPixel central des cibles (octets dans l'ordre de la texture) :%@\nÉchantillons dessinés par dessin (dernier lot) :%@\nDessins du dernier lot :%@\nProgrammes des premiers dessins :%@\nDernier ignoré : %@\nDernier calcul : %@\nAffichage : %u images copiées, %u sans cible Metal (dernière 0x%llx)\nDernier lot : CPU %.2f ms · GPU %@ ms · attente %.2f ms\nCopie image : CPU %.2f ms · GPU %@ ms%@%@",
             stats.draws, stats.rendered, stats.failed, renderer.renderPasses, renderer.buffersBuilt, renderer.buffersReused, renderer.rangesShared, renderer.rangesMapped,
             stats.skipped, renderer.targetCount(), stats.dispatches, computeRun - renderer.dispatchesWithoutEffect,
             renderer.dispatchesWithoutEffect, computeRefused,
-            computeError.empty() ? "" : " : ", computeError.c_str(), renderer.kernelsBuilt, renderer.targetsSynced,
-            renderer.lastDispatchNote().empty() ? "aucun détail" : renderer.lastDispatchNote().c_str(),
-            (centre >> (centreBGRA ? 16 : 0)) & 0xff, (centre >> 8) & 0xff, (centre >> (centreBGRA ? 0 : 16)) & 0xff, centre >> 24, targetPixels.c_str(),
-            samples.c_str(), lastDraws.empty() ? " aucun" : lastDraws.c_str(), renderer.programListings.c_str(), (stats.lastSkipped + stats.depthReport() + renderer.depthReport() + stats.ignoredReport()).c_str(), stats.lastDispatch.c_str(), shown, absent, (unsigned long long)lastShown,
+            U(computeError.empty() ? "" : " : "), U(computeError), renderer.kernelsBuilt, renderer.ldsKernelsBuilt, renderer.targetsSynced,
+            U(renderer.lastDispatchNote().empty() ? std::string("aucun détail") : renderer.lastDispatchNote()),
+            (centre >> (centreBGRA ? 16 : 0)) & 0xff, (centre >> 8) & 0xff, (centre >> (centreBGRA ? 0 : 16)) & 0xff, centre >> 24, U(targetPixels),
+            U(samples), U(lastDraws.empty() ? std::string(" aucun") : lastDraws), U(renderer.programListings), U(stats.lastSkipped + stats.depthReport() + renderer.depthReport() + stats.ignoredReport()), U(stats.lastDispatch), shown, absent, (unsigned long long)lastShown,
             encodeMs, gpuText(renderGpuMs), waitMs, copyMs, gpuText(copyGpuMs), native,
             // Why rendering stopped (the draw that failed is in no batch list).
-            error.empty() ? @"" : [NSString stringWithFormat:@"\nÉchec Metal : %s", error.c_str()]];
+            error.empty() ? (drawRefusal.empty() ? @"" : [NSString stringWithFormat:@"\nDernier dessin écarté : %@", U(drawRefusal)])
+                          : [NSString stringWithFormat:@"\nÉchec Metal : %@", U(error)]]];
     }
     GameMetalState(id<MTLDevice> device, MaxPS4GameMemoryReader reader,
                    MaxPS4GameMemoryWriter writer, bool nativeTextures)
-        : memory{[reader](uint64_t a, void* d, size_t n) { return bool(reader(a,d,n)); }, {}},
+        : memory{[reader](uint64_t a, void* d, size_t n) { return bool(reader(a,d,n)); },
+                 // DMA_DATA packets copy guest memory in submission order (PM4DrawCollector::dmaData).
+                 // The renderer's copies of what they overwrite are dropped.
+                 writer ? std::function<bool(uint64_t, const void*, size_t)>([this, writer](uint64_t a, const void* d, size_t n) {
+                     uint64_t failed = 0;
+                     if (writer(a, d, n, &failed) != 0) return false;
+                     renderer.guestWritten(a, n);
+                     return true; }) : std::function<bool(uint64_t, const void*, size_t)>{}},
           collector(memory, stats), renderer(device, memory, nil, 0, nativeTextures,
               writer ? std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>([writer](uint64_t a, const void* d, size_t n, uint64_t* f) { return int32_t(writer(a,d,n,f)); }) :
                        std::function<int32_t(uint64_t,const void*,size_t,uint64_t*)>{}), device(device),
@@ -260,6 +333,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         id<MTLCommandBuffer> command = [s.queue commandBuffer];
         if (!command) { s.error = "Metal command buffer allocation"; return -ENOMEM; }
         const unsigned failed = s.stats.failed;
+        bool encodeFailure = false;
         const unsigned rendered = s.stats.rendered;
         bool segmentEncoded = false;
         bool barrierFailure = false;
@@ -316,24 +390,34 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         s.enter(3);
         s.collector.execute(words, count, [&](const PM4Draw& draw) {
             ++s.phaseDraw; s.phasePS = draw.ps;
-            if (s.stats.failed != failed || barrierFailure) return;
+            // After a refused draw the rest of this submission is left out too:
+            // its state may be misread, and the next one starts afresh.
+            if (s.stats.failed != failed || barrierFailure || encodeFailure) return;
             if (s.renderer.encode(draw, command)) { ++s.stats.rendered; segmentEncoded = true; if (timing) timeDraw(draw.ps); }
             else {
                 char where[96];
                 std::snprintf(where, sizeof where, " (VS 0x%llx, PS 0x%llx, cible 0x%llx)", (unsigned long long)draw.vs,
                               (unsigned long long)draw.ps, (unsigned long long)draw.target);
                 s.stats.fail(s.renderer.error + where);
+                encodeFailure = true;
             }
         }, [&](const PM4Dispatch& dispatch) {
             // A dispatch that cannot run is skipped, as before compute support.
-            if (s.stats.failed != failed || barrierFailure) return;
+            // After a refused draw the rest of this submission is left out too:
+            // its state may be misread, and the next one starts afresh.
+            if (s.stats.failed != failed || barrierFailure || encodeFailure) return;
             const unsigned encodedBefore = s.renderer.dispatchesEncoded;
             if (s.renderer.dispatch(dispatch, command)) {
                 ++s.computeRun;
                 if (s.renderer.dispatchesEncoded != encodedBefore) segmentEncoded = true;
                 if (s.renderer.hasPendingGuestWrites()) flushComputeWrites();
             }
-            else { ++s.computeRefused; s.computeError = s.renderer.error; }
+            else {
+                ++s.computeRefused; s.computeError = s.renderer.error;
+                std::string reason = s.renderer.error;
+                if (const auto at = reason.find(" at 0x"); at != std::string::npos) reason.erase(at);
+                if (s.computeReasons.size() < 32 || s.computeReasons.count(reason)) ++s.computeReasons[reason];
+            }
         });
         s.enter(4);
         s.renderer.endBatch();
@@ -351,7 +435,13 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
             }
         }
         if (barrierFailure) return -EIO;
-        if (s.stats.failed != failed) { s.error = s.stats.error; return -ENOTSUP; }
+        // A draw that cannot be collected or encoded is left out and the game
+        // keeps running (CoD's loading screens ended on one unreadable index
+        // buffer); the report keeps the latest reason.
+        // A failed encode can leave the Metal encoder half built: that stays
+        // fatal, as before; only draws refused before encoding are left out.
+        if (encodeFailure) { s.error = s.stats.last; return -ENOTSUP; }
+        if (s.stats.failed != failed) s.drawRefusal = s.stats.last;
         const double encoding = elapsedMs(encodingStarted);
         const bool hasRenderWork = segmentEncoded || s.stats.rendered != rendered;
         if (hasRenderWork) {
@@ -366,7 +456,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                     if (captureFrameTiming && state.frameTimingProfiling &&
                         state.frameTimingGeneration == frameTimingGeneration)
                         state.frameTimings.recordGPU(gpuMs(completed));
-                    self.lastReport = state.report();
+                    if (state.reportDue()) self.lastReport = state.report();
                 }});
             }];
             s.inflight.push_back(command);
@@ -379,7 +469,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         ++s.batches; s.slowBatches += submit > 33.3;
         s.mostBarriers = std::max(s.mostBarriers, s.batchBarriers);
         self.submitMilliseconds += submit;
-        self.lastReport = s.report();
+        if (s.reportDue()) self.lastReport = s.report();
         // The native queue retires synchronization packets only after this return.
         return 0;
     }
@@ -391,19 +481,25 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
     std::unique_lock<std::mutex> lock(s.mutex);
     if (!s.error.empty() || !width || !height || width > 1920 || height > 1080) return nil;
     id<MTLTexture> source = s.renderer.target(address);
+    s.renderer.noteShown(address);
+    if (s.lastShown != address) s.otherShown = s.lastShown;
     s.lastShown = address;
     if (!source || source.width < width || source.height < height) {
         ++s.absent;
-        self.lastReport = s.report();
+        if (s.reportDue()) self.lastReport = s.report();
         return nil;
     }
     ++s.shown;
     const auto started = Clock::now();
-    auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
-        width:width height:height mipmapped:NO];
-    descriptor.usage = MTLTextureUsageShaderRead;
-    descriptor.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> texture = [s.device newTextureWithDescriptor:descriptor];
+    __strong id<MTLTexture>& slot = s.displayRing[s.displayNext++ % 3];
+    if (!slot || slot.width != width || slot.height != height || slot.pixelFormat != source.pixelFormat) {
+        auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
+            width:width height:height mipmapped:NO];
+        descriptor.usage = MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModePrivate;
+        slot = [s.device newTextureWithDescriptor:descriptor];
+    }
+    id<MTLTexture> texture = slot;
     id<MTLCommandBuffer> command = [s.queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = texture && command ? [command blitCommandEncoder] : nil;
     if (!blit) { s.error = "Metal display copy allocation"; return nil; }
@@ -444,12 +540,12 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                 } else {
                     recordDisplayCopy(state, completed, started, source, targets, pixel);
                 }
-                self.lastReport = state.report();
+                if (state.reportDue()) self.lastReport = state.report();
             }});
         }];
         [command commit];
         s.copyMs = elapsedMs(started); // CPU encoding only; GPU completion is asynchronous.
-        self.lastReport = s.report();
+        if (s.reportDue()) self.lastReport = s.report();
         return texture;
     }
 
@@ -462,7 +558,7 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
         s.error = "Metal display copy failed"; return nil;
     }
     recordDisplayCopy(s, command, started, source, targets, pixel);
-    self.lastReport = s.report();
+    if (s.reportDue()) self.lastReport = s.report();
     return texture;
 }
 - (id<MTLSharedEvent>)displayEvent { return state_->displayEvent; }
@@ -482,8 +578,19 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                                          "attente du GPU (écritures compute)", "écriture en mémoire du jeu"};
     static const char* const work[] = {"", " · compilation MSL", " · création du pipeline", " · traduction GCN"};
     const int compiling = s.renderer.compiling;
-    return [NSString stringWithFormat:@"Soumission en cours depuis %.1f s : %s, dessin %u (PS 0x%llx)%s\n%@", seconds, phases[phase],
-            s.phaseDraw.load(), s.phasePS.load(), compiling > 0 && compiling < 4 ? work[compiling] : "", self.lastReport];
+    // UTF-8 C strings go through %@ (see GameMetalState::U).
+    return [NSString stringWithFormat:@"Soumission en cours depuis %.1f s : %@, dessin %u (PS 0x%llx)%@\n%@", seconds,
+            [NSString stringWithUTF8String:phases[phase]], s.phaseDraw.load(), s.phasePS.load(),
+            [NSString stringWithUTF8String:compiling > 0 && compiling < 4 ? work[compiling] : ""], self.lastReport];
+}
+- (BOOL)displayProbes { return state_->renderer.displayProbes; }
+- (void)setDisplayProbes:(BOOL)enabled {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->renderer.displayProbes = enabled;
+}
+- (void)refreshReport {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    self.lastReport = state_->report();
 }
 - (BOOL)asynchronousPipelines { return state_->renderer.asyncPipelines; }
 - (void)setAsynchronousPipelines:(BOOL)asynchronous {

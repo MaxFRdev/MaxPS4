@@ -145,4 +145,44 @@ GCN_FN uint gcn_quad_shuffle(GCN_THREAD GCNQuad& Q, GCN_THREAD GCNLane& L, uint 
     Q.exchange(L.quadLane, value, all);
     return all[lane & 3];
 }
+// A compute program's LDS (GCNTranslation::lds), as the Metal build: one
+// lane runs per call here, so a barrier has nothing to wait for and a
+// group decision is this lane's.
+#define GCN_TG
+typedef uint gcn_lds_word;
+GCN_FN void gcn_barrier() {}
+GCN_FN bool gcn_group_any(uint*, bool b) { return b; }
+GCN_FN bool gcn_lds_inside(uint bytes, uint a) { return a < bytes && bytes - a >= 4u; }
+GCN_FN uint gcn_lds_load(uint* T, uint bytes, uint a) { a &= ~3u; return gcn_lds_inside(bytes, a) ? T[a >> 2] : 0u; }
+GCN_FN void gcn_lds_store(uint* T, uint bytes, uint a, uint value) { a &= ~3u; if (gcn_lds_inside(bytes, a)) T[a >> 2] = value; }
+GCN_FN uint gcn_lds_load_bits(uint* T, uint bytes, uint a, uint bits, bool sign) {
+    uint r = (gcn_lds_load(T, bytes, a) >> ((a & 3u) * 8u)) & ((1u << bits) - 1u);
+    if (sign && ((r >> (bits - 1u)) & 1u) != 0u) r |= ~((1u << bits) - 1u);
+    return r;
+}
+GCN_FN void gcn_lds_store_bits(uint* T, uint bytes, uint a, uint value, uint bits) {
+    const uint w = a & ~3u;
+    if (!gcn_lds_inside(bytes, w)) return;
+    const uint shift = (a & 3u) * 8u, mask = ((1u << bits) - 1u) << shift;
+    T[w >> 2] = (T[w >> 2] & ~mask) | ((value << shift) & mask);
+}
+GCN_FN uint gcn_lds_atomic(uint* T, uint bytes, uint a, uint kind, uint data, uint data2) {
+    a &= ~3u;
+    if (!gcn_lds_inside(bytes, a)) return 0u;
+    uint& p = T[a >> 2];
+    const uint old = p;
+    switch (kind) {
+    case 0: p = old + data; break;           case 1: p = old - data; break;
+    case 2: p = data - old; break;           case 3: p = old >= data ? 0u : old + 1u; break;
+    case 4: p = (old == 0u || old > data) ? data : old - 1u; break;
+    case 5: p = std::int32_t(old) < std::int32_t(data) ? old : data; break;
+    case 6: p = std::int32_t(old) > std::int32_t(data) ? old : data; break;
+    case 7: p = old < data ? old : data; break; case 8: p = old > data ? old : data; break;
+    case 9: p = old & data; break;           case 10: p = old | data; break;
+    case 11: p = old ^ data; break;          case 13: p = data; break;
+    case 16: p = old == data ? data2 : old; break;
+    default: break;
+    }
+    return old;
+}
 } // namespace maxps4::gpu::gcnrt

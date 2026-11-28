@@ -7,6 +7,9 @@ struct MaxPS4App: App {
     @AppStorage(MaxPS4Language.key) private var language = ""
 
     init() {
+        // Before anything else: the app may have closed during the last run.
+        maxps4_crash_log_install()
+        MaxPS4Reports.recoverClosures()
         // Once: TSO and native textures became on by default (Sonic Mania
         // stutters without TSO); values stored before, app-wide or per game,
         // are forgotten so every game starts from the new defaults.

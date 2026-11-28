@@ -45,7 +45,7 @@ enum MaxPS4StikRequest {
         guard !bundleID.isEmpty, pid > 0, mailbox != 0, mailbox % 8 == 0,
               nonce != 0, pageSize > 0, pageSize <= 16384,
               16384 % pageSize == 0, !script.isEmpty else { return nil }
-        let prefix = "const MAXPS4_MAILBOX=0x\(String(mailbox, radix: 16))n;const MAXPS4_NONCE=0x\(String(nonce, radix: 16))n;const MAXPS4_SIZES=[16384,16777216,\(pageSize)];\n"
+        let prefix = "const MAXPS4_MAILBOX=0x\(String(mailbox, radix: 16))n;const MAXPS4_NONCE=0x\(String(nonce, radix: 16))n;const MAXPS4_SIZES=[16384,536870912,\(pageSize)];\n"
         // StikDebug accepts base64url; avoid '+' ambiguity in query decoding.
         let data = Data((prefix + script).utf8).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
@@ -60,5 +60,25 @@ enum MaxPS4StikRequest {
             URLQueryItem(name: "script-data", value: data)
         ]
         return request.url
+    }
+}
+
+/// The game an automatic test run asks for, read once per launch.
+enum MaxPS4AutoLaunch {
+    static let fileName = "MaxPS4-autolaunch.txt"
+    static func consume(arguments: [String] = ProcessInfo.processInfo.arguments,
+                        environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let file = documents.appendingPathComponent(fileName)
+        if let text = try? String(contentsOf: file, encoding: .utf8) {
+            try? FileManager.default.removeItem(at: file) // One run per request.
+            let title = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty { return title }
+        }
+        if let index = arguments.firstIndex(of: "-MaxPS4AutoLaunch"), index + 1 < arguments.count {
+            return arguments[index + 1]
+        }
+        if let title = environment["MAXPS4_AUTOLAUNCH"], !title.isEmpty { return title }
+        return nil
     }
 }

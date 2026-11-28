@@ -15,7 +15,7 @@ using namespace gcn_test;
 namespace {
 constexpr std::uint64_t pixelProgram = 0x11000, texture = 0x14000, target = 0x18000;
 constexpr unsigned width = 16, height = 8;
-struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; };
+struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; std::uint32_t stepRate[2]; };
 struct Stream {
     std::vector<std::uint32_t> words;
     void set(std::uint8_t opcode, std::uint32_t offset, std::initializer_list<std::uint32_t> values) {

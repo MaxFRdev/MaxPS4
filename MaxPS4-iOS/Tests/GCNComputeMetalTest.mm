@@ -5,8 +5,10 @@
 #import <Metal/Metal.h>
 #include "../Native/GCNTranslator.hpp"
 #include "GCNTestPrograms.h"
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 using namespace maxps4::gpu;
 using namespace gcn_test;
 namespace {
@@ -115,6 +117,56 @@ int main() {
             }
             assert(expected.bytes[results + 64 * 31 + 36 - Arena::start] || expected.bytes[results + 64 * 31 + 37 - Arena::start]);
             std::puts("PASS GCN compute on Metal: three-operand integer instructions match the interpreter");
+        }
+        // LDS and s_barrier, 64 threads per group (two Apple SIMD groups): each
+        // thread stores its neighbour's id, written to LDS before the barrier.
+        {
+            Arena expected, actual;
+            loadLdsCS(expected); loadLdsCS(actual);
+            expected.put(ldsCS, 0x8f118610); actual.put(ldsCS, 0x8f118610); // s_lshl_b32 s17, s16, 6
+            std::uint32_t sgprs[16];
+            std::copy_n(computeSgprs, 16, sgprs);
+            sgprs[6] = 128; // records: two groups of 64
+            for (unsigned group = 0; group < 2; ++group) {
+                GCNWave wave(expected.memory, 64);
+                for (unsigned k = 0; k < 16; ++k) wave.s[k] = sgprs[k];
+                wave.s[16] = group;
+                for (unsigned lane = 0; lane < 64; ++lane) wave.v(0, lane) = lane;
+                assert(wave.run(ldsCS));
+            }
+            GCNTranslateOptions options;
+            options.stage = GCNStage::compute; options.name = "cs_lds"; options.userCount = 16;
+            const auto cs = translateGCN(actual.memory, ldsCS, options);
+            if (!cs || !cs.lds) { std::printf("FAIL LDS translation: %s\n", cs.error.c_str()); return 1; }
+            const std::string text = gcnMetalPrelude() + cs.source + gcnMetalComputeEntry("cs_lds", true);
+            id<MTLLibrary> kernels = [device newLibraryWithSource:[NSString stringWithUTF8String:text.c_str()] options:nil error:&error];
+            if (!kernels) { std::printf("FAIL LDS MSL: %s\n", error.localizedDescription.UTF8String); return 1; }
+            id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:[kernels newFunctionWithName:@"gcn_compute"] error:&error];
+            if (!pipeline) { std::printf("FAIL LDS pipeline: %s\n", error.localizedDescription.UTF8String); return 1; }
+            id<MTLBuffer> output = [device newBufferWithBytes:actual.bytes.data() length:actual.bytes.size() options:MTLResourceStorageModeShared];
+            DispatchState state{};
+            state.base = Arena::start; state.size = actual.bytes.size();
+            for (unsigned k = 0; k < 16; ++k) state.user[k] = sgprs[k];
+            state.userCount = 16; state.rsrc2 = 0x80; state.pad = 512; // LDS bytes
+            id<MTLCommandBuffer> run = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> stage = [run computeCommandEncoder];
+            [stage setComputePipelineState:pipeline];
+            [stage setBuffer:output offset:0 atIndex:0];
+            [stage setBytes:&state length:sizeof state atIndex:1];
+            [stage setThreadgroupMemoryLength:16 + 512 atIndex:0];
+            [stage dispatchThreadgroups:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [stage endEncoding];
+            [run commit];
+            [run waitUntilCompleted];
+            if (run.error) { std::printf("FAIL LDS GPU: %s\n", run.error.localizedDescription.UTF8String); return 1; }
+            const auto* stored = static_cast<const std::uint8_t*>(output.contents);
+            for (std::size_t k = 0; k < expected.bytes.size(); ++k) if (stored[k] != expected.bytes[k]) {
+                std::printf("FAIL LDS: byte 0x%zx is %u, not %u\n", k, stored[k], expected.bytes[k]);
+                return 1;
+            }
+            std::uint32_t last; std::memcpy(&last, expected.bytes.data() + computeBuffer + 4 * 127 - Arena::start, 4);
+            assert(last == 62);
+            std::puts("PASS GCN compute on Metal: LDS exchanged across a 64-thread group through s_barrier");
         }
     }
     return 0;

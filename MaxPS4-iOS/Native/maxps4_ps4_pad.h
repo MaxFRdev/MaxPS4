@@ -57,18 +57,21 @@ public:
         Slot& s = *found;
         if (!output || count < 1 || count > 64) return error(1);
         std::array<uint8_t, data_size> wire{};
-        // A press released before any read saw it is still reported once: a
-        // tap shorter than a frame would otherwise never reach the game.
+        const auto now = now_us();
+        // A press released before any read saw it is still reported: a tap
+        // shorter than a frame would otherwise never reach the game. It
+        // stays for 150 ms of reads (tap_until): CoD reads its pad from
+        // several places, and one read alone may not be the one that acts.
+        if (s.tapped && !s.unread && uint64_t(now) >= s.tap_until) s.tapped = 0;
         ps4::put_le(wire.data(), 0, s.connected ? s.buttons | s.tapped : 0, 4);
         for (size_t i = 0; i < 4; ++i) wire[4+i] = s.connected ? s.axes[i] : 128;
         wire[8] = s.connected ? s.l2 : 0; wire[9] = s.connected ? s.r2 : 0;
         ps4::put_le(wire.data(), 24, 0x3f800000, 4); // identity quaternion W
         wire[76] = s.connected ? 1 : 0;
-        const auto now = now_us();
         ps4::put_le(wire.data(), 80, uint64_t(now), 8);
         wire[104] = s.connections;
         if (!memory_.write(output, wire.data(), wire.size())) return error(1);
-        s.tapped = s.unread = 0; ++s.reads;
+        s.unread = 0; ++s.reads;
         if (s.pressed_at) { const uint64_t delay = uint64_t(now) - s.pressed_at; s.pressed_at = 0; ++s.press_reads; s.press_total += delay; s.press_most = std::max(s.press_most, delay); }
         return state ? 0 : 1;
     }
@@ -102,7 +105,9 @@ public:
         if (!connected) buttons = 0;
         if (buttons & ~s.buttons && !s.pressed_at) s.pressed_at = now_us();
         s.unread |= buttons & ~s.buttons;
-        s.tapped |= s.buttons & ~buttons & s.unread; s.unread &= buttons;
+        const uint32_t released = s.buttons & ~buttons & s.unread;
+        if (released) { s.tapped |= released; s.tap_until = uint64_t(now_us()) + 150000; }
+        s.unread &= buttons;
         // A disconnection (or a mode change that takes the player's input away)
         // drops presses the game has not read yet: none may surface later, on
         // a reconnection.
@@ -156,6 +161,7 @@ private:
         // When the oldest unread press came, and how long presses waited for a read.
         uint64_t pressed_at = 0, press_reads = 0, press_total = 0, press_most = 0;
         uint64_t reads = 0; // scePadRead/ReadState calls on this slot's handle
+        uint64_t tap_until = 0; // a released tap is reported until then
         std::array<uint8_t, 4> axes{{128,128,128,128}};
         uint8_t l2 = 0, r2 = 0, connections = 0;
     };

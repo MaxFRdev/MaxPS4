@@ -1,7 +1,9 @@
 #pragma once
+#include <string>
 #include "maxps4_ps4_abi.h"
 #include "maxps4_ps4_guest_memory.h"
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -18,6 +20,12 @@ namespace maxps4 {
 // leave 2 in their slot, which stays invalid.
 class PS4Threads final {
 public:
+    // For the status report: the mutex at `slot` as "owner N, type T, count C",
+    // or empty when no mutex is registered there.
+    std::string describe_mutex(uint64_t slot);
+    // Count/max of a semaphore, the events of an equeue (diagnostics).
+    std::string describe_sema(uint64_t handle);
+    std::string describe_equeue(uint64_t handle);
     // PS4 mutex types (scePthreadMutexattrSettype). Error-checking is the default.
     enum MutexType : uint32_t { error_check = 1, recursive = 2, normal = 3, adaptive = 4 };
     static constexpr uint64_t default_stack = 1024 * 1024, minimum_stack = 16 * 1024;
@@ -101,6 +109,10 @@ public:
     // `poll`: EBUSY instead of waiting.
     ps4::Error sema_wait(uint64_t handle, int32_t count, uint64_t timeout, bool poll);
     ps4::Error sema_signal(uint64_t handle, int32_t count);
+    // POSIX sem_timedwait: one unit, until `deadline` (CLOCK_REALTIME).
+    ps4::Error sema_wait_until(uint64_t handle, std::chrono::system_clock::time_point deadline);
+    // POSIX sem_getvalue: the count now.
+    ps4::Error sema_value(uint64_t handle, int32_t& value);
     ps4::Error sema_cancel(uint64_t handle, int32_t count, uint64_t waiters);
     // Wait modes: and 1, or 2, then clear all 0x10 or the waited bits 0x20.
     // Attribute 0x10 (single): a second concurrent waiter gets EPERM.

@@ -20,6 +20,29 @@ int main(int argc, char** argv) {
     if (!quad) std::printf("%s\n", quad.error.c_str());
     assert(quad && quad.colors == 3 && quad.attributes == 1 && quad.flat == 0 && quad.quad);
     assert(!quad.mayKill); // save EXEC, enable WQM, restore the original coverage
+    {
+        // v_movrels/v_movreld/v_movrelsd: M0 selects among the VGPRs after the base.
+        constexpr uint64_t relative = 0x11900;
+        arena.code(relative, {0xbefc0382,                    // s_mov_b32 m0, 2
+                              0x7e028704,                    // v_movrels_b32 v1, v4   (v1 = v6)
+                              0x7e048502,                    // v_movreld_b32 v2, v2   (v4 = v2)
+                              0x7e0a8908,                    // v_movrelsd_b32 v5, v8  (v7 = v10)
+                              0xbf810000});
+        GCNTranslateOptions rel; rel.stage = GCNStage::vertex; rel.name = "vs_relative";
+        const auto moved = translateGCN(arena.memory, relative, rel);
+        if (!moved) std::printf("%s\n", moved.error.c_str());
+        assert(moved && moved.source.find("case 2u: r = v6;") != std::string::npos &&
+               moved.source.find("case 2u: v4 = r;") != std::string::npos &&
+               moved.source.find("case 2u: r = v10;") != std::string::npos && moved.source.find("case 2u: v7 = r;") != std::string::npos);
+    }
+    {
+        // ds_swizzle_b32 v1, v0 offset:0x041f (bitmask: and 0x1f, or 0, xor 1).
+        constexpr uint64_t swizzle = 0x11a00;
+        arena.code(swizzle, {0xd8d4041f, 0x01000000, 0xbf810000});
+        const auto swapped = translateGCN(arena.memory, swizzle, ps);
+        if (!swapped) std::printf("%s\n", swapped.error.c_str());
+        assert(swapped && swapped.quad && swapped.source.find("(((L.quadLane & 0x1fu) | 0x0u) ^ 0x1u) & 3u") != std::string::npos);
+    }
     constexpr uint64_t coverageProgram=0x11800;
     arena.code(coverageProgram,{0xbeeb03ff,7,0xbe94047e,0xbefe0a7e,0xbefe0414,0xf800180f,0,0xbf810000});
     const auto prologue=translateGCN(arena.memory,coverageProgram,ps);
@@ -57,6 +80,24 @@ int main(int argc, char** argv) {
     const auto derivatives=translateGCN(arena.memory,coverageProgram,ps);
     if (!derivatives) std::printf("%s\n", derivatives.error.c_str());
     assert(derivatives && derivatives.source.find("gcn_sample(M, t, sm, false, gf(v6), gf(v7))")!=std::string::npos);
+    // v_writelane_b32 v1, s0, 1: in a pixel program, the quad lane the selector names.
+    arena.code(coverageProgram,{0xd2040001,0x00010200,0xf800180f,0x01010101,0xbf810000});
+    const auto written=translateGCN(arena.memory,coverageProgram,ps);
+    if (!written) std::printf("%s\n", written.error.c_str());
+    assert(written && written.source.find("== L.quadLane) v1 = ")!=std::string::npos);
+    // image_sample v[8:11], v[2:4] da: the slice (v4) picks the array layer or cube face.
+    arena.code(coverageProgram,{0xf0804f00,0x00400802,0xf800180f,0x0b0a0908,0xbf810000});
+    const auto layered=translateGCN(arena.memory,coverageProgram,ps);
+    if (!layered) std::printf("%s\n", layered.error.c_str());
+    assert(layered && layered.source.find("t = gcn_slice(t, gf(v4));")!=std::string::npos);
+    {
+        // An integer target gets the exported bits, typed, through the struct return.
+        std::uint32_t cntl[32] = {};
+        const std::string uintEntry = gcnMetalEntryPoints(embedded, quad, "vs_embedded", "ps_quad", 0x302, cntl, false, 1, 1);
+        assert(uintEntry.find("uint4 c0 [[color(0)]]") != std::string::npos && uintEntry.find("out.c0 = as_type<uint4>(L.color[0]);") != std::string::npos);
+        const std::string plain = gcnMetalEntryPoints(embedded, quad, "vs_embedded", "ps_quad", 0x302, cntl);
+        assert(plain.find("as_type<uint4>") == std::string::npos && plain.find("GCNFragmentMRT") == std::string::npos);
+    }
     GCNTranslateOptions fetch; fetch.stage = GCNStage::vertex; fetch.name = "vs_fetch";
     fetch.userCount = 4; fetch.userData[0] = std::uint32_t(fetchShader); fetch.userData[2] = std::uint32_t(vertexTable);
     const auto fetched = translateGCN(arena.memory, fetchVS, fetch);
@@ -65,6 +106,18 @@ int main(int argc, char** argv) {
     GCNTranslateOptions below = fetch; below.name = "vs_fetch_below"; below.userData[0] = std::uint32_t(fetchShaderBelow);
     const auto fetchedBelow = translateGCN(arena.memory, fetchVS, below);
     assert(fetchedBelow && fetchedBelow.position && fetchedBelow.params == 1);
+    // With a loop the dispatcher stays; straight, a call to a fetch shader
+    // above or below the VS runs its blocks in order, without the loop.
+    assert(fetched.source.find("while (running)") != std::string::npos);
+    Arena straightArena;
+    loadStraightFetchVS(straightArena);
+    GCNTranslateOptions straightOptions = fetch; straightOptions.name = "vs_straight";
+    const auto straight = translateGCN(straightArena.memory, fetchVS, straightOptions);
+    GCNTranslateOptions straightBelowOptions = below; straightBelowOptions.name = "vs_straight_below";
+    const auto straightBelow = translateGCN(straightArena.memory, fetchVS, straightBelowOptions);
+    assert(straight && straightBelow);
+    for (const auto* t : {&straight, &straightBelow})
+        assert(t->source.find("while (running)") == std::string::npos && t->source.find("if (pc == ") != std::string::npos);
     GCNTranslateOptions sizes; sizes.stage = GCNStage::vertex; sizes.name = "vs_resinfo";
     const auto resinfo = translateGCN(arena.memory, resinfoVS, sizes);
     if (!resinfo) std::printf("%s\n", resinfo.error.c_str());
@@ -85,10 +138,47 @@ int main(int argc, char** argv) {
     GCNTranslateOptions csAsPixel = cs; csAsPixel.stage = GCNStage::pixel;
     assert(translateGCN(arena.memory, computeCS, csAsPixel).error.find("buffer store outside a compute program") == 0);
     assert(gcnMetalComputeEntry("cs_copy").find("kernel void gcn_compute(") != std::string::npos);
+    // LDS and s_barrier: the group's LDS after Q, branches decided for the group.
+    loadLdsCS(arena);
+    GCNTranslateOptions ldsOptions = cs; ldsOptions.name = "cs_lds";
+    const auto shared = translateGCN(arena.memory, ldsCS, ldsOptions);
+    if (!shared) std::printf("%s\n", shared.error.c_str());
+    assert(shared && shared.lds && shared.stores);
+    assert(shared.source.find("GCN_TG gcn_lds_word* T, uint ldsBytes)") != std::string::npos);
+    assert(shared.source.find("gcn_lds_store(T, ldsBytes, a + 0u, v0)") != std::string::npos);
+    assert(shared.source.find("v3 = gcn_lds_load(T, ldsBytes, a + 0u)") != std::string::npos);
+    assert(shared.source.find("gcn_barrier();") != std::string::npos && shared.source.find("gcn_group_any(T, ") != std::string::npos);
+    assert(!copied.lds && copied.source.find("gcn_group_any") == std::string::npos);
+    assert(gcnMetalComputeEntry("cs_lds", true).find("threadgroup atomic_uint* gcn_group [[threadgroup(0)]]") != std::string::npos);
+    assert(gcnMetalComputeEntry("cs_lds", true).find("cs_lds(L, M, Q, gcn_group + 4, D.ldsBytes)") != std::string::npos);
+    // LDS in a vertex program is still refused.
+    GCNTranslateOptions ldsAsVertex = ldsOptions; ldsAsVertex.stage = GCNStage::vertex;
+    assert(translateGCN(arena.memory, ldsCS, ldsAsVertex).error.find("LDS access other than a swizzle") == 0);
     // The Metal prelude carries the shared runtime text.
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
+    // Pruning: only what the entry points reach, through others; overloads
+    // together; comments and preprocessor lines do not count as uses.
+    const std::string pruned = gcnPruneMetal(
+        "#define GCN_FN inline\n#if X\n// gcn_dead() in a comment\n#endif\n"
+        "GCN_FN uint gcn_leaf(uint a) { return a + 1u; }\n"
+        "GCN_FN uint gcn_mid(uint a) { if (a) { return gcn_leaf(a); } return 0u; } /* gcn_dead */\n"
+        "GCN_FN uint gcn_over(uint a) { return a; }\nGCN_FN float gcn_over(float a) { return a; }\n"
+        "GCN_FN uint gcn_dead(uint a) { return gcn_leaf(a); }\ninline float gcn_dead_too(float a) { return a; }\n"
+        "GCN_FN uint gcn_declared(uint a);\n"
+        "kernel void gcn_compute(uint i [[thread_position_in_grid]]) { (void)gcn_mid(gcn_over(i)); }\n");
+    assert(pruned.find("gcn_leaf(uint a)") != std::string::npos && pruned.find("gcn_mid(uint a)") != std::string::npos);
+    assert(pruned.find("gcn_over(uint a)") != std::string::npos && pruned.find("gcn_over(float a)") != std::string::npos);
+    assert(pruned.find("gcn_dead") == std::string::npos && pruned.find("gcn_declared") == std::string::npos);
+    assert(pruned.find("#define GCN_FN inline") != std::string::npos && pruned.find("kernel void gcn_compute(") != std::string::npos);
+    assert(gcnPruneMetal("GCN_FN uint f(uint a) { return a; ") == "GCN_FN uint f(uint a) { return a; ");
+    {
+        const std::string vsOnly = prelude + straight.source + gcnMetalComputeEntry("vs_straight");
+        const std::string kept = gcnPruneMetal(vsOnly);
+        assert(kept.size() < vsOnly.size() / 2 && kept.find("GCN_FN float4 gcn_sample(") == std::string::npos);
+        assert(kept.find("GCN_FN void vs_straight(") != std::string::npos);
+    }
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << copied.source;
-    std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << copied.source << shared.source << straight.source << straightBelow.source;
+    std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS, compute stores and LDS translated; refusals reported");
 }

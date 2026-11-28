@@ -9,8 +9,8 @@
 #include <cstdio>
 #include <vector>
 using namespace maxps4::gpu;
-struct NativeState { uint64_t base, size; uint32_t vs[16], ps[17], flags, count; uint64_t ranges[48]; };
-static_assert(sizeof(NativeState)==544,"draw-state layout");
+struct NativeState { uint64_t base, size; uint32_t vs[16], ps[17], flags, count; uint64_t ranges[48]; uint32_t stepRate[2]; };
+static_assert(sizeof(NativeState)==552,"draw-state layout");
 int main() {
     @autoreleasepool {
         id<MTLDevice> device=MTLCreateSystemDefaultDevice();

@@ -1049,7 +1049,8 @@ int main(int argc, char** argv) {
         auto last_fault_line = [&]() {
             std::ifstream in(efl_log);
             std::string line, last;
-            while (std::getline(in, line)) if (!line.empty()) last = line;
+            // The "  host:" line after each record names its host code.
+            while (std::getline(in, line)) if (!line.empty() && line.rfind("  host:", 0) != 0) last = line;
             return last;
         };
         auto hex = [](uint64_t v) { char b[32]; std::snprintf(b, sizeof b, "0x%llx", (unsigned long long)v); return std::string(b); };

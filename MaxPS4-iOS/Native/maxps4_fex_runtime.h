@@ -138,6 +138,10 @@ int32_t maxps4_fex_engine_audio_read(maxps4_fex_engine* engine, float* samples, 
 // AudioOut counters (any pointer may be null): Output calls, frames written,
 // frames dropped (ring full, no reader), silent frames read, open ports,
 // written frames with a non-zero sample.
+// libSceAjm jobs run and MP3 samples (per channel) decoded.
+int32_t maxps4_fex_engine_ajm_status(maxps4_fex_engine* engine, uint64_t* jobs, uint64_t* samples);
+// libSceAjm runs by outcome and the last run's sizes, as text (NUL-terminated).
+int32_t maxps4_fex_engine_ajm_note(maxps4_fex_engine* engine, char* text, size_t size);
 int32_t maxps4_fex_engine_audio_status(maxps4_fex_engine* engine, uint64_t* outputs,
     uint64_t* written, uint64_t* dropped, uint64_t* silent, uint32_t* ports, uint64_t* audible);
 // Owned linear VideoOut frame (raw RGBA/BGRA bytes, including row padding).
@@ -188,6 +192,8 @@ typedef struct maxps4_fex_thread_sample {
     uint32_t rip_count;
 } maxps4_fex_thread_sample;
 int32_t maxps4_fex_engine_sample_main_thread(maxps4_fex_engine *engine, maxps4_fex_thread_sample *sample);
+// Host call stacks of every live guest thread, for a frozen run (Apple only).
+int32_t maxps4_fex_engine_host_stacks(maxps4_fex_engine *engine, char *text, size_t capacity);
 // CPU profile of the main guest thread for the next run (diagnostic, off by
 // default; Apple devices only): sampled every 5 ms through Mach suspension.
 int32_t maxps4_fex_engine_set_profiling(maxps4_fex_engine *engine, uint32_t enabled);
@@ -231,6 +237,20 @@ typedef struct maxps4_fex_guest_fault {
     int32_t signal;
     int32_t code; // host si_code (previously a reserved 32-bit slot)
     uint64_t address, rip;
+    // Guest registers FEX last stored (block granularity, like rip), and the
+    // first stack words at RSP (stack_words of them were readable).
+    uint64_t rsp, rbp, rax, rdi, rsi;
+    uint64_t stack[16];
+    uint32_t stack_words;
+    uint64_t rbx, rcx, rdx, r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t at_rbx[4], at_rax[4], at_r12[4]; // Words at RBX, RAX and R12 when readable.
+    uint32_t at_words; // Bits 0, 1, 2: at_rbx, at_rax, at_r12 read.
+    // The host side (0 when unknown): PC, LR, 1 JIT code / 2 FEX dispatcher,
+    // the exact guest RIP of a fault in JIT code; and, for a guest thread
+    // other than the main one, its entry and initial stack.
+    uint64_t host_pc, host_lr, exact_rip;
+    uint32_t host_where;
+    uint64_t thread_entry, thread_rsp;
 } maxps4_fex_guest_fault;
 int32_t maxps4_fex_engine_last_guest_fault(const maxps4_fex_engine *engine,
                                            maxps4_fex_guest_fault *fault);
@@ -362,6 +382,16 @@ int32_t maxps4_fex_engine_console(maxps4_fex_engine *engine, char *text, size_t 
 // the loaded game's mmap window (0 if none).
 // Address space iOS still granted right after the game's reservation, in
 // 256 MiB steps (16 GiB at most).
+// The host's address-space bounds and its first mappings from the PS4
+// application area (0x1000000000) up to the mmap window, for a report.
+int32_t maxps4_fex_engine_host_map(maxps4_fex_engine *engine, char *text, size_t capacity);
+// After a run: 1 and the /app0 path and argv[0] its sceSystemServiceLoadExec
+// asked for (0: none; -ENAMETOOLONG: a buffer is too small).
+int32_t maxps4_fex_engine_exec_request(maxps4_fex_engine *engine, char *path, size_t path_capacity,
+                                       char *argument, size_t argument_capacity);
+// Before load_game: boot `path` (a /app0 file) with argv[0] `argument`,
+// as a previous run's sceSystemServiceLoadExec asked (null or "": eboot.bin).
+int32_t maxps4_fex_engine_set_exec(maxps4_fex_engine *engine, const char *path, const char *argument);
 uint64_t maxps4_fex_engine_spare_address_space(maxps4_fex_engine *engine);
 int32_t maxps4_fex_engine_memory_layout(maxps4_fex_engine *engine, uint64_t *app_area,
     uint64_t *app_area_size, uint64_t *window, uint64_t *window_size, int32_t *app_area_status);

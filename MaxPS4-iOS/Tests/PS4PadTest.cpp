@@ -1,3 +1,4 @@
+#include <chrono>
 #include "../Native/maxps4_ps4_pad.h"
 #include "GuestELFFixture.h"
 #include <cassert>
@@ -40,6 +41,9 @@ int main() {
     assert(ps4::get_le(bytes,4) == 0x4080 && bytes[4] == 0 && bytes[5] == 255);
     assert(bytes[8] == 12 && bytes[9] == 244 && bytes[76] == 1 && bytes[104] == 1);
     assert(ps4::get_le(bytes+80,8) > 0 && ps4::get_le(bytes+120,8) == 0);
+    // The tap stays reported for 150 ms of reads, then only the held button.
+    assert(pad.read(handle,output,1,true) == 0 && memory.read(output,bytes,4) && ps4::get_le(bytes,4) == 0x4080);
+    std::this_thread::sleep_for(std::chrono::milliseconds(160));
     assert(pad.read(handle,output,1,true) == 0 && memory.read(output,bytes,4) && ps4::get_le(bytes,4) == 0x4000);
     assert(other.read(handle,output,1,true) == PS4Pad::error(3));
     assert(pad.information(handle,output) == 0 && memory.read(output,bytes,28));
@@ -100,6 +104,9 @@ int main() {
         // states checked next do not depend on thread timing (it passed on
         // Windows by chance and failed on the Linux runners, #310).
         assert(multi.read(p1,output,1,true) == 0 && multi.read(p2,output+0x100,1,true) == 0);
+        // A tap stays reported for 150 ms of reads: let those taps expire.
+        std::this_thread::sleep_for(std::chrono::milliseconds(160));
+        assert(multi.read(p1,output,1,true) == 0 && multi.read(p2,output+0x100,1,true) == 0);
         // Player 2 disconnects: its pad reads as disconnected, user 2 stays
         // logged in and keeps its handle; player 1 is unaffected.
         assert(multi.update_player(1,0x2000,{{9,9,9,9}},9,9,false) == 0);
@@ -137,6 +144,8 @@ int main() {
             assert(tap.update_player(player,0x4010,{{128,128,128,128}},0,0,true) == 0);   // 0x10 pressed...
             assert(tap.update_player(player,0x4000,{{128,128,128,128}},0,0,true) == 0);   // ...released before a read
             assert(tap.read(handle,output,1,true) == 0 && memory.read(output,w,120) && ps4::get_le(w,4) == 0x4010);
+            assert(tap.read(handle,output,1,true) == 0 && memory.read(output,w,120) && ps4::get_le(w,4) == 0x4010); // still within 150 ms
+            std::this_thread::sleep_for(std::chrono::milliseconds(160));
             assert(tap.read(handle,output,1,true) == 0 && memory.read(output,w,120) && ps4::get_le(w,4) == 0x4000);
             // A press already read and then released is not repeated.
             assert(tap.update_player(player,0x4010,{{128,128,128,128}},0,0,true) == 0);
