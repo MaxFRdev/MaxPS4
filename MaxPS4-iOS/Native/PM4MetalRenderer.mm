@@ -1119,19 +1119,21 @@ MTLPixelFormat PM4MetalRenderer::nativeFormat(unsigned dfmt, unsigned nfmt, unsi
     if (@available(macOS 11.0, iOS 14.0, *)) floatFilter = device_.supports32BitFloatFiltering;
     pixelBytes = 0;
     switch (dfmt) {
-    case 1: if (nfmt == 0) { pixelBytes = 1; return MTLPixelFormatR8Unorm; } break;
-    case 2: if (nfmt == 0 || nfmt == 7) { pixelBytes = 2; return nfmt ? MTLPixelFormatR16Float : MTLPixelFormatR16Unorm; } break;
-    case 3: if (nfmt == 0) { pixelBytes = 2; return MTLPixelFormatRG8Unorm; } break;
+    // SNORM (nfmt 1) as Metal's: -128 and -127 both read -1, as on GCN.
+    case 1: if (nfmt <= 1) { pixelBytes = 1; return nfmt ? MTLPixelFormatR8Snorm : MTLPixelFormatR8Unorm; } break;
+    case 2: if (nfmt <= 1 || nfmt == 7) { pixelBytes = 2; return nfmt == 7 ? MTLPixelFormatR16Float : nfmt ? MTLPixelFormatR16Snorm : MTLPixelFormatR16Unorm; } break;
+    case 3: if (nfmt <= 1) { pixelBytes = 2; return nfmt ? MTLPixelFormatRG8Snorm : MTLPixelFormatRG8Unorm; } break;
     case 4: if (nfmt == 7 && floatFilter) { pixelBytes = 4; return MTLPixelFormatR32Float; } break;
-    case 5: if (nfmt == 0 || nfmt == 7) { pixelBytes = 4; return nfmt ? MTLPixelFormatRG16Float : MTLPixelFormatRG16Unorm; } break;
+    case 5: if (nfmt <= 1 || nfmt == 7) { pixelBytes = 4; return nfmt == 7 ? MTLPixelFormatRG16Float : nfmt ? MTLPixelFormatRG16Snorm : MTLPixelFormatRG16Unorm; } break;
     // 10_11_11: X and Y 11 bits from the low end, Z 10 bits, as RG11B10Float.
     case 6: if (nfmt == 7) { pixelBytes = 4; return MTLPixelFormatRG11B10Float; } break;
     // 2_10_10_10 lists its channels high to low: X in the low 10 bits, as RGB10A2.
     case 9: if (nfmt == 0) { pixelBytes = 4; return MTLPixelFormatRGB10A2Unorm; } break;
-    // Read as unorm whatever the nfmt, sRGB (9) converted to linear as GCN does.
-    case 10: pixelBytes = 4; return nfmt == 9 ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm;
+    // SNORM (normal maps) as such; other nfmts read as unorm, sRGB (9)
+    // converted to linear as GCN does.
+    case 10: pixelBytes = 4; return nfmt == 9 ? MTLPixelFormatRGBA8Unorm_sRGB : nfmt == 1 ? MTLPixelFormatRGBA8Snorm : MTLPixelFormatRGBA8Unorm;
     case 11: if (nfmt == 7 && floatFilter) { pixelBytes = 8; return MTLPixelFormatRG32Float; } break;
-    case 12: if (nfmt == 0 || nfmt == 7) { pixelBytes = 8; return nfmt ? MTLPixelFormatRGBA16Float : MTLPixelFormatRGBA16Unorm; } break;
+    case 12: if (nfmt <= 1 || nfmt == 7) { pixelBytes = 8; return nfmt == 7 ? MTLPixelFormatRGBA16Float : nfmt ? MTLPixelFormatRGBA16Snorm : MTLPixelFormatRGBA16Unorm; } break;
     case 14: if (nfmt == 7 && floatFilter) { pixelBytes = 16; return MTLPixelFormatRGBA32Float; } break;
     case 16: pixelBytes = 2; return MTLPixelFormatB5G6R5Unorm;
     default: break;
