@@ -225,6 +225,10 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         const auto at = source.find(sample);
         if (at != std::string::npos) source.insert(at + sample.size(), "\n    if (true) return float4(0.0f, 0.0f, 0.0f, 0.0f);");
     }
+    // Only the functions the program reaches: Metal compiles all of them.
+    mslBytes += source.size();
+    source = gcnPruneMetal(source);
+    mslPrunedBytes += source.size();
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
     NSError* failure = nil;
     descriptor.depthAttachmentPixelFormat = depth;
@@ -465,7 +469,8 @@ std::string PM4MetalRenderer::pipelineStatus() const {
     char queue[256];
     std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées, %u en compilation, %zu en file · pipelines Metal : %u en création, %zu en file", async_->librariesCompiled, async_->librariesShared, async_->compilesRunning, async_->compileQueue.size(), async_->pipelinesRunning, async_->pipelineQueue.size());
     std::string defaults = queue;
-    std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente, %u inutiles (profondeur seule)", async_->later.size(), async_->defaultsSkipped);
+    std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente, %u inutiles (profondeur seule) · MSL : %llu Ko, %llu Ko après élagage",
+                  async_->later.size(), async_->defaultsSkipped, (unsigned long long)(mslBytes >> 10), (unsigned long long)(mslPrunedBytes >> 10));
     defaults = async_->archiveReport() + defaults + queue;
     if (async_->running) {
         std::snprintf(queue, sizeof queue, ", PS 0x%llx depuis %.1f s", (unsigned long long)async_->buildingPS,
@@ -526,7 +531,7 @@ id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
     const unsigned ldsBytes = ((c.rsrc2 >> 15) & 0x1ff) * 512;
     if (cs.lds && 16 + ldsBytes > device_.maxThreadgroupMemoryLength)
         { fail("compute LDS of " + std::to_string(ldsBytes) + " bytes, over Metal's threadgroup memory"); return nil; }
-    id<MTLLibrary> library = this->library(gcnMetalPrelude(native_, 1, 1, 1) + cs.source + gcnMetalComputeEntry("cs_program", cs.lds));
+    id<MTLLibrary> library = this->library(gcnPruneMetal(gcnMetalPrelude(native_, 1, 1, 1) + cs.source + gcnMetalComputeEntry("cs_program", cs.lds)));
     if (!library) return nil;
     NSError* failure = nil;
     id<MTLComputePipelineState> state = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"gcn_compute"]

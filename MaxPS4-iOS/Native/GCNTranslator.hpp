@@ -18,9 +18,12 @@
 #include "GCNDecoder.hpp"
 #include "GCNInterpreter.hpp"
 #include <array>
+#include <cctype>
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace maxps4::gpu {
@@ -1601,5 +1604,109 @@ inline std::string gcnMetalEntryPoints(const GCNTranslation& vs, const GCNTransl
         replace("D.rangeCount }", "D.rangeCount, &N }");
     }
     return s;
+}
+// Metal compiles every function of a library's source: the prelude (47 KB:
+// the software sampler, tiling, every format) went into each pipeline, a
+// depth-only vertex program of 2 KB included. Keeps the functions (GCN_FN or
+// inline) the entry points reach, directly or through others, and drops the
+// rest and the comments. Source it cannot parse comes back unchanged.
+inline std::string gcnPruneMetal(const std::string& in) {
+    std::string s;
+    s.reserve(in.size());
+    for (std::size_t i = 0; i < in.size();) {
+        if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '/') {
+            std::size_t e = in.find('\n', i);
+            if (e == std::string::npos) e = in.size();
+            // A comment ending in a backslash continues: kept as it is.
+            if (in[e - 1] == '\\') s.append(in, i, e - i);
+            i = e;
+        } else if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '*') {
+            const std::size_t e = in.find("*/", i + 2);
+            if (e == std::string::npos) return in;
+            s += ' ';
+            i = e + 2;
+        } else s += in[i++];
+    }
+    auto word = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+    const std::size_t n = s.size();
+    // Skips a preprocessor line (with its continuations) starting at i.
+    auto directiveEnd = [&](std::size_t i) {
+        for (;;) {
+            std::size_t e = s.find('\n', i);
+            if (e == std::string::npos) return n;
+            if (e == 0 || s[e - 1] != '\\') return e;
+            i = e + 1;
+        }
+    };
+    auto lineStart = [&](std::size_t i) {
+        while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t')) --i;
+        return i == 0 || s[i - 1] == '\n';
+    };
+    struct Def { std::string name; std::size_t begin, body, end; };
+    std::vector<Def> defs;
+    int depth = 0;
+    for (std::size_t i = 0; i < n;) {
+        const char c = s[i];
+        if (c == '#' && lineStart(i)) { i = directiveEnd(i); continue; }
+        if (c == '{') ++depth;
+        else if (c == '}') { if (--depth < 0) return in; }
+        else if (depth == 0 && (s.compare(i, 7, "GCN_FN ") == 0 || s.compare(i, 7, "inline ") == 0) && (i == 0 || !word(s[i - 1]))) {
+            const std::size_t open = s.find('(', i);
+            if (open == std::string::npos) return in;
+            std::size_t last = open;
+            while (last > i && !word(s[last - 1])) --last;
+            std::size_t first = last;
+            while (first > i && word(s[first - 1])) --first;
+            if (first == last) return in;
+            std::size_t j = open;
+            int inner = 0;
+            for (; j < n; ++j) {
+                if (s[j] == '#' && lineStart(j)) { j = directiveEnd(j); if (j == n) break; continue; }
+                if (s[j] == ';' && inner == 0) break;
+                if (s[j] == '{') ++inner;
+                else if (s[j] == '}' && --inner == 0) break;
+            }
+            if (j >= n) return in;
+            defs.push_back({s.substr(first, last - first), i, last, j + 1});
+            i = j + 1;
+            continue;
+        }
+        ++i;
+    }
+    if (depth != 0 || defs.empty()) return in;
+    std::unordered_map<std::string, std::vector<std::size_t>> byName;
+    for (std::size_t k = 0; k < defs.size(); ++k) byName[defs[k].name].push_back(k);
+    std::vector<std::string> work;
+    std::unordered_set<std::string> kept;
+    auto scan = [&](std::size_t from, std::size_t to) {
+        for (std::size_t i = from; i < to;) {
+            if (!word(s[i])) { ++i; continue; }
+            std::size_t e = i;
+            while (e < to && word(s[e])) ++e;
+            if (!std::isdigit(static_cast<unsigned char>(s[i]))) {
+                std::string id = s.substr(i, e - i);
+                if (byName.count(id) && kept.insert(id).second) work.push_back(std::move(id));
+            }
+            i = e;
+        }
+    };
+    std::size_t at = 0;
+    for (const auto& d : defs) { scan(at, d.begin); at = d.end; }
+    scan(at, n);
+    while (!work.empty()) {
+        const std::string name = std::move(work.back());
+        work.pop_back();
+        for (std::size_t k : byName[name]) scan(defs[k].body, defs[k].end);
+    }
+    std::string out;
+    out.reserve(n);
+    at = 0;
+    for (const auto& d : defs) {
+        if (kept.count(d.name)) continue;
+        out.append(s, at, d.begin - at);
+        at = d.end;
+    }
+    out.append(s, at, n - at);
+    return out;
 }
 } // namespace maxps4::gpu

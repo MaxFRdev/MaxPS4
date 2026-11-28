@@ -157,6 +157,27 @@ int main(int argc, char** argv) {
     // The Metal prelude carries the shared runtime text.
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
+    // Pruning: only what the entry points reach, through others; overloads
+    // together; comments and preprocessor lines do not count as uses.
+    const std::string pruned = gcnPruneMetal(
+        "#define GCN_FN inline\n#if X\n// gcn_dead() in a comment\n#endif\n"
+        "GCN_FN uint gcn_leaf(uint a) { return a + 1u; }\n"
+        "GCN_FN uint gcn_mid(uint a) { if (a) { return gcn_leaf(a); } return 0u; } /* gcn_dead */\n"
+        "GCN_FN uint gcn_over(uint a) { return a; }\nGCN_FN float gcn_over(float a) { return a; }\n"
+        "GCN_FN uint gcn_dead(uint a) { return gcn_leaf(a); }\ninline float gcn_dead_too(float a) { return a; }\n"
+        "GCN_FN uint gcn_declared(uint a);\n"
+        "kernel void gcn_compute(uint i [[thread_position_in_grid]]) { (void)gcn_mid(gcn_over(i)); }\n");
+    assert(pruned.find("gcn_leaf(uint a)") != std::string::npos && pruned.find("gcn_mid(uint a)") != std::string::npos);
+    assert(pruned.find("gcn_over(uint a)") != std::string::npos && pruned.find("gcn_over(float a)") != std::string::npos);
+    assert(pruned.find("gcn_dead") == std::string::npos && pruned.find("gcn_declared") == std::string::npos);
+    assert(pruned.find("#define GCN_FN inline") != std::string::npos && pruned.find("kernel void gcn_compute(") != std::string::npos);
+    assert(gcnPruneMetal("GCN_FN uint f(uint a) { return a; ") == "GCN_FN uint f(uint a) { return a; ");
+    {
+        const std::string vsOnly = prelude + straight.source + gcnMetalComputeEntry("vs_straight");
+        const std::string kept = gcnPruneMetal(vsOnly);
+        assert(kept.size() < vsOnly.size() / 2 && kept.find("GCN_FN float4 gcn_sample(") == std::string::npos);
+        assert(kept.find("GCN_FN void vs_straight(") != std::string::npos);
+    }
     std::ofstream out(argv[1]);
     out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << copied.source << shared.source << straight.source << straightBelow.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS, compute stores and LDS translated; refusals reported");

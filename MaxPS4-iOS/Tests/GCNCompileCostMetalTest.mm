@@ -5,7 +5,8 @@
 // so neither the MSL nor the pipeline cache answers) and prints medians in
 // one table: blocks in order against the dispatcher's loop, size against
 // default optimisation, a depth-only pipeline (vertex program alone)
-// against one with its pixel program. Timings only, on the CI's GPU: they
+// against one with its pixel program, the source as built against it
+// pruned (gcnPruneMetal). Timings only, on the CI's GPU: they
 // compare forms, not the iPhone's speed. Never fails on a timing.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -68,6 +69,10 @@ int main() {
             {"fetch VS in order, depth only", program(vs, noPS), false, true},
             {"fetch VS loop, depth only", program(vsLoop, noPS), false, true},
             {"fetch VS + PS 1800, depth only", program(vs, ps1800), false, true},
+            // What the renderer compiles since gcnPruneMetal: the functions reached.
+            {"PS 1800 in order, size, pruned", gcnPruneMetal(program(vs, ps1800)), true, true},
+            {"PS 1800 in order, default, pruned", gcnPruneMetal(program(vs, ps1800)), true, false},
+            {"fetch VS in order, depth, pruned", gcnPruneMetal(program(vs, noPS)), false, true},
         };
         MTLCompileOptions* defaults = [MTLCompileOptions new];
         if (@available(macOS 15.0, iOS 18.0, *)) defaults.mathMode = MTLMathModeSafe;
