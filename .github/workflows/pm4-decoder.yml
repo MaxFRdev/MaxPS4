@@ -115,6 +115,9 @@ jobs:
           xcrun clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNVertexStageMetalTest.mm -framework Foundation -framework Metal -o build/pm4/gcn-vertex-stage-test
           build/pm4/gcn-vertex-stage-test
           build/pm4/pm4-matrix-quad-test
+          xcrun clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNCompileCostMetalTest.mm \
+            -framework Foundation -framework Metal -o build/pm4/gcn-compile-cost-test
+          build/pm4/gcn-compile-cost-test
           xcrun clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror MaxPS4-iOS/Tests/GCNShaderCostMetalTest.mm \
             -framework Foundation -framework Metal -o build/pm4/gcn-shader-cost-test
           build/pm4/gcn-shader-cost-test
