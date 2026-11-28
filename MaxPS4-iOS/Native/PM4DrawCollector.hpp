@@ -27,6 +27,7 @@ struct PM4DrawStats {
     std::uint32_t lastDmaControl = 0, lastDmaCommand = 0; // the last DMA_DATA met
     unsigned dmaRegisterWrites = 0; std::uint32_t lastDmaRegister = 0; // DMA_DATA into a GPU register
     unsigned indirectBuffers = 0; // INDIRECT_BUFFER calls executed
+    std::string indirectFailure;  // why the last INDIRECT_BUFFER call was not run
     unsigned instancedDraws = 0;  // draws of more than one instance
     // Constant engine (the submission's CCBs): CE RAM writes and loads, dumps
     // to guest memory, and the DE waits that ran the CE up to its next counter.
@@ -58,6 +59,7 @@ struct PM4DrawStats {
             std::snprintf(line, sizeof line, " · effacements rapides : %u · copies DMA : %u (dernier DMA_DATA : contrôle 0x%x, commande 0x%x ; %u vers des registres, dernier 0x%x) · appels de tampons : %u · dessins instanciés : %u",
                           fastClears, dmaCopies, lastDmaControl, lastDmaCommand, dmaRegisterWrites, lastDmaRegister, indirectBuffers, instancedDraws);
             more += line;
+            if (!indirectFailure.empty()) more += " · dernier appel de tampon non exécuté : " + indirectFailure;
         }
         if (memoryWrites || indirectCalls) {
             char line[96];
@@ -188,7 +190,7 @@ public:
     // in submission order among the draws.
     template <class Draw, class Dispatch>
     void execute(const std::uint32_t* words, std::size_t count, Draw&& draw, Dispatch&& dispatch) {
-        const auto parsed = decodePM4Type3(words, count);
+        const auto parsed = decodePM4Type3(words, count, std::size_t(1) << 18, std::size_t(1) << 20);
         if (!parsed) { stats_.fail("unframed PM4 stream"); return; }
         // The submission's constant engine stream comes first, in NOPs marked
         // ceMarker (PS4GnmQueue). Without a DE wait on it, it runs up front
@@ -299,12 +301,29 @@ public:
                 // INDIRECT_BUFFER: a call into another command buffer (IB_BASE,
                 // IB_SIZE in dwords), executed here in order with the same state.
                 // A buffer that cannot be read or framed stays counted as lost.
-                if (n < 3 || depth_ >= 4) { ++stats_.ignored[0x3f]; break; }
+                if (n < 3 || depth_ >= 4) { ++stats_.ignored[0x3f]; stats_.indirectFailure = n < 3 ? "paquet trop court" : "plus de 4 niveaux"; break; }
                 const std::uint64_t ib = (std::uint64_t(data[0]) & ~3ull) | std::uint64_t(data[1] & 0xffff) << 32;
                 const std::uint32_t size = data[2] & 0xfffff;
+                auto refuse = [&](const char* why) {
+                    ++stats_.ignored[0x3f];
+                    char text[160];
+                    std::snprintf(text, sizeof text, "%s (0x%llx, %u mots)", why, (unsigned long long)ib, size);
+                    stats_.indirectFailure = text;
+                };
+                if (!size) { refuse("taille nulle"); break; }
                 std::vector<std::uint32_t> nested(size);
-                if (!size || !memory_.read(ib, nested.data(), std::size_t(size) * 4) || !decodePM4Type3(nested.data(), size)) {
-                    ++stats_.ignored[0x3f]; break;
+                if (!memory_.read(ib, nested.data(), std::size_t(size) * 4)) { refuse("mémoire illisible"); break; }
+                // A whole frame's command buffer: up to IB_SIZE's 2^20 words.
+                const auto framed = decodePM4Type3(nested.data(), size, std::size_t(1) << 18, std::size_t(1) << 20);
+                if (!framed) {
+                    const char* why = framed.error == PM4Error::too_many_words ? "plus de 65536 mots" :
+                                      framed.error == PM4Error::truncated_packet ? "paquet tronqué" :
+                                      framed.error == PM4Error::too_many_packets ? "plus de 4096 paquets" : "type de paquet inconnu";
+                    refuse(why);
+                    char first[32];
+                    std::snprintf(first, sizeof first, ", premier mot 0x%08x", nested[0]);
+                    stats_.indirectFailure += first;
+                    break;
                 }
                 ++depth_; ++stats_.indirectBuffers;
                 execute(nested.data(), size, draw, dispatch);

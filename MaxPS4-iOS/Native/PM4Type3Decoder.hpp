@@ -21,16 +21,18 @@ struct PM4DecodeResult {
 };
 
 // PM4 type 3 header: [31:30]=3, [29:16]=payload dword count minus one,
-// [15:8]=opcode. Reject every other packet type rather than guessing.
+// [15:8]=opcode. Type 2 is a one-word filler (0x80000000 pads command
+// buffers), skipped. Reject every other packet type rather than guessing.
 inline PM4DecodeResult decodePM4Type3(const std::uint32_t* words,
                                       std::size_t wordCount,
-                                      std::size_t maxPackets = 4096) {
+                                      std::size_t maxPackets = 4096,
+                                      std::size_t maxWords = 65536) {
     PM4DecodeResult result;
     if (wordCount && !words) {
         result.error = PM4Error::null_input;
         return result;
     }
-    if (wordCount > 65536) {
+    if (wordCount > maxWords) {
         result.error = PM4Error::too_many_words;
         return result;
     }
@@ -42,6 +44,7 @@ inline PM4DecodeResult decodePM4Type3(const std::uint32_t* words,
             return result;
         }
         const std::uint32_t header = words[offset];
+        if ((header >> 30) == 2) { ++offset; continue; }
         if ((header >> 30) != 3) {
             result.error = PM4Error::unsupported_packet_type;
             result.packets.clear();

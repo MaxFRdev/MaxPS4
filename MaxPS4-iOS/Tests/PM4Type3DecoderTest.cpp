@@ -16,6 +16,10 @@ int main() {
     assert(decodePM4Type3(commands, 5, 1).error == PM4Error::too_many_packets);
     const std::uint32_t invalid[] = {0u};
     assert(decodePM4Type3(invalid, 1).error == PM4Error::unsupported_packet_type);
+    // Type 2 fillers between and after packets are skipped.
+    const std::uint32_t padded[] = {0x80000000u, commands[0], commands[1], commands[2], 0x80000000u, commands[3], commands[4], 0x80000000u};
+    auto skipped = decodePM4Type3(padded, 8);
+    assert(skipped && skipped.packets.size() == 2 && skipped.packets[0].payloadWord == 2 && skipped.packets[1].headerWord == 5);
     assert(decodePM4Type3(nullptr, 0));
     assert(decodePM4Type3(commands, 65537).error == PM4Error::too_many_words);
 }
