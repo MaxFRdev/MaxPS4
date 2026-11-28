@@ -328,7 +328,7 @@ private:
         std::map<PipelineKey, id<MTLRenderPipelineState>> ready; // nil: refused
         // Default builds wait here until no size build is left, then run one at a time.
         std::deque<std::function<void()>> later;
-        unsigned sizing = 0;
+        unsigned sizing = 0, defaultsSkipped = 0; // default builds left out: depth-only pipelines whose size build worked
         bool running = false;
         std::uint64_t buildingPS = 0; // The default build running, for the report.
         std::chrono::steady_clock::time_point buildingSince;

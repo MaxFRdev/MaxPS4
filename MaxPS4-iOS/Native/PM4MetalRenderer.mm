@@ -385,7 +385,16 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         if (@available(macOS 13.0, iOS 16.0, *)) size.optimizationLevel = MTLLibraryOptimizationLevelSize;
         { std::lock_guard<std::mutex> lock(async->mutex);
           ++async->sizing;
-          async->later.push_back([async, build, fastest, ps = d.ps] {
+          async->later.push_back([async, build, fastest, ps = d.ps, key, vertexOnly = !fragment] {
+              // No pixel program (depth only): nothing for default optimisation
+              // to speed up once the size build worked; it runs only if that failed.
+              if (vertexOnly) {
+                  bool built = false;
+                  { std::lock_guard<std::mutex> lock(async->mutex);
+                    built = !async->pending.count(key);
+                    if (built) { async->running = false; ++async->defaultsSkipped; } }
+                  if (built) { async->next(); return; }
+              }
               { std::lock_guard<std::mutex> lock(async->mutex);
                 async->buildingPS = ps; async->buildingSince = std::chrono::steady_clock::now(); }
               build(fastest, true);
@@ -456,7 +465,7 @@ std::string PM4MetalRenderer::pipelineStatus() const {
     char queue[256];
     std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées, %u en compilation, %zu en file · pipelines Metal : %u en création, %zu en file", async_->librariesCompiled, async_->librariesShared, async_->compilesRunning, async_->compileQueue.size(), async_->pipelinesRunning, async_->pipelineQueue.size());
     std::string defaults = queue;
-    std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente", async_->later.size());
+    std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente, %u inutiles (profondeur seule)", async_->later.size(), async_->defaultsSkipped);
     defaults = async_->archiveReport() + defaults + queue;
     if (async_->running) {
         std::snprintf(queue, sizeof queue, ", PS 0x%llx depuis %.1f s", (unsigned long long)async_->buildingPS,
@@ -1146,6 +1155,10 @@ MTLPixelFormat PM4MetalRenderer::nativeFormat(unsigned dfmt, unsigned nfmt, unsi
     case 12: if (nfmt <= 1 || nfmt == 7) { pixelBytes = 8; return nfmt == 7 ? MTLPixelFormatRGBA16Float : nfmt ? MTLPixelFormatRGBA16Snorm : MTLPixelFormatRGBA16Unorm; } break;
     case 14: if (nfmt == 7 && floatFilter) { pixelBytes = 16; return MTLPixelFormatRGBA32Float; } break;
     case 16: pixelBytes = 2; return MTLPixelFormatB5G6R5Unorm;
+    // 4_4_4_4: X in the low 4 bits, W in the high ones, as ABGR4 (Apple GPUs).
+    case 19:
+        if (@available(macOS 11.0, iOS 8.0, *)) { if (nfmt == 0) { pixelBytes = 2; return MTLPixelFormatABGR4Unorm; } }
+        break;
     default: break;
     }
     return MTLPixelFormatInvalid;
@@ -1239,8 +1252,8 @@ id<MTLTexture> PM4MetalRenderer::nativeTexture(const std::array<std::uint32_t, 8
     const MTLPixelFormat format = nativeFormat(dfmt, nfmt, pixelBytes);
     if (format == MTLPixelFormatInvalid) return miss(1, nfmt);
     // Tile mode 13: 8x8 pixel micro tiles, Morton order inside, decoded once
-    // (CoD's menu frames and gradients). 5_6_5 stays linear only.
-    if (tiling == 13 && dfmt != 16) {
+    // (CoD's menu frames and gradients). 5_6_5 and 4_4_4_4 stay linear only.
+    if (tiling == 13 && dfmt != 16 && dfmt != 19) {
         id<MTLTexture> decoded = thinTexture(base, width, height, pitch, dfmt, format, pixelBytes);
         return decoded ? decoded : miss(4, 0);
     }
