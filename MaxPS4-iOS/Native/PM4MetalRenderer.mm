@@ -145,7 +145,9 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         char where[96];
         std::snprintf(where, sizeof where, " (VS 0x%llx, PS 0x%llx)", (unsigned long long)d.vs, (unsigned long long)d.ps);
         lastUntranslated = (!vs ? "VS : " + vs.error : "PS : " + ps.error) + where;
-        untranslatedPrograms_.insert({d.vs, d.ps});
+        std::string reason = !vs ? "VS : " + vs.error : "PS : " + ps.error;
+        if (const auto at = reason.find(" at 0x"); at != std::string::npos) reason.erase(at);
+        if (untranslatedPrograms_.insert({d.vs, d.ps}).second) ++untranslatedReasons[reason];
         untranslated_ = true;
         return nil;
     }

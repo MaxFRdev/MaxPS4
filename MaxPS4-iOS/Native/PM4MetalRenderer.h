@@ -41,6 +41,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <algorithm>
 
 namespace maxps4::gpu {
 class PM4MetalRenderer {
@@ -180,6 +181,18 @@ public:
     // (the run goes on); the latest reason.
     unsigned untranslatedDraws = 0;
     std::string lastUntranslated;
+    // Distinct reasons programs could not be translated (the instruction, not
+    // its address), with the number of program pairs each stopped.
+    std::map<std::string, unsigned> untranslatedReasons;
+    std::string untranslatedSummary() const {
+        std::vector<std::pair<unsigned, std::string>> sorted;
+        for (const auto& [why, count] : untranslatedReasons) sorted.push_back({count, why});
+        std::sort(sorted.rbegin(), sorted.rend());
+        std::string text;
+        for (std::size_t k = 0; k < sorted.size() && k < 8; ++k)
+            text += "\n  - " + sorted[k].second + " : " + std::to_string(sorted[k].first) + " programme(s)";
+        return text;
+    }
     unsigned pipelinesPending() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->pending.size()); }
     unsigned pipelinesRefused() const { std::lock_guard<std::mutex> lock(async_->mutex); return unsigned(async_->refused.size()); }
     std::string pipelineError() const { std::lock_guard<std::mutex> lock(async_->mutex); return async_->lastError; }

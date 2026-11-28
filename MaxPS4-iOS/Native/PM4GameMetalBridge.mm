@@ -93,6 +93,7 @@ struct GameMetalState {
     unsigned displayNext = 0;
     // Compute dispatches run as kernels, or refused (and skipped) with the last reason.
     unsigned computeRun = 0, computeRefused = 0;
+    std::map<std::string, unsigned> computeReasons; // refusals by reason (addresses removed)
     // Waits for compute results inside submissions, and how long batches took.
     unsigned barriers = 0, batchBarriers = 0, mostBarriers = 0, batches = 0, slowBatches = 0;
     double barrierMs = 0;
@@ -152,8 +153,8 @@ struct GameMetalState {
             renderer.scalarLoadsDirect, renderer.scalarLoadsAll,
             U(refusal.empty() ? "" : " · dernier refus : "), U(refusal), U(pending), native];
         if (renderer.untranslatedDraws)
-            native = [NSString stringWithFormat:@"\nProgrammes non traduits : %u dessins écartés · dernier : %@%@",
-                renderer.untranslatedDraws, U(renderer.lastUntranslated), native];
+            native = [NSString stringWithFormat:@"\nProgrammes non traduits : %u dessins écartés · dernier : %@ · par raison :%@%@",
+                renderer.untranslatedDraws, U(renderer.lastUntranslated), U(renderer.untranslatedSummary()), native];
         native = [NSString stringWithFormat:@"\nBarrières compute : %u (%u au plus par lot) · remplissages %u (%u refus%@%@) · attente GPU %.0f ms · entrée %.0f ms (%.0f Mio) · sortie %.0f ms (%.0f Mio) · lots : %u, dont %u de plus de 33 ms%@%@%@",
             barriers, mostBarriers, renderer.fillsDone, renderer.fillsRefused, U(renderer.fillRefusal.empty() ? "" : ", dernier : "), U(renderer.fillRefusal), barrierMs, renderer.dispatchCopyMs, double(renderer.dispatchCopyBytes) / (1 << 20),
             renderer.writebackMs, double(renderer.writebackBytes) / (1 << 20), batches, slowBatches,
@@ -185,7 +186,11 @@ struct GameMetalState {
                   std::to_string(renderer.drawsDeferred) + " dessins reportés (la scène manque tant qu'ils compilent)");
         if (renderer.untranslatedDraws)
             point(std::to_string(renderer.untranslatedDraws) + " dessins écartés, programme non traduit : " + renderer.lastUntranslated);
-        if (computeRefused) point(std::to_string(computeRefused) + " calculs refusés" + (computeError.empty() ? "" : " : " + computeError));
+        if (computeRefused) {
+            std::string reasons;
+            for (const auto& [why, count] : computeReasons) reasons += "\n      " + std::to_string(count) + " × " + why;
+            point(std::to_string(computeRefused) + " calculs refusés, par raison :" + reasons);
+        }
         if (const std::string lost = stats.ignoredReport(); !lost.empty()) point("paquets PM4 sans effet" + lost);
         if (targetPixels.find(" 224 7 63 252") != std::string::npos || targetPixels.find(" 0 126 0 126") != std::string::npos)
             point("une cible contient des NaN (une passe a lu des constantes ou une image à zéro)");
@@ -407,7 +412,12 @@ void recordDisplayCopy(GameMetalState& s, id<MTLCommandBuffer> command, Clock::t
                 if (s.renderer.dispatchesEncoded != encodedBefore) segmentEncoded = true;
                 if (s.renderer.hasPendingGuestWrites()) flushComputeWrites();
             }
-            else { ++s.computeRefused; s.computeError = s.renderer.error; }
+            else {
+                ++s.computeRefused; s.computeError = s.renderer.error;
+                std::string reason = s.renderer.error;
+                if (const auto at = reason.find(" at 0x"); at != std::string::npos) reason.erase(at);
+                if (s.computeReasons.size() < 32 || s.computeReasons.count(reason)) ++s.computeReasons[reason];
+            }
         });
         s.enter(4);
         s.renderer.endBatch();
