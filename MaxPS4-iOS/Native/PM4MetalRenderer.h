@@ -59,6 +59,7 @@ public:
     // Encodes one compute dispatch into `commands`, false with `error` set
     // (and nothing encoded) when it cannot be expressed.
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
+    unsigned depthOnlyShared = 0; // depth-only draws on a pipeline without their pixel program
     unsigned kernelsBuilt = 0, ldsKernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
     unsigned dispatchesEncoded = 0;
     // Compute traffic with guest memory, cumulated: copied in while encoding,
@@ -281,6 +282,10 @@ private:
     std::function<std::int32_t(std::uint64_t, const void*, std::size_t, std::uint64_t*)> writeGuest_;
     id<MTLArgumentEncoder> nativeArguments_ = nil;
     std::map<PipelineKey, id<MTLRenderPipelineState>> pipelines_;
+    // Pixel programs that may discard (GCNTranslation::mayKill), by address:
+    // a depth-only draw whose program cannot runs no pixel program, so its
+    // pipeline leaves the program out and is shared by every such draw.
+    std::map<std::uint64_t, bool> psMayKill_;
     // Each pixel program's scalar loads, by program address, sorted by pc.
     struct ScalarSites { std::vector<GCNScalarSite> list; std::size_t words = 0; };
     std::map<std::uint64_t, ScalarSites> scalarSites_;

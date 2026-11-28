@@ -84,8 +84,20 @@ struct Stopwatch {
 }
 
 id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixelFormat format, MTLPixelFormat depth) {
-    const PipelineKey key{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
-                          (d.blend >> 30) & 1 ? d.blend : 0u, d.mask, unsigned(depth)};
+    // A depth-only draw (shadow maps, depth prepasses: most of CoD's) runs no
+    // pixel program unless it may discard: its pipeline is the vertex
+    // program's alone, one for all its pixel programs. Known after the
+    // program's first translation; until then the draw builds as before.
+    bool depthOnly = !d.colour && !d.ps;
+    if (!d.colour && d.ps) {
+        const auto known = psMayKill_.find(d.ps);
+        depthOnly = known != psMayKill_.end() && !known->second;
+    }
+    if (depthOnly) ++depthOnlyShared;
+    const PipelineKey key = depthOnly ?
+        PipelineKey{d.vs, 0, d.vsUser[0], d.vsUser[1], 0, std::string(), unsigned(format), 0u, 0u, unsigned(depth)} :
+        PipelineKey{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
+                    (d.blend >> 30) & 1 ? d.blend : 0u, d.mask, unsigned(depth)};
     untranslated_ = false;
     if (untranslatedPrograms_.count({d.vs, d.ps})) { untranslated_ = true; return nil; }
     if (asyncPipelines) {
@@ -136,8 +148,9 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     const auto vs = translateCached(d.vs, vsOptions);
     // A depth-only draw may have no pixel program (Gnm's null PS): an empty one.
     GCNTranslation ps;
-    if (d.ps || d.colour) ps = translateCached(d.ps, psOptions);
+    if ((d.ps || d.colour) && !depthOnly) ps = translateCached(d.ps, psOptions);
     else ps.source = "GCN_FN void ps_program(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) { (void)L; (void)M; (void)Q; }\n";
+    if (d.ps && !depthOnly && ps) psMayKill_[d.ps] = ps.mayKill;
     compiling = 0;
     // A program MaxPS4 cannot translate yet: its draws are left out and the
     // game goes on (CoD's missions met a new instruction every few minutes).
@@ -151,7 +164,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         untranslated_ = true;
         return nil;
     }
-    {
+    if (!depthOnly) {
         ScalarSites& sites = scalarSites_[d.ps];
         sites.list = ps.sites; sites.words = ps.siteWords;
         scalarLoadsAll += unsigned(ps.sites.size());
@@ -168,8 +181,10 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         for (unsigned k = 1; k < 8; ++k)
             if (d.more[k - 1].base) note(k, targetFormat(d.more[k - 1].format, d.more[k - 1].number, d.more[k - 1].swap));
     }
+    static const std::uint32_t noInputs[32] = {};
     std::string source = gcnMetalPrelude(native_, gcnHighestUsed(vs.params), gcnHighestUsed(ps.attributes), gcnHighestUsed(ps.colors)) + vs.source + ps.source +
-                               gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", d.psInputAddr, d.inputCntl, native_, colourSlots(d),
+                               gcnMetalEntryPoints(vs, ps, "vs_program", "ps_program", depthOnly ? 0u : d.psInputAddr,
+                                                   depthOnly ? noInputs : d.inputCntl, native_, colourSlots(d),
                                                    uintSlots, intSlots);
     // Tests: a sample Metal's sampler refuses reads as zero instead of filtering in
     // software, which shows whether a draw really takes the native path.

@@ -142,8 +142,8 @@ struct GameMetalState {
             renderer.nativeLastMiss.empty() ? @"" : @"\nDernier refus : ", U(renderer.nativeLastMiss)] : @"";
         const std::string refusal = renderer.pipelineError();
         const std::string pending = renderer.pipelineStatus();
-        native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés · traduction GCN %.0f ms, %u réutilisées, %u remises à plus tard%@ · lectures directes %u sur %u%@%@%@%@",
-            renderer.pipelinesBuilt, renderer.pipelinesReplaced, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred,
+        native = [NSString stringWithFormat:@"\nPipelines : %u construits, %u remplacés, %u en cours, %u refusés · %u dessins reportés · %u dessins de profondeur sans programme pixel · traduction GCN %.0f ms, %u réutilisées, %u remises à plus tard%@ · lectures directes %u sur %u%@%@%@%@",
+            renderer.pipelinesBuilt, renderer.pipelinesReplaced, renderer.pipelinesPending(), renderer.pipelinesRefused(), renderer.drawsDeferred, renderer.depthOnlyShared,
             renderer.translateMs, renderer.translationsReused, renderer.translationsPutOff,
             renderer.encodedDraws ? [NSString stringWithFormat:@"\nCoût CPU par dessin : %.0f µs (analyse %.0f µs, copies %.0f µs, nouveaux buffers %.0f µs, textures décodées %.0f µs : %u) sur %u dessins, %.1f s en tout",
                 1000 * renderer.encodeMs / renderer.encodedDraws, 1000 * renderer.scanMs / renderer.encodedDraws,
