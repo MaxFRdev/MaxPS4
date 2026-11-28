@@ -56,12 +56,21 @@ bool blendChannel(PM4BlendChannel channel, MTLBlendOperation& operation,
     if (channel.ignoresFactors()) { source = destination = MTLBlendFactorOne; return true; }
     return blendFactor(channel.source, source) && blendFactor(channel.destination, destination);
 }
+// CB_BLEND_CONTROL as it shapes a pipeline: 0 when blending is off or
+// writes the source unchanged (ONE, ZERO, add on both channels), which
+// Metal's own no blending does, without a pipeline of its own.
+std::uint32_t effectiveBlend(std::uint32_t control) {
+    if (!((control >> 30) & 1)) return 0;
+    const auto blend = decodePM4Blend(control);
+    auto plain = [](const PM4BlendChannel& c) { return c.operation == 0 && c.source == 1 && c.destination == 0; };
+    return plain(blend.rgb) && plain(blend.alpha) ? 0 : control;
+}
 std::string inputKey(const PM4Draw& d) {
     std::string key(reinterpret_cast<const char*>(d.inputCntl), sizeof d.inputCntl);
     // Colour targets 1-7: their formats, masks and blends shape the pipeline.
     for (const auto& t : d.more) {
         if (!t.base) { key += '\0'; continue; }
-        const std::uint32_t words[5] = {t.format | t.number << 8 | t.swap << 16, t.mask, (t.blend >> 30) & 1 ? t.blend : 0u, 1, 0};
+        const std::uint32_t words[5] = {t.format | t.number << 8 | t.swap << 16, t.mask, effectiveBlend(t.blend), 1, 0};
         key.append(reinterpret_cast<const char*>(words), sizeof words);
     }
     return key;
@@ -97,7 +106,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     const PipelineKey key = depthOnly ?
         PipelineKey{d.vs, 0, d.vsUser[0], d.vsUser[1], 0, std::string(), unsigned(format), 0u, 0u, unsigned(depth)} :
         PipelineKey{d.vs, d.ps, d.vsUser[0], d.vsUser[1], d.psInputAddr, inputKey(d), unsigned(format),
-                    (d.blend >> 30) & 1 ? d.blend : 0u, d.mask, unsigned(depth)};
+                    effectiveBlend(d.blend), d.mask, unsigned(depth)};
     untranslated_ = false;
     if (untranslatedPrograms_.count({d.vs, d.ps})) { untranslated_ = true; return nil; }
     if (asyncPipelines) {
@@ -216,7 +225,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         color.writeMask = ((mask & 1) ? MTLColorWriteMaskRed : 0) | ((mask & 2) ? MTLColorWriteMaskGreen : 0) |
                           ((mask & 4) ? MTLColorWriteMaskBlue : 0) | ((mask & 8) ? MTLColorWriteMaskAlpha : 0);
         // Integer attachments cannot blend in Metal (GCN skips it for them too).
-        if (!d.colour || !((blendControl >> 30) & 1) || integerFormat(pixelFormat)) return true;
+        if (!d.colour || !effectiveBlend(blendControl) || integerFormat(pixelFormat)) return true;
         const auto blend = decodePM4Blend(blendControl);
         auto alpha = blend.alpha;
         // Saturation has an alpha factor of one, independently of RGB.
