@@ -27,7 +27,7 @@ namespace {
 struct DrawState { std::uint64_t base, size; std::uint32_t vsUser[16], psUser[17]; std::uint32_t flags, rangeCount; std::uint64_t ranges[48]; std::uint32_t stepRate[2]; };
 static_assert(sizeof(DrawState) == 552, "GCNDrawState layout");
 // Must match GCNDispatchState in gcnMetalComputeEntry().
-struct DispatchState { std::uint64_t base, size; std::uint32_t user[16], userCount, rsrc2, rangeCount, pad; std::uint64_t ranges[48]; };
+struct DispatchState { std::uint64_t base, size; std::uint32_t user[16], userCount, rsrc2, rangeCount, ldsBytes; std::uint64_t ranges[48]; };
 static_assert(sizeof(DispatchState) == 480, "GCNDispatchState layout");
 constexpr std::uint32_t rectList = 1, flipY = 2, scalarSites = 4;
 
@@ -471,13 +471,17 @@ id<MTLComputePipelineState> PM4MetalRenderer::kernel(const PM4Dispatch& c) {
     const auto cs = translateGCN(code_, c.program, options);
     compiling = 0;
     if (!cs) { fail("CS translation: " + cs.error); return nil; }
-    id<MTLLibrary> library = this->library(gcnMetalPrelude(native_, 1, 1, 1) + cs.source + gcnMetalComputeEntry("cs_program"));
+    const unsigned ldsBytes = ((c.rsrc2 >> 15) & 0x1ff) * 512;
+    if (cs.lds && 16 + ldsBytes > device_.maxThreadgroupMemoryLength)
+        { fail("compute LDS of " + std::to_string(ldsBytes) + " bytes, over Metal's threadgroup memory"); return nil; }
+    id<MTLLibrary> library = this->library(gcnMetalPrelude(native_, 1, 1, 1) + cs.source + gcnMetalComputeEntry("cs_program", cs.lds));
     if (!library) return nil;
     NSError* failure = nil;
     id<MTLComputePipelineState> state = [device_ newComputePipelineStateWithFunction:[library newFunctionWithName:@"gcn_compute"]
                                                                                error:&failure];
     if (!state) { fail(std::string("compute pipeline: ") + failure.localizedDescription.UTF8String); return nil; }
     ++kernelsBuilt;
+    if (cs.lds) { ldsKernels_[key] = ldsBytes; ++ldsKernelsBuilt; }
     if (kernelsBuilt <= 4) listProgram("CS", c.program, c.user, c.userCount, true);
     kernels_[key] = state;
     return state;
@@ -787,6 +791,11 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     if (!compute) return fail("compute encoder");
     [compute setComputePipelineState:state];
     [compute setBuffer:memory offset:0 atIndex:0];
+    const auto lds = ldsKernels_.find(std::make_pair(c.program, c.rsrc2));
+    if (lds != ldsKernels_.end()) {
+        dispatchState.ldsBytes = lds->second;
+        [compute setThreadgroupMemoryLength:(16 + lds->second + 15) & ~15u atIndex:0];
+    }
     [compute setBytes:&dispatchState length:sizeof dispatchState atIndex:1];
     [compute dispatchThreadgroups:MTLSizeMake(c.groups[0], c.groups[1], c.groups[2])
             threadsPerThreadgroup:MTLSizeMake(tx, ty, tz)];
@@ -2201,6 +2210,15 @@ void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
     }
     NSFileManager* files = [NSFileManager defaultManager];
     NSURL* folder = archiveFolder();
+    // Left off: on the iPhone no lookup ever hit (0 found in 147 over 8
+    // archives, 120 MB read at each launch), while each addition compiled the
+    // pipeline a second time, behind the compile backlog. Its files are removed.
+    if (!kUseBinaryArchive) {
+        if (folder) [files removeItemAtURL:folder error:nil];
+        std::lock_guard<std::mutex> lock(mutex);
+        archiveState = "desactivee (aucune reussite sur l'iPhone, chaque ajout recompilait)";
+        return;
+    }
     std::string state;
     NSMutableArray<id<MTLBinaryArchive>>* found = [NSMutableArray array];
     id<MTLBinaryArchive> fresh = nil;

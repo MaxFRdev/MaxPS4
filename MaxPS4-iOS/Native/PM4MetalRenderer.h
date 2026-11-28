@@ -59,7 +59,7 @@ public:
     // Encodes one compute dispatch into `commands`, false with `error` set
     // (and nothing encoded) when it cannot be expressed.
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
-    unsigned kernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
+    unsigned kernelsBuilt = 0, ldsKernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
     unsigned dispatchesEncoded = 0;
     // Compute traffic with guest memory, cumulated: copied in while encoding,
     // written back after the GPU.
@@ -364,6 +364,7 @@ private:
         // and the slowest took 70 s (59 built in a session, 756 waiting);
         // sharing the library limit starved them (38 built). Six at a time.
         static constexpr unsigned pipelineLimit = 6;
+        static constexpr bool kUseBinaryArchive = false; // see openArchive
         std::deque<std::function<void()>> pipelineQueue;
         void startPipeline(std::function<void()> job) {
             { std::lock_guard<std::mutex> lock(mutex);
@@ -395,6 +396,9 @@ private:
     std::vector<PendingGuestWrite> pendingGuestWrites_;
     static MTLCompileOptions* compileOptions();
     std::map<std::pair<std::uint64_t, std::uint32_t>, id<MTLComputePipelineState>> kernels_;
+    // Kernels using LDS (GCNTranslation::lds), with its size in bytes (from
+    // COMPUTE_PGM_RSRC2.LDS_SIZE, 512-byte units): threadgroup memory 0.
+    std::map<std::pair<std::uint64_t, std::uint32_t>, unsigned> ldsKernels_;
     id<MTLComputePipelineState> kernel(const PM4Dispatch& dispatch);
     // 0: not a fill; 1: Gnmx's table fill; 2: a fill with one value from a constant buffer.
     int fillProgram(std::uint64_t address);

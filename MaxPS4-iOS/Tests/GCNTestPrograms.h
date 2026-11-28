@@ -120,6 +120,26 @@ inline void loadComputeCS(Arena& arena) {
     for (unsigned n = 0; n < 40; ++n)
         for (unsigned c = 0; c < 4; ++c) arena.put(computeSource + 16 * n + 4 * c, bits(float((n * 7 + c * 3) % 13) / 8.0f - 0.25f));
 }
+// A compute program exchanging values through LDS, 32 threads per group
+// (thread group id x in s16): thread n writes n to LDS word n, waits at
+// s_barrier and stores LDS word n ^ 1 as record 32g + n of computeSgprs'
+// destination (stride 4).
+constexpr std::uint64_t ldsCS = 0x11400;
+inline void loadLdsCS(Arena& arena) {
+    arena.code(ldsCS, {
+        0x8f118510,             // s_lshl_b32 s17, s16, 5
+        0x4a080011,             // v_add_i32 v4, vcc, s17, v0
+        0x34020082,             // v_lshlrev_b32 v1, 2, v0
+        0xd8340000, 0x00000001, // ds_write_b32 v1, v0
+        0xbf8c007f,             // s_waitcnt lgkmcnt(0)
+        0xbf8a0000,             // s_barrier
+        0xbf880000,             // s_cbranch_execz 0 (a branch decided for the whole group)
+        0x3a040284,             // v_xor_b32 v2, 4, v1
+        0xd8d80000, 0x03000002, // ds_read_b32 v3, v2
+        0xbf8c007f,             // s_waitcnt lgkmcnt(0)
+        0xe0702000, 0x80010304, // buffer_store_dword v3, v4, s[4:7], 0 idxen
+        0xbf810000});           // s_endpgm
+}
 // A VS exporting image_get_resinfo of the T# in s[0:7] at mip level v0 (the
 // vertex index) as its position bits: a 1024x512 2D image with 4 levels.
 constexpr std::uint64_t resinfoVS = 0x11e00;

@@ -45,6 +45,11 @@ struct GCNTranslation {
     bool position = false, quad = false, mayKill = false;
     bool stores = false;         // compute: writes guest memory
     unsigned ldsApproximated = 0; // pixel LDS accesses read as 0 / dropped (no LDS outside compute)
+    // compute: reads or writes LDS, or waits at s_barrier. The function then
+    // takes the group's LDS after Q (GCN_TG gcn_lds_word* T, uint ldsBytes),
+    // and every branch is decided for the whole thread group (gcn_group_any),
+    // so that each thread reaches each barrier.
+    bool lds = false;
     // pixel: the scalar loads, each with `2 + count` words at `offset` of the
     // draw's table of scalar values (address, then words: gcn_site_hit).
     std::vector<GCNScalarSite> sites;
@@ -71,6 +76,9 @@ public:
                       (i.encoding==GCNEncoding::sopp && i.opcode==0))) break;
                 pc+=4*i.size;
             }
+            if (options_.stage == GCNStage::compute)
+                for (const auto& [at, in] : code_)
+                    if (in.i.encoding == GCNEncoding::ds || (in.i.encoding == GCNEncoding::sopp && in.i.opcode == 10)) out_.lds = true;
             emit(entry);
             out_.mayKill=execMayKill_ || (restoresEntryExec_ &&
                 (scalarWrites_[savedEntryExec_]!=1 || scalarWrites_[savedEntryExec_+1]!=1));
@@ -208,6 +216,9 @@ private:
     static const char* ex() { return "((s126 & 1u) != 0u)"; }
     // A wave-level decision: per quad in pixel programs, per lane otherwise
     // (Metal has no quad operations in vertex functions).
+    // A branch condition: for the whole thread group where barriers must
+    // stay converged (out_.lds), true if any thread's is.
+    std::string decide(const std::string& cond) { return out_.lds ? "gcn_group_any(T, " + cond + ")" : "(" + cond + ")"; }
     std::string any(const std::string& cond) {
         if (options_.stage != GCNStage::pixel) return "(" + cond + ")";
         out_.quad = true;
@@ -245,7 +256,8 @@ private:
             }
             body_ += inOrder ? "    } while (false);\n" : "    }\n";
         }
-        std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q) {\n"
+        std::string head = "GCN_FN void " + options_.name + "(GCN_THREAD GCNLane& L, GCNMemory M, GCN_THREAD GCNQuad& Q" +
+                           std::string(out_.lds ? ", GCN_TG gcn_lds_word* T, uint ldsBytes" : "") + ") {\n"
                            "    uint gcn_hint = 0u; (void)gcn_hint;\n";
         for (const auto n : sregs_) {
             std::string init = "0u";
@@ -419,16 +431,19 @@ private:
             flowTo(branchTarget(pc, i)); flowTo(next);
         };
         switch (i.opcode) {
-        case 0: case 10: case 12: case 13: case 14: case 15: case 16: case 17: case 19: case 20: case 21: case 22:
+        case 10:
+            if (out_.lds) { body_ += "gcn_barrier();"; return true; }
+            body_ += "/* " + in.name + " */"; return true;
+        case 0: case 12: case 13: case 14: case 15: case 16: case 17: case 19: case 20: case 21: case 22:
             body_ += "/* " + in.name + " */"; return true;
         case 1: body_ += "running = false; break;"; ended = true; return true;
         case 2: flowTo(branchTarget(pc, i)); body_ += "pc = " + std::to_string(index(branchTarget(pc, i))) + "u; break;"; ended = true; return true;
-        case 4: branch("!scc"); return true;
-        case 5: branch("scc"); return true;
-        case 6: branch("!" + any(s(106) + " != 0u || " + s(107) + " != 0u")); return true;
-        case 7: branch(any(s(106) + " != 0u || " + s(107) + " != 0u")); return true;
-        case 8: branch("!" + any(s(126) + " != 0u || " + s(127) + " != 0u")); return true;
-        case 9: branch(any(s(126) + " != 0u || " + s(127) + " != 0u")); return true;
+        case 4: branch("!" + decide("scc")); return true;
+        case 5: branch(decide("scc")); return true;
+        case 6: branch("!" + decide(any(s(106) + " != 0u || " + s(107) + " != 0u"))); return true;
+        case 7: branch(decide(any(s(106) + " != 0u || " + s(107) + " != 0u"))); return true;
+        case 8: branch("!" + decide(any(s(126) + " != 0u || " + s(127) + " != 0u"))); return true;
+        case 9: branch(decide(any(s(126) + " != 0u || " + s(127) + " != 0u"))); return true;
         default: return false;
         }
     }
@@ -731,6 +746,48 @@ private:
         sregs_.insert(126);
         return true;
     }
+    // LDS in a compute program: the group's words at T, ldsBytes of them
+    // usable (outside: reads 0, writes and atomics nothing). Addresses are
+    // v[addr] + offset, in bytes; two-address forms use offset0 and offset1 in
+    // elements (st64: 64 elements).
+    bool ldsAccess(const Inst& in) {
+        const GCNInstruction& i = in.i;
+        if ((i.word0 >> 17) & 1) return fail("GDS access: " + in.name);
+        const unsigned op = i.opcode, addr = i.word1 & 0xff, d0 = (i.word1 >> 8) & 0xff, d1 = (i.word1 >> 16) & 0xff, dst = i.word1 >> 24;
+        const unsigned off0 = i.word0 & 0xff, off1 = (i.word0 >> 8) & 0xff, off = i.word0 & 0xffff;
+        auto at = [&](unsigned bytes) { return "a + " + std::to_string(bytes) + "u"; };
+        std::string b;
+        auto store = [&](unsigned bytes, unsigned reg) { b += "gcn_lds_store(T, ldsBytes, " + at(bytes) + ", " + v(reg) + "); "; };
+        auto load = [&](unsigned bytes, unsigned reg) { b += v(reg) + " = gcn_lds_load(T, ldsBytes, " + at(bytes) + "); "; };
+        if (op == 13) store(off, d0);
+        else if (op == 30 || op == 31) b += "gcn_lds_store_bits(T, ldsBytes, " + at(off) + ", " + v(d0) + ", " + (op == 30 ? "8u" : "16u") + "); ";
+        else if (op == 14 || op == 15) { const unsigned k = op == 15 ? 256 : 4; store(off0 * k, d0); store(off1 * k, d1); }
+        else if (op == 77) { store(off, d0); store(off + 4, d0 + 1); }
+        else if (op == 78 || op == 79) {
+            const unsigned k = op == 79 ? 512 : 8;
+            store(off0 * k, d0); store(off0 * k + 4, d0 + 1); store(off1 * k, d1); store(off1 * k + 4, d1 + 1);
+        } else if (op == 54) load(off, dst);
+        else if (op >= 57 && op <= 60)
+            b += v(dst) + " = gcn_lds_load_bits(T, ldsBytes, " + at(off) + ", " + (op <= 58 ? "8u" : "16u") + ", " + (op == 57 || op == 59 ? "true" : "false") + "); ";
+        else if (op == 55 || op == 56) { const unsigned k = op == 56 ? 256 : 4; load(off0 * k, dst); load(off1 * k, dst + 1); }
+        else if (op == 118) { load(off, dst); load(off + 4, dst + 1); }
+        else if (op == 119 || op == 120) {
+            const unsigned k = op == 120 ? 512 : 8;
+            load(off0 * k, dst); load(off0 * k + 4, dst + 1); load(off1 * k, dst + 2); load(off1 * k + 4, dst + 3);
+        } else if (op <= 11 || op == 16 || (op >= 32 && op <= 43) || op == 45 || op == 48) {
+            // Atomics: 0 add, 1 sub, 2 rsub, 3 inc, 4 dec, 5/6 signed min/max,
+            // 7/8 unsigned min/max, 9 and, 10 or, 11 xor, 13 exchange, 16
+            // compare-store (data0 compared, data1 stored); +32 returns the old value.
+            const unsigned kind = op == 45 ? 13 : op & 31;
+            const std::string call = "gcn_lds_atomic(T, ldsBytes, " + at(off) + ", " + std::to_string(kind) + "u, " + v(d0) + ", " +
+                                     (kind == 16 ? v(d1) : std::string("0u")) + ")";
+            b += (op >= 32 ? v(dst) + " = " : std::string()) + call + "; ";
+        } else return fail("unsupported LDS access: " + in.name);
+        // The address is read before any destination is written.
+        body_ += "if (" + std::string(ex()) + ") { uint a = " + v(addr) + "; " + b + "}";
+        sregs_.insert(126);
+        return out_.error.empty();
+    }
     bool ds(const Inst& in) {
         const GCNInstruction& i = in.i;
         const unsigned offset = i.word0 & 0xffff;
@@ -738,6 +795,7 @@ private:
             // Other LDS accesses in a pixel program (CoD left 3857 draws out over
             // one): no LDS here, so reads and returning atomics give 0 and
             // writes are dropped, rather than losing the draw. Compute still fails.
+            if (options_.stage == GCNStage::compute) return ldsAccess(in);
             if (options_.stage != GCNStage::pixel) return fail("LDS access other than a swizzle: " + in.name);
             const unsigned op = i.opcode, dst = i.word1 >> 24;
             unsigned returned = 0;
@@ -952,10 +1010,14 @@ inline GCNTranslation translateGCN(const GCNMemory& memory, std::uint64_t entry,
 // gcnMetalPrelude()). Buffers: 0 guest memory, writable: one window at
 // `base` or rangeCount copied ranges, as for draws; 1 GCNDispatchState. COMPUTE_PGM_RSRC2 (rsrc2) enables the thread group ids,
 // which follow the user SGPRs, and the thread id components beyond x.
-inline std::string gcnMetalComputeEntry(const std::string& name) {
-    return "struct GCNDispatchState { ulong base; ulong size; uint user[16]; uint userCount; uint rsrc2; uint rangeCount; uint pad; ulong ranges[48]; };\n"
+// With `lds` (GCNTranslation::lds): threadgroup memory 0 holds 16 bytes for
+// gcn_group_any, then the program's LDS, of `ldsBytes` (the state's last
+// 32-bit word before the ranges) bytes.
+inline std::string gcnMetalComputeEntry(const std::string& name, bool lds = false) {
+    return "struct GCNDispatchState { ulong base; ulong size; uint user[16]; uint userCount; uint rsrc2; uint rangeCount; uint ldsBytes; ulong ranges[48]; };\n"
            "kernel void gcn_compute(uint3 group [[threadgroup_position_in_grid]], uint3 local [[thread_position_in_threadgroup]],\n"
-           "    device uchar* mem [[buffer(0)]], constant GCNDispatchState& D [[buffer(1)]]) {\n"
+           "    device uchar* mem [[buffer(0)]], constant GCNDispatchState& D [[buffer(1)]]" +
+           std::string(lds ? ", threadgroup atomic_uint* gcn_group [[threadgroup(0)]]" : "") + ") {\n"
            "    GCNLane L; gcn_lane_init(L);\n"
            "    uint n = min(D.userCount, 16u);\n"
            "    for (uint k = 0u; k < n; ++k) L.user[k] = D.user[k];\n"
@@ -964,7 +1026,7 @@ inline std::string gcnMetalComputeEntry(const std::string& name) {
            "    if ((D.rsrc2 & 0x200u) != 0u && n < 20u) L.user[n++] = group.z;\n"
            "    L.vinit[0] = local.x; L.vinit[1] = local.y; L.vinit[2] = local.z;\n"
            "    GCNMemory M = { mem, D.base, D.size, D.ranges, D.rangeCount }; GCNQuad Q = { 0u };\n"
-           "    " + name + "(L, M, Q);\n}\n";
+           "    " + name + (lds ? "(L, M, Q, gcn_group + 4, D.ldsBytes);\n}\n" : "(L, M, Q);\n}\n");
 }
 
 // One past the highest bit set in `bits` (at least 1): an array size.
@@ -1055,6 +1117,68 @@ GCN_FN device const uchar* gcn_at(GCNMemory M, ulong o) {
             k == 4u ? M.s.x[3] : k == 5u ? M.s.x[4] : M.s.x[5]) + o;
 }
 struct GCNQuad { uint unused; };
+// A compute program's LDS (GCNTranslation::lds): the group's words, every
+// access atomic so that atomics and plain accesses mix; the 16 bytes before
+// T hold gcn_group_any's vote.
+#define GCN_TG threadgroup
+typedef atomic_uint gcn_lds_word;
+GCN_FN void gcn_barrier() { threadgroup_barrier(mem_flags::mem_threadgroup); }
+GCN_FN bool gcn_group_any(threadgroup atomic_uint* T, bool b) {
+    threadgroup atomic_uint* vote = T - 4;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    atomic_store_explicit(vote, 0u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (b) atomic_fetch_or_explicit(vote, 1u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return atomic_load_explicit(vote, memory_order_relaxed) != 0u;
+}
+GCN_FN bool gcn_lds_inside(uint bytes, uint a) { return a < bytes && bytes - a >= 4u; }
+GCN_FN uint gcn_lds_load(threadgroup atomic_uint* T, uint bytes, uint a) {
+    a &= ~3u;
+    return gcn_lds_inside(bytes, a) ? atomic_load_explicit(T + (a >> 2), memory_order_relaxed) : 0u;
+}
+GCN_FN void gcn_lds_store(threadgroup atomic_uint* T, uint bytes, uint a, uint value) {
+    a &= ~3u;
+    if (gcn_lds_inside(bytes, a)) atomic_store_explicit(T + (a >> 2), value, memory_order_relaxed);
+}
+GCN_FN uint gcn_lds_load_bits(threadgroup atomic_uint* T, uint bytes, uint a, uint bits, bool sign) {
+    uint r = (gcn_lds_load(T, bytes, a) >> ((a & 3u) * 8u)) & ((1u << bits) - 1u);
+    if (sign && ((r >> (bits - 1u)) & 1u) != 0u) r |= ~((1u << bits) - 1u);
+    return r;
+}
+GCN_FN void gcn_lds_store_bits(threadgroup atomic_uint* T, uint bytes, uint a, uint value, uint bits) {
+    uint w = a & ~3u;
+    if (!gcn_lds_inside(bytes, w)) return;
+    uint shift = (a & 3u) * 8u, mask = ((1u << bits) - 1u) << shift;
+    atomic_fetch_and_explicit(T + (w >> 2), ~mask, memory_order_relaxed);
+    atomic_fetch_or_explicit(T + (w >> 2), (value << shift) & mask, memory_order_relaxed);
+}
+// The old value; `kind` as GCNTranslator::ldsAccess.
+GCN_FN uint gcn_lds_atomic(threadgroup atomic_uint* T, uint bytes, uint a, uint kind, uint data, uint data2) {
+    a &= ~3u;
+    if (!gcn_lds_inside(bytes, a)) return 0u;
+    threadgroup atomic_uint* p = T + (a >> 2);
+    threadgroup atomic_int* q = (threadgroup atomic_int*)p;
+    switch (kind) {
+    case 0u: return atomic_fetch_add_explicit(p, data, memory_order_relaxed);
+    case 1u: return atomic_fetch_sub_explicit(p, data, memory_order_relaxed);
+    case 5u: return uint(atomic_fetch_min_explicit(q, int(data), memory_order_relaxed));
+    case 6u: return uint(atomic_fetch_max_explicit(q, int(data), memory_order_relaxed));
+    case 7u: return atomic_fetch_min_explicit(p, data, memory_order_relaxed);
+    case 8u: return atomic_fetch_max_explicit(p, data, memory_order_relaxed);
+    case 9u: return atomic_fetch_and_explicit(p, data, memory_order_relaxed);
+    case 10u: return atomic_fetch_or_explicit(p, data, memory_order_relaxed);
+    case 11u: return atomic_fetch_xor_explicit(p, data, memory_order_relaxed);
+    case 13u: return atomic_exchange_explicit(p, data, memory_order_relaxed);
+    default: break;
+    }
+    uint old = atomic_load_explicit(p, memory_order_relaxed);
+    for (;;) {
+        uint next = kind == 2u ? data - old : kind == 3u ? (old >= data ? 0u : old + 1u) :
+                    kind == 4u ? ((old == 0u || old > data) ? data : old - 1u) : kind == 16u ? (old == data ? data2 : old) : old;
+        if (atomic_compare_exchange_weak_explicit(p, &old, next, memory_order_relaxed, memory_order_relaxed)) return old;
+    }
+}
 struct GCNLane {
     uint user[20]; uint vinit[24]; bool exec; uint quadLane;
     float4 attr[GCN_ATTRS];

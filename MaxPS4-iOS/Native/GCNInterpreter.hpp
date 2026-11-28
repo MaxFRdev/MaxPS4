@@ -167,6 +167,11 @@ public:
     // first active lane reads or writes (base when no lane is active).
     std::function<void(std::uint64_t base, std::uint64_t bytes, std::uint32_t stride, std::uint64_t address)> buffer;
 
+    // The group's LDS: ldsBytes usable (outside: reads 0, writes nothing),
+    // allocated by the first access. One wave runs here: s_barrier waits for nothing.
+    std::vector<std::uint32_t> lds;
+    unsigned ldsBytes = 65536;
+
     std::uint32_t& v(unsigned reg, unsigned lane) { return v_[std::size_t(reg & 0xff) * lanes_ + lane]; }
     std::uint64_t exec() const { return std::uint64_t(s[126]) | std::uint64_t(s[127]) << 32; }
     void setExec(std::uint64_t mask) { s[126] = std::uint32_t(mask); s[127] = std::uint32_t(mask >> 32); }
@@ -178,6 +183,8 @@ public:
     void reset() {
         s.fill(0); scc = false; exports.clear(); error.clear(); skipped = 0;
         std::fill(v_.begin(), v_.end(), 0);
+        if (ldsTouched_) { std::fill(lds.begin(), lds.end(), 0); ldsTouched_ = false; } // scans reset per draw
+        ldsBytes = 65536;
         attribute = {}; resource = {}; imageResource = {}; stored = {}; buffer = {}; images = nullptr; tiledReadsZero = false; scalarLoad = {};
         setExec(lanes_ == 64 ? ~0ull : ((1ull << lanes_) - 1));
     }
@@ -222,6 +229,7 @@ private:
     unsigned lanes_;
     GCNCodeCache* cache_;
     std::vector<std::uint32_t> v_;
+    bool ldsTouched_ = false;
 
     bool fail(const std::string& message) { error = message; return false; }
     bool active(unsigned lane) const { return lane < lanes_ && ((exec() >> lane) & 1); }
@@ -686,8 +694,77 @@ private:
         }
         return true;
     }
+    // LDS accesses, lane by lane in lane order (atomics return the value
+    // before this lane's operation), as GCNTranslator::ldsAccess.
+    bool ldsInside(std::uint32_t a) const { return a < ldsBytes && ldsBytes - a >= 4 && a < 65536; }
+    std::uint32_t ldsLoad(std::uint32_t a) { a &= ~3u; return ldsInside(a) ? lds[a >> 2] : 0; }
+    void ldsStore(std::uint32_t a, std::uint32_t value) { a &= ~3u; if (ldsInside(a)) lds[a >> 2] = value; }
+    bool ldsAccess(const GCNInstruction& i) {
+        if ((i.word0 >> 17) & 1) return fail("GDS access");
+        if (lds.empty()) lds.assign(16384, 0);
+        ldsTouched_ = true;
+        const unsigned op = i.opcode, addr = i.word1 & 0xff, d0 = (i.word1 >> 8) & 0xff, d1 = (i.word1 >> 16) & 0xff, dst = i.word1 >> 24;
+        const unsigned off0 = i.word0 & 0xff, off1 = (i.word0 >> 8) & 0xff, off = i.word0 & 0xffff;
+        const bool atomic = op <= 11 || op == 16 || (op >= 32 && op <= 43) || op == 45 || op == 48;
+        const bool known = op == 13 || op == 14 || op == 15 || op == 30 || op == 31 || op == 77 || op == 78 || op == 79 ||
+                           op == 54 || op == 55 || op == 56 || (op >= 57 && op <= 60) || op == 118 || op == 119 || op == 120 || atomic;
+        if (!known) return false;
+        for (unsigned lane = 0; lane < lanes_; ++lane) {
+            if (!active(lane)) continue;
+            const std::uint32_t a = v(addr, lane);
+            auto store = [&](unsigned bytes, unsigned reg) { ldsStore(a + bytes, v(reg, lane)); };
+            std::uint32_t got[4] = {};
+            unsigned count = 0;
+            if (op == 13) store(off, d0);
+            else if (op == 30 || op == 31) {
+                const std::uint32_t at = a + off, w = at & ~3u, bits = op == 30 ? 8 : 16, shift = (at & 3) * 8;
+                const std::uint32_t mask = std::uint32_t((1ull << bits) - 1) << shift;
+                if (ldsInside(w)) lds[w >> 2] = (lds[w >> 2] & ~mask) | ((v(d0, lane) << shift) & mask);
+            } else if (op == 14 || op == 15) { const unsigned k = op == 15 ? 256 : 4; store(off0 * k, d0); store(off1 * k, d1); }
+            else if (op == 77) { store(off, d0); store(off + 4, d0 + 1); }
+            else if (op == 78 || op == 79) {
+                const unsigned k = op == 79 ? 512 : 8;
+                store(off0 * k, d0); store(off0 * k + 4, d0 + 1); store(off1 * k, d1); store(off1 * k + 4, d1 + 1);
+            } else if (op == 54) { got[0] = ldsLoad(a + off); count = 1; }
+            else if (op >= 57 && op <= 60) {
+                const std::uint32_t at = a + off, bits = op <= 58 ? 8 : 16;
+                std::uint32_t r = (ldsLoad(at) >> ((at & 3) * 8)) & ((1u << bits) - 1);
+                if ((op == 57 || op == 59) && ((r >> (bits - 1)) & 1)) r |= ~((1u << bits) - 1);
+                got[0] = r; count = 1;
+            } else if (op == 55 || op == 56) { const unsigned k = op == 56 ? 256 : 4; got[0] = ldsLoad(a + off0 * k); got[1] = ldsLoad(a + off1 * k); count = 2; }
+            else if (op == 118) { got[0] = ldsLoad(a + off); got[1] = ldsLoad(a + off + 4); count = 2; }
+            else if (op == 119 || op == 120) {
+                const unsigned k = op == 120 ? 512 : 8;
+                got[0] = ldsLoad(a + off0 * k); got[1] = ldsLoad(a + off0 * k + 4);
+                got[2] = ldsLoad(a + off1 * k); got[3] = ldsLoad(a + off1 * k + 4); count = 4;
+            } else {
+                const unsigned kind = op == 45 ? 13 : op & 31;
+                const std::uint32_t at = (a + off) & ~3u, data = v(d0, lane), data2 = v(d1, lane);
+                if (!ldsInside(at)) { if (op >= 32) { got[0] = 0; count = 1; } }
+                else {
+                    std::uint32_t& p = lds[at >> 2];
+                    const std::uint32_t old = p;
+                    switch (kind) {
+                    case 0: p = old + data; break;           case 1: p = old - data; break;
+                    case 2: p = data - old; break;           case 3: p = old >= data ? 0 : old + 1; break;
+                    case 4: p = (old == 0 || old > data) ? data : old - 1; break;
+                    case 5: p = std::int32_t(old) < std::int32_t(data) ? old : data; break;
+                    case 6: p = std::int32_t(old) > std::int32_t(data) ? old : data; break;
+                    case 7: p = old < data ? old : data; break; case 8: p = old > data ? old : data; break;
+                    case 9: p = old & data; break;           case 10: p = old | data; break;
+                    case 11: p = old ^ data; break;          case 13: p = data; break;
+                    case 16: p = old == data ? data2 : old; break;
+                    default: break;
+                    }
+                    if (op >= 32) { got[0] = old; count = 1; }
+                }
+            }
+            for (unsigned k = 0; k < count; ++k) v(dst + k, lane) = got[k];
+        }
+        return true;
+    }
     bool ds(const GCNInstruction& i) {
-        if (i.opcode != 53) return false; // only ds_swizzle_b32 (no LDS is modelled)
+        if (i.opcode != 53) return ldsAccess(i);
         const unsigned dst = i.word1 >> 24, src = i.word1 & 0xff;
         const unsigned offset = i.word0 & 0xffff;
         std::array<std::uint32_t, 64> r{};

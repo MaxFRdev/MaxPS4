@@ -160,6 +160,39 @@ int main() {
         assert(translated.bytes[computeImage + 4 * (8 + 1) + 2 - Arena::start] == 32);
         assert(translated.bytes[computeImage + 4 * 64 - Arena::start] == 0);
     }
+    // LDS through the interpreter, one wave per group: each thread stores
+    // its neighbour's id (n ^ 1). Translated, one lane per call: a lane reads
+    // the LDS words it wrote itself (the GPU test exchanges across threads).
+    {
+        Arena interpreted;
+        loadLdsCS(interpreted);
+        for (unsigned group = 0; group < 2; ++group) {
+            GCNWave wave(interpreted.memory, 32);
+            for (unsigned k = 0; k < 16; ++k) wave.s[k] = computeSgprs[k];
+            wave.s[16] = group;
+            for (unsigned lane = 0; lane < 32; ++lane) wave.v(0, lane) = lane;
+            assert(wave.run(ldsCS));
+        }
+        for (unsigned n = 0; n < 64; ++n) {
+            std::uint32_t got; std::memcpy(&got, interpreted.bytes.data() + computeBuffer + 4 * n - Arena::start, 4);
+            assert(got == ((n & 31) ^ 1));
+        }
+        Arena translated;
+        loadLdsCS(translated);
+        const rt::GCNMemory T = window(translated);
+        std::uint32_t lds[32] = {};
+        for (unsigned lane = 0; lane < 32; lane += 2) lds[lane + 1] = 100 + lane; // what lane n ^ 1 would write
+        for (unsigned lane = 0; lane < 32; lane += 2) {
+            rt::GCNLane L;
+            for (unsigned k = 0; k < 16; ++k) L.user[k] = computeSgprs[k];
+            L.user[16] = 0; L.vinit[0] = lane;
+            rt::cs_lds(L, T, unusedQuad, lds, sizeof lds);
+        }
+        for (unsigned lane = 0; lane < 32; lane += 2) {
+            std::uint32_t got; std::memcpy(&got, translated.bytes.data() + computeBuffer + 4 * lane - Arena::start, 4);
+            assert(got == 100 + lane && lds[lane] == lane);
+        }
+    }
     // A store to a macro-tiled image (tile mode 14) is linear, rows of
     // `pitch` texels, as the renderer copies colour targets in and out of a
     // kernel's memory; a compute load reads it back the same way.
@@ -180,5 +213,5 @@ int main() {
         rt::gcn_image_store(T, t, width, 0, rt::uint4(bits(1.0f), 0u, 0u, 0u), 15u);
         assert(image.bytes[(base - Arena::start) + width * 4] == 0);
     }
-    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, pixel quad, compute stores, tiled image store)");
+    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, pixel quad, compute stores, tiled image store, LDS)");
 }

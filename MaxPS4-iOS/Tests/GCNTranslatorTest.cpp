@@ -126,10 +126,26 @@ int main(int argc, char** argv) {
     GCNTranslateOptions csAsPixel = cs; csAsPixel.stage = GCNStage::pixel;
     assert(translateGCN(arena.memory, computeCS, csAsPixel).error.find("buffer store outside a compute program") == 0);
     assert(gcnMetalComputeEntry("cs_copy").find("kernel void gcn_compute(") != std::string::npos);
+    // LDS and s_barrier: the group's LDS after Q, branches decided for the group.
+    loadLdsCS(arena);
+    GCNTranslateOptions ldsOptions = cs; ldsOptions.name = "cs_lds";
+    const auto shared = translateGCN(arena.memory, ldsCS, ldsOptions);
+    if (!shared) std::printf("%s\n", shared.error.c_str());
+    assert(shared && shared.lds && shared.stores);
+    assert(shared.source.find("GCN_TG gcn_lds_word* T, uint ldsBytes)") != std::string::npos);
+    assert(shared.source.find("gcn_lds_store(T, ldsBytes, a + 0u, v0)") != std::string::npos);
+    assert(shared.source.find("v3 = gcn_lds_load(T, ldsBytes, a + 0u)") != std::string::npos);
+    assert(shared.source.find("gcn_barrier();") != std::string::npos && shared.source.find("gcn_group_any(T, ") != std::string::npos);
+    assert(!copied.lds && copied.source.find("gcn_group_any") == std::string::npos);
+    assert(gcnMetalComputeEntry("cs_lds", true).find("threadgroup atomic_uint* gcn_group [[threadgroup(0)]]") != std::string::npos);
+    assert(gcnMetalComputeEntry("cs_lds", true).find("cs_lds(L, M, Q, gcn_group + 4, D.ldsBytes)") != std::string::npos);
+    // LDS in a vertex program is still refused.
+    GCNTranslateOptions ldsAsVertex = ldsOptions; ldsAsVertex.stage = GCNStage::vertex;
+    assert(translateGCN(arena.memory, ldsCS, ldsAsVertex).error.find("LDS access other than a swizzle") == 0);
     // The Metal prelude carries the shared runtime text.
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << copied.source;
-    std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS and compute stores translated; refusals reported");
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << copied.source << shared.source;
+    std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS, compute stores and LDS translated; refusals reported");
 }
