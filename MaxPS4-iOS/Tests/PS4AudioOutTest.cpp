@@ -121,7 +121,7 @@ int main() {
     assert(near(out[2], 0.75f) && near(out[3], -0.25f));   // NaN played as silence.
     assert(near(out[4], 0.875f) && near(out[5], -0.125f));
 
-    // Ports full, then the ring drops the oldest frames without a reader.
+    // Ports full, then the ring drops its oldest half at once without a reader.
     for (int32_t i = 4; i <= int32_t(PS4AudioOut::port_limit); ++i)
         assert(audio.open(1,0,0,2048,48000,0) == i);
     assert(audio.open(1,0,0,256,48000,1) == PS4AudioOut::error(0x05));
@@ -130,7 +130,7 @@ int main() {
     threads.resume();
     const auto stats = audio.stats();
     assert(stats.ports == PS4AudioOut::port_limit);
-    assert(stats.dropped == 7 * 2048 - PS4AudioOut::ring_frames);
+    assert(stats.dropped == PS4AudioOut::ring_frames / 2); // 14336 frames into 12000: one drop of 6000.
     assert(stats.outputs > 40 && stats.written == 256 * 3 + 7 * 2048 && stats.silent > 0);
     assert(stats.audible > 0 && stats.audible < stats.written); // The NaN mono frame is muted.
     assert(audio.read(out.data(), 4096) == 4096);
