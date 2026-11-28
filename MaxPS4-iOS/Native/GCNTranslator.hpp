@@ -865,7 +865,8 @@ private:
                 call = "gcn_depth_compare(" + call + ", gf(" + v(vaddr + reference) + "), (" + s(samp) + " >> 12) & 7u)";
         } else if (op == 0 || op == 1 || op == 2) {
             // image_load_mip reads level 0 like image_load.
-            call = "gcn_image_load(M, t, " + v(vaddr) + ", " + v(vaddr + 1) + ")";
+            call = std::string(options_.stage == GCNStage::compute ? "gcn_image_load_linear" : "gcn_image_load") + "(M, t, " +
+                   v(vaddr) + ", " + v(vaddr + 1) + ")";
         } else if (op == 96) {
             // image_get_lod: level 0 (MaxPS4 textures have no mip chain).
             body_ += "if (" + std::string(ex()) + ") { ";

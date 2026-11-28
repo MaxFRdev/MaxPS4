@@ -423,11 +423,13 @@ GCN_FN float4 gcn_sample(GCNMemory M, GCNRes8 t, GCNRes4 s, bool unorm, float u,
     }
     return gcn_sample_at(M, t, s, unorm, u, v, resolved, offset);
 }
-// image_store to a linear 2D image (tiling index 8): components in channel
-// order, those outside `dmask` stored as 0. Other formats and tilings: none.
+// image_store to a 2D image: components in channel order, those outside
+// `dmask` stored as 0. Every tile mode is stored linearly (rows of `pitch`
+// texels): the renderer holds a tiled image the kernel stores as a colour
+// target, copied linearly in and out of the kernel's memory. Other formats: none.
 GCN_FN void gcn_image_store(GCNMemory M, GCNRes8 t, uint x, uint y, uint4 value, uint dmask) {
     uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
-    if (((t.d[3] >> 20) & 0x1fu) != 8u || x >= w || y >= h) return;
+    if (x >= w || y >= h) return;
     ulong base = (ulong(t.d[0]) | (ulong(t.d[1] & 0xffu) << 32)) << 8;
     uint dfmt = (t.d[1] >> 20) & 0x3fu; uint nfmt = (t.d[1] >> 26) & 15u; uint pitch = ((t.d[4] >> 13) & 0x3fffu) + 1u;
     uint channels = 0u; uint bits = 32u;
@@ -455,6 +457,19 @@ GCN_FN float4 gcn_image_load(GCNMemory M, GCNRes8 t, uint x, uint y) {
     uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
     if (((t.d[3] >> 20) & 0x1fu) != 8u || x >= w || y >= h) return float4(0.0f, 0.0f, 0.0f, 0.0f);
     return gcn_texel(M, t, int(x), int(y));
+}
+// gcn_image_load in a compute kernel: a macro-tiled image is read linearly,
+// as the renderer copies colour targets into the kernel's memory (see
+// gcn_image_store); 1D micro tiling is still read through its tiles.
+GCN_FN float4 gcn_image_load_linear(GCNMemory M, GCNRes8 t, uint x, uint y) {
+    uint tiling = (t.d[3] >> 20) & 0x1fu;
+    if (tiling != 8u && !gcn_micro_tiled(tiling)) t.d[3] = (t.d[3] & ~(0x1fu << 20)) | (8u << 20);
+    if (gcn_micro_tiled(tiling)) {
+        uint w = (t.d[2] & 0x3fffu) + 1u; uint h = ((t.d[2] >> 14) & 0x3fffu) + 1u;
+        if (x >= w || y >= h) return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return gcn_texel(M, t, int(x), int(y));
+    }
+    return gcn_image_load(M, t, x, y);
 }
 // A depth-compare sample: the reference against the fetched depth by the
 // S# DEPTH_COMPARE_FUNC (0 never ... 7 always), 1.0 where it passes.

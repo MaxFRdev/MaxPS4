@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <thread>
 
 namespace maxps4::gpu::gcnrt {
@@ -159,5 +160,25 @@ int main() {
         assert(translated.bytes[computeImage + 4 * (8 + 1) + 2 - Arena::start] == 32);
         assert(translated.bytes[computeImage + 4 * 64 - Arena::start] == 0);
     }
-    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, pixel quad, compute stores)");
+    // A store to a macro-tiled image (tile mode 14) is linear, rows of
+    // `pitch` texels, as the renderer copies colour targets in and out of a
+    // kernel's memory; a compute load reads it back the same way.
+    {
+        Arena image;
+        const rt::GCNMemory T = window(image);
+        constexpr std::uint64_t base = Arena::start + 0x1000;
+        constexpr unsigned width = 6, height = 4, pitch = 8;
+        rt::GCNRes8 t{{std::uint32_t(base >> 8), std::uint32_t(base >> 40) | 10u << 20, (width - 1) | (height - 1) << 14,
+                       4u | 5u << 3 | 6u << 6 | 7u << 9 | 14u << 20 | 9u << 28, (pitch - 1) << 13, 0, 0, 0}};
+        auto bits = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return u; };
+        rt::gcn_image_store(T, t, 3, 2, rt::uint4(bits(1.0f), bits(0.0f), bits(0.5f), bits(1.0f)), 15u);
+        const std::uint8_t* texel = image.bytes.data() + (base - Arena::start) + (2 * pitch + 3) * 4;
+        assert(texel[0] == 255 && texel[1] == 0 && texel[2] == 128 && texel[3] == 255);
+        const rt::float4 back = rt::gcn_image_load_linear(T, t, 3, 2);
+        assert(back[0] == 1.0f && back[1] == 0.0f && std::fabs(back[2] - 128.0f / 255.0f) < 1e-6f && back[3] == 1.0f);
+        // Outside the image: nothing stored.
+        rt::gcn_image_store(T, t, width, 0, rt::uint4(bits(1.0f), 0u, 0u, 0u), 15u);
+        assert(image.bytes[(base - Arena::start) + width * 4] == 0);
+    }
+    std::puts("PASS GCN translator stage 2: translated C++ matches the interpreter lane for lane (VS, fetch VS, pixel quad, compute stores, tiled image store)");
 }

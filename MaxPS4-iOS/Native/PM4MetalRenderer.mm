@@ -627,34 +627,68 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
         return fail("compute resource scan stopped: " + scanner_.dispatchError());
     // A kernel that addresses no memory (LDS only, or registers alone) has
     // nothing visible to change.
-    if (scanned.empty() && !scanner_.stored().empty()) return fail("compute program addresses no memory");
-    if (scanned.empty()) { ++dispatchesWithoutEffect; lastDispatchNote_ = "aucune mémoire adressée"; return true; }
-    // As for draws: over 16 ranges, joined across their smallest gaps, unless
-    // that copies 8 MiB more than the kernel's own ranges.
-    const std::vector<PM4Range> ranges = scanned.size() > 16 ? coalesceRanges(scanned, 16) : scanned;
-    if (scanned.size() > 16) {
-        std::uint64_t own = 0, joined = 0;
-        for (const auto& r : scanned) own += r.size;
-        for (const auto& r : ranges) joined += r.size;
-        if (joined > own + (8ull << 20)) return fail("compute reads more than 16 memory ranges");
-    }
     auto stored = [&](std::uint64_t address, std::uint64_t length) {
         for (const auto& s : scanner_.stored()) if (address < s.base + s.size && s.base < address + length) return true;
         return false;
     };
-    // Linear 8_8_8_8 images the kernel stores that no target holds yet.
-    struct Output { std::uint64_t base; unsigned pitch, height; };
+    // Images the kernel stores that no target holds yet become targets. In
+    // the kernel's memory every stored image is linear, rows of `pitch`
+    // texels (gcn_image_store ignores the tile mode), as colour targets are
+    // copied in and out: a tiled image never reaches guest memory.
+    struct Output { std::uint64_t base; unsigned pitch, height; MTLPixelFormat format; unsigned cbFormat; };
     std::vector<Output> outputs;
+    std::vector<PM4Range> wanted = scanned;
     for (const auto& t : scanner_.images()) {
         const std::uint64_t base = (std::uint64_t(t[0]) | std::uint64_t(t[1] & 0xff) << 32) << 8;
-        const unsigned dfmt = (t[1] >> 20) & 63, tiling = (t[3] >> 20) & 31;
+        const unsigned dfmt = (t[1] >> 20) & 63, nfmt = (t[1] >> 26) & 15, tiling = (t[3] >> 20) & 31;
         const unsigned pitch = ((t[4] >> 13) & 0x3fff) + 1, height = ((t[2] >> 14) & 0x3fff) + 1;
-        if (tiling != 8 && stored(base, 1)) {
-            lastDispatchNote_ = "compute refusé : écriture dans une image tuilée non prise en charge";
-            return fail("compute writes a tiled image; tiled compute stores are unsupported");
+        if (!stored(base, 1) || std::any_of(outputs.begin(), outputs.end(), [&](const Output& o) { return o.base == base; })) continue;
+        const auto held = targets_.find(base);
+        if (held != targets_.end() && held->second.texture) {
+            if (tiling == 8) continue;
+            if (held->second.texture.width != pitch) {
+                lastDispatchNote_ = "compute refusé : image tuilée écrite avec un pas différent de sa cible";
+                return fail("compute writes a tiled image whose pitch differs from its target");
+            }
+            wanted.push_back({base, std::uint64_t(pitch) * held->second.texture.height * bytesPerPixel(held->second.texture.pixelFormat)});
+            continue;
         }
-        if (dfmt == 10 && tiling == 8 && !targets_.count(base) && stored(base, std::uint64_t(pitch) * height * 4))
-            outputs.push_back({base, pitch, height});
+        // T# NUM_FORMAT to CB NUMBER_TYPE: SRGB is 9 in a T#, 6 in a CB.
+        const unsigned number = nfmt == 9 ? 6 : nfmt;
+        const MTLPixelFormat format = targetFormat(dfmt, number, 0);
+        const unsigned bpp = bytesPerPixel(format);
+        if (tiling == 8 && dfmt != 10) continue; // stays a guest-memory write
+        if (format == MTLPixelFormatInvalid || !bpp || (tiling != 8 && (dfmt == 6 || dfmt == 7 || dfmt == 9))) {
+            if (tiling == 8) continue;
+            lastDispatchNote_ = "compute refusé : écriture dans une image tuilée d'un format non pris en charge";
+            return fail("compute writes a tiled image in format " + std::to_string(dfmt) + "/" + std::to_string(nfmt));
+        }
+        const std::uint64_t length = std::uint64_t(pitch) * height * bpp;
+        if (tiling == 8 && !stored(base, length)) continue;
+        outputs.push_back({base, pitch, height, format, dfmt});
+        if (tiling != 8) wanted.push_back({base, length});
+    }
+    // Overlapping ranges joined: locate() needs each image inside one.
+    if (wanted.size() != scanned.size()) {
+        std::sort(wanted.begin(), wanted.end(), [](const PM4Range& a, const PM4Range& b) { return a.base < b.base; });
+        std::vector<PM4Range> joined;
+        for (const auto& r : wanted) {
+            if (!joined.empty() && r.base <= joined.back().base + joined.back().size)
+                joined.back().size = std::max(joined.back().base + joined.back().size, r.base + r.size) - joined.back().base;
+            else joined.push_back(r);
+        }
+        wanted.swap(joined);
+    }
+    if (wanted.empty() && !scanner_.stored().empty()) return fail("compute program addresses no memory");
+    if (wanted.empty()) { ++dispatchesWithoutEffect; lastDispatchNote_ = "aucune mémoire adressée"; return true; }
+    // As for draws: over 16 ranges, joined across their smallest gaps, unless
+    // that copies 8 MiB more than the kernel's own ranges.
+    const std::vector<PM4Range> ranges = wanted.size() > 16 ? coalesceRanges(wanted, 16) : wanted;
+    if (wanted.size() > 16) {
+        std::uint64_t own = 0, joined = 0;
+        for (const auto& r : wanted) own += r.size;
+        for (const auto& r : ranges) joined += r.size;
+        if (joined > own + (8ull << 20)) return fail("compute reads more than 16 memory ranges");
     }
     // Only stores to targets and new images are kept (guest memory never
     // receives the rest): a kernel storing nothing else changes nothing.
@@ -726,7 +760,7 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
         }
         guestWrites.swap(remaining);
     };
-    for (const auto& output : outputs) subtractTexture(output.base, std::uint64_t(output.pitch) * output.height * 4);
+    for (const auto& output : outputs) subtractTexture(output.base, std::uint64_t(output.pitch) * output.height * bytesPerPixel(output.format));
     for (const auto& [address, target] : targets_) if (target.texture)
         subtractTexture(address, std::uint64_t(target.texture.width) * target.texture.height * bytesPerPixel(target.texture.pixelFormat));
     std::vector<PendingGuestWrite> pending;
@@ -759,12 +793,12 @@ bool PM4MetalRenderer::dispatch(const PM4Dispatch& c, id<MTLCommandBuffer> comma
     [compute endEncoding];
     ++dispatchesEncoded;
     for (const auto& o : outputs) {
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:o.format
                                                                                               width:o.pitch height:o.height mipmapped:NO];
         descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         descriptor.storageMode = MTLStorageModePrivate;
         id<MTLTexture> texture = [device_ newTextureWithDescriptor:descriptor];
-        if (texture) targets_[o.base] = {texture, false};
+        if (texture) targets_[o.base] = {texture, false, o.cbFormat};
     }
     // What the kernel stored in targets goes back to their textures.
     blit = [commands blitCommandEncoder];
