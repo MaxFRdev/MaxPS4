@@ -169,6 +169,16 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     compiling = 0;
     // A program MaxPS4 cannot translate yet: its draws are left out and the
     // game goes on (CoD's missions met a new instruction every few minutes).
+    // A depth-only draw whose pixel program cannot be translated still
+    // writes depth, without the program (any discard lost): left out, a
+    // depth pre-pass leaves its colour pass (depth test EQUAL) drawing nothing.
+    if (vs && !ps && !d.colour && d.ps) {
+        if (psMayKill_.emplace(d.ps, false).second) {
+            ++depthOnlyUntranslated;
+            lastUntranslated = "PS (profondeur seule, dessinée sans) : " + ps.error;
+        }
+        return pipeline(d, format, depth);
+    }
     if (!vs || !ps) {
         char where[96];
         std::snprintf(where, sizeof where, " (VS 0x%llx, PS 0x%llx)", (unsigned long long)d.vs, (unsigned long long)d.ps);

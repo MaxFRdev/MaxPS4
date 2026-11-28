@@ -60,6 +60,7 @@ public:
     // (and nothing encoded) when it cannot be expressed.
     bool dispatch(const PM4Dispatch& dispatch, id<MTLCommandBuffer> commands);
     unsigned depthOnlyShared = 0; // depth-only draws on a pipeline without their pixel program
+    unsigned depthOnlyUntranslated = 0; // of their programs, those MaxPS4 cannot translate (drawn without)
     unsigned kernelsBuilt = 0, ldsKernelsBuilt = 0, targetsSynced = 0, dispatchesWithoutEffect = 0;
     unsigned dispatchesEncoded = 0;
     // Compute traffic with guest memory, cumulated: copied in while encoding,
