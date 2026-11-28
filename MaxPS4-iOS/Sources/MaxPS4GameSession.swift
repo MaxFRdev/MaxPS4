@@ -97,7 +97,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         guard lock.try() else { return current + " (verrou de session pris)" }
         defer { lock.unlock() }
         guard let engine else { return current }
-        var activity = [CChar](repeating: 0, count: 4096)
+        var activity = [CChar](repeating: 0, count: 16384)
         _ = maxps4_fex_engine_thread_activity(engine, &activity, activity.count)
         // A stop that does not end: threads stuck outside HLE cannot be told
         // to stop. Where each one is in host code, read every 5 s.
@@ -178,7 +178,7 @@ final class MaxPS4GameSource: @unchecked Sendable {
         guard let started, let engine else { return nil }
         let now = ProcessInfo.processInfo.systemUptime
         let seconds = Int(now - started)
-        var activity = [CChar](repeating: 0, count: 4096)
+        var activity = [CChar](repeating: 0, count: 16384)
         _ = maxps4_fex_engine_thread_activity(engine, &activity, activity.count)
         inputLock.lock(); let sent = vblanksSent; inputLock.unlock()
         let missing = missingImports(engine)

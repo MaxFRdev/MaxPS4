@@ -135,6 +135,29 @@ public:
         std::atomic<uint64_t> thread {0}, since {0}, returned {0}, argument {0}, caller {0}; // argument: RDI of the call; caller: its return address.
         std::atomic<uint32_t> service {0};
         std::atomic<bool> inside {false};
+        // Where the thread's time went since its first call: in HLE calls
+        // (waits included), the services that took most of it, and the rest
+        // (other services); outside them, the game's emulated code (and FEX's
+        // JIT compiles). Written by the thread only.
+        static constexpr unsigned tops = 6;
+        std::atomic<uint64_t> first {0}, hle_ns {0}, other_ns {0};
+        std::array<std::atomic<uint32_t>, tops> top_service {};
+        std::array<std::atomic<uint64_t>, tops> top_ns {};
+        void account(uint32_t called, uint64_t ns) {
+            hle_ns.fetch_add(ns, std::memory_order_relaxed);
+            for (unsigned k = 0; k < tops; ++k) {
+                const uint64_t held = top_ns[k].load(std::memory_order_relaxed);
+                if (held && top_service[k].load(std::memory_order_relaxed) != called) continue;
+                if (!held) top_service[k].store(called, std::memory_order_relaxed);
+                top_ns[k].store(held + ns, std::memory_order_relaxed);
+                return;
+            }
+            other_ns.fetch_add(ns, std::memory_order_relaxed);
+        }
+        void clear_times() {
+            first = 0; hle_ns = 0; other_ns = 0;
+            for (unsigned k = 0; k < tops; ++k) { top_service[k] = 0; top_ns[k] = 0; }
+        }
     };
     std::array<Activity, 32> activity;
     // The last HLE calls, for the stop report (why a game quit): locks, time
@@ -254,6 +277,7 @@ public:
                 if (!memory->read(logical(rsp), &back, sizeof(back))) back = 0;
                 slot->service = static_cast<uint32_t>(orbis); slot->argument = call.rdi; slot->caller = logical(back);
                 slot->since = now_ns(); slot->inside = true;
+                if (!slot->first.load(std::memory_order_relaxed)) slot->first.store(slot->since.load(), std::memory_order_relaxed);
             }
             const uint64_t timed_from = timing && timing->enabled() ? now_ns() : 0;
             if (timed_from && (orbis == maxps4::PS4KernelService::video_submit ||
@@ -327,7 +351,11 @@ public:
                 result = kernel->invoke(orbis,call,guest_thread,posix);
             }
             if (pthread) result = maxps4::pthread_result(result);
-            if (slot) { slot->since = now_ns(); slot->inside = false; ++slot->returned; }
+            if (slot) {
+                const uint64_t entered = slot->since.load(std::memory_order_relaxed), left = now_ns();
+                slot->account(static_cast<uint32_t>(orbis), left - std::min(left, entered));
+                slot->since = left; slot->inside = false; ++slot->returned;
+            }
             if (timed_from) timing->record(static_cast<uint32_t>(orbis), now_ns() - timed_from);
             if (!frequent(orbis)) {
                 RecentCall entry{static_cast<uint32_t>(orbis), guest_thread, call.rdi, call.rsi, call.rdx, call.rcx, result, {}, posix};
@@ -1818,7 +1846,7 @@ int32_t executeImage(maxps4_fex_engine* engine, maxps4::GuestELF& image,
     engine->probe.private_stack_size = page;
     engine->probe.calls = 0;
     engine->probe.callback_error = 0;
-    for (auto& a : engine->probe.activity) { a.thread = 0; a.inside = false; a.returned = 0; a.caller = 0; }
+    for (auto& a : engine->probe.activity) { a.thread = 0; a.inside = false; a.returned = 0; a.caller = 0; a.clear_times(); }
     { std::lock_guard<std::mutex> guard(engine->probe.recent_lock); engine->probe.recent_next = 0; }
     struct ClearRange {
         ProbeAddressSpace& space;
@@ -3184,6 +3212,56 @@ extern "C" int32_t maxps4_fex_set_tso_emulation(uint32_t enabled) {
     if (enabled > 1) return -EINVAL;
     tso_emulation = enabled != 0; return 0;
 }
+// Where each thread's time went since its first HLE call (Activity::account),
+// busiest threads first: the game's emulated code, then HLE calls by service.
+// A thread that ended stops at its exit call.
+template <class Activities> static std::string thread_times(const Activities& activity, uint64_t now) {
+    struct Row { uint64_t thread, guest, hle; std::string detail; };
+    std::vector<Row> rows;
+    uint64_t guest_total = 0, hle_total = 0;
+    for (const auto& a : activity) {
+        const uint64_t thread = a.thread.load(), first = a.first.load();
+        if (!thread || !first) continue;
+        const uint32_t last = a.service.load();
+        const bool ended = !a.inside.load() && (last == uint32_t(maxps4::PS4KernelService::thread_exit) ||
+                                                last == uint32_t(maxps4::PS4KernelService::process_exit));
+        const uint64_t end = ended ? a.since.load() : now, hle = a.hle_ns.load();
+        const uint64_t span = end - std::min(end, first);
+        // The call in progress counts as HLE time too.
+        const uint64_t current = a.inside.load() ? now - std::min(now, a.since.load()) : 0;
+        const uint64_t in_hle = std::min(span, hle + current), guest = span - in_hle;
+        std::vector<std::pair<uint64_t, uint32_t>> services;
+        for (unsigned k = 0; k < a.tops; ++k) if (const uint64_t ns = a.top_ns[k].load()) services.push_back({ns, a.top_service[k].load()});
+        std::sort(services.rbegin(), services.rend());
+        std::string detail;
+        char part[96];
+        for (std::size_t k = 0; k < services.size() && k < 4; ++k) {
+            const uint32_t raw = services[k].second;
+            const char* name = raw >= maxps4::missing_import_token ? "import manquant" : service_name(static_cast<maxps4::PS4KernelService>(raw));
+            std::snprintf(part, sizeof part, "%s %s %.1f s", k ? "," : " :", name ? name : "?", double(services[k].first) / 1e9);
+            detail += part;
+        }
+        if (const uint64_t other = a.other_ns.load()) { std::snprintf(part, sizeof part, ", autres %.1f s", double(other) / 1e9); detail += part; }
+        if (ended) detail += " (terminé)";
+        rows.push_back({thread, guest, in_hle, detail});
+        guest_total += guest; hle_total += in_hle;
+    }
+    if (rows.empty()) return {};
+    std::sort(rows.begin(), rows.end(), [](const Row& x, const Row& y) { return x.guest > y.guest; });
+    char line[256];
+    std::snprintf(line, sizeof line, "Temps des threads PS4 (depuis leur premier appel ; code du jeu = émulé par FEX, compilation JIT comprise ; HLE = appels système, attentes et rendu Metal compris) : %.1f s de code du jeu, %.1f s en HLE\n",
+                  double(guest_total) / 1e9, double(hle_total) / 1e9);
+    std::string out = line;
+    for (std::size_t k = 0; k < rows.size() && k < 12; ++k) {
+        const Row& r = rows[k];
+        const double total = double(r.guest + r.hle);
+        std::snprintf(line, sizeof line, "  thread %llu : code du jeu %.1f s (%.0f %%), HLE %.1f s",
+                      (unsigned long long)r.thread, double(r.guest) / 1e9, total > 0 ? 100.0 * double(r.guest) / total : 0.0, double(r.hle) / 1e9);
+        out += line + r.detail + "\n";
+    }
+    if (rows.size() > 12) out += "  … " + std::to_string(rows.size() - 12) + " autres threads\n";
+    return out;
+}
 extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, char* text, size_t capacity) {
     if (!engine || !text || !capacity) return -EINVAL;
     char header[160];
@@ -3278,6 +3356,7 @@ extern "C" int32_t maxps4_fex_engine_thread_activity(maxps4_fex_engine* engine, 
                 (unsigned long long)thread, seconds, name, returned, (unsigned long long)a.caller.load());
         out += line;
     }
+    out += thread_times(engine->probe.activity, now);
     const size_t n = std::min(capacity - 1, out.size());
     std::memcpy(text, out.data(), n);
     text[n] = 0;
