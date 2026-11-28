@@ -558,6 +558,17 @@ private:
             return out_.error.empty();
         }
         if (op == 384 + 2) { setScalar(dst, source(src[0], i)); return out_.error.empty(); } // per-lane approximation
+        // v_readlane_b32 (an SGPR from one lane's VGPR): this lane's, like
+        // v_readfirstlane. v_writelane_b32 (one lane's VGPR from an SGPR): in a
+        // pixel program the quad lane named by the selector's low bits, else
+        // every lane (the selected one is not known per lane outside quads).
+        if (op == 257) { setScalar(dst, source(src[0], i)); return out_.error.empty(); }
+        if (op == 258) {
+            const std::string value = source(src[0], i), lane = source(src[1], i);
+            if (options_.stage == GCNStage::pixel) body_ += "if (((" + lane + ") & 3u) == L.quadLane) " + v(dst) + " = " + value + ";";
+            else body_ += v(dst) + " = " + value + ";";
+            return out_.error.empty();
+        }
         if (op == 384 + 0 || op == 384 + 65) { body_ += "/* nop */"; return true; }
         // v_movreld_b32 (v[dst + M0] = src0), v_movrels_b32 (dst = v[src0 + M0]),
         // v_movrelsd_b32 (v[dst + M0] = v[src0 + M0]): registers are variables,

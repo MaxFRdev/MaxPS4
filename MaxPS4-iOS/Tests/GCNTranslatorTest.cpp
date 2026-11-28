@@ -80,6 +80,11 @@ int main(int argc, char** argv) {
     const auto derivatives=translateGCN(arena.memory,coverageProgram,ps);
     if (!derivatives) std::printf("%s\n", derivatives.error.c_str());
     assert(derivatives && derivatives.source.find("gcn_sample(M, t, sm, false, gf(v6), gf(v7))")!=std::string::npos);
+    // v_writelane_b32 v1, s0, 1: in a pixel program, the quad lane the selector names.
+    arena.code(coverageProgram,{0xd2040001,0x00010200,0xf800180f,0x01010101,0xbf810000});
+    const auto written=translateGCN(arena.memory,coverageProgram,ps);
+    if (!written) std::printf("%s\n", written.error.c_str());
+    assert(written && written.source.find("== L.quadLane) v1 = ")!=std::string::npos);
     // image_sample v[8:11], v[2:4] da: the slice (v4) picks the array layer or cube face.
     arena.code(coverageProgram,{0xf0804f00,0x00400802,0xf800180f,0x0b0a0908,0xbf810000});
     const auto layered=translateGCN(arena.memory,coverageProgram,ps);

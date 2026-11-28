@@ -360,6 +360,24 @@ private:
               ++compilesRunning; }
             job();
         }
+        // Pipeline creations have a queue of their own: unbounded, 49 ran at once
+        // and the slowest took 70 s (59 built in a session, 756 waiting);
+        // sharing the library limit starved them (38 built). Six at a time.
+        static constexpr unsigned pipelineLimit = 6;
+        std::deque<std::function<void()>> pipelineQueue;
+        void startPipeline(std::function<void()> job) {
+            { std::lock_guard<std::mutex> lock(mutex);
+              if (pipelinesRunning >= pipelineLimit) { pipelineQueue.push_back(std::move(job)); return; }
+              ++pipelinesRunning; }
+            job();
+        }
+        void pipelineDone() {
+            std::function<void()> job;
+            { std::lock_guard<std::mutex> lock(mutex);
+              if (pipelineQueue.empty()) { --pipelinesRunning; return; }
+              job = std::move(pipelineQueue.front()); pipelineQueue.pop_front(); }
+            job();
+        }
         void compileDone() {
             std::function<void()> job;
             { std::lock_guard<std::mutex> lock(mutex);

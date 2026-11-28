@@ -410,8 +410,8 @@ void PM4MetalRenderer::listCostly(std::uint64_t address) {
 std::string PM4MetalRenderer::pipelineStatus() const {
     std::lock_guard<std::mutex> lock(async_->mutex);
     // Which programs still run their size build, and what the queue is doing.
-    char queue[200];
-    std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées, %u en compilation (dont %u pipelines), %zu en file", async_->librariesCompiled, async_->librariesShared, async_->compilesRunning, async_->pipelinesRunning, async_->compileQueue.size());
+    char queue[256];
+    std::snprintf(queue, sizeof queue, " · bibliothèques : %u compilées, %u partagées, %u en compilation, %zu en file · pipelines Metal : %u en création, %zu en file", async_->librariesCompiled, async_->librariesShared, async_->compilesRunning, async_->compileQueue.size(), async_->pipelinesRunning, async_->pipelineQueue.size());
     std::string defaults = queue;
     std::snprintf(queue, sizeof queue, " · builds par défaut : %zu en attente", async_->later.size());
     defaults = async_->archiveReport() + defaults + queue;
@@ -2230,14 +2230,14 @@ void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
 void PM4MetalRenderer::AsyncPipelines::compile(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
                                                std::function<void(id<MTLRenderPipelineState>, NSError*)> done) {
     auto self = shared_from_this();
-    // Not through the library compile limit: a CoD mission built 38 pipelines
-    // in 100 s that way (619 waiting, 457335 draws left out), 253 without it.
-    { std::lock_guard<std::mutex> lock(self->mutex); ++self->pipelinesRunning; }
-    [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
-        { std::lock_guard<std::mutex> lock(self->mutex); --self->pipelinesRunning; }
-        if (state) self->remember(descriptor);
-        done(state, failed);
-    }];
+    // Through the pipeline queue (pipelineLimit), apart from library compiles.
+    startPipeline([self, device, descriptor, done] {
+        [device newRenderPipelineStateWithDescriptor:descriptor completionHandler:^(id<MTLRenderPipelineState> state, NSError* failed) {
+            self->pipelineDone();
+            if (state) self->remember(descriptor);
+            done(state, failed);
+        }];
+    });
 }
 
 void PM4MetalRenderer::AsyncPipelines::remember(MTLRenderPipelineDescriptor* descriptor) {
