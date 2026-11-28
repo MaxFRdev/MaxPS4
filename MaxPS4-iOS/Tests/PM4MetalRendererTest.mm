@@ -280,6 +280,7 @@ int main() {
                 }
             };
             // Every pixel of the target must be `bgra`; `draws` reached the GPU.
+            unsigned lastPipelines = 0, lastShared = 0; // the last check's pipelines built, depth-only draws shared
             auto check = [&](const char* name, Scene& scene, const std::uint8_t (&bgra)[4], unsigned depthDraws, unsigned depthOnly) {
                 PM4DrawStats stats;
                 PM4DrawCollector sceneCollector(scene.arena.memory, stats);
@@ -304,6 +305,7 @@ int main() {
                 for (unsigned n = 0; n < width * height; ++n) std::memcpy(expected + 4 * n, bgra, 4);
                 readPixels(device, queue, renderer.target(depthTarget), pixels);
                 assert(compare(name, pixels, expected));
+                lastPipelines = renderer.pipelinesBuilt; lastShared = renderer.depthOnlyShared;
             };
             const std::uint8_t green[4] = {0, 255, 0, 255}, red[4] = {0, 0, 255, 255};
             {
@@ -332,6 +334,25 @@ int main() {
                 scene.ps(redPS); scene.triangle(0.8f, forward);
                 scene.ps(greenPS); scene.triangle(0.1f, forward);
                 check("depth-only pre-pass", scene, green, 3, 1);
+            }
+            {
+                // Depth-only draws with pixel programs that never discard: once
+                // each program is known (first draw), later ones share a single
+                // pipeline without it (3 built for 4 draws, 2 of them shared).
+                Scene scene;
+                scene.depthBufferOn();
+                scene.st.set(0x69, 0x200, {2 | 4 | (1 << 4)});
+                scene.st.set(0x69, 0x8e, {0});
+                scene.ps(greenPS); scene.triangle(0.4f, forward);
+                scene.ps(redPS); scene.triangle(0.3f, forward);
+                scene.ps(greenPS); scene.triangle(0.25f, forward);
+                scene.ps(redPS); scene.triangle(0.2f, forward);
+                scene.st.set(0x69, 0x8e, {0xf});
+                scene.ps(redPS); scene.triangle(0.5f, forward);
+                scene.ps(greenPS); scene.triangle(0.1f, forward);
+                check("depth-only draws share a pipeline", scene, green, 6, 4);
+                if (lastPipelines != 5 || lastShared != 2) std::printf("shared depth-only: %u pipelines, %u shared\n", lastPipelines, lastShared);
+                assert(lastPipelines == 5 && lastShared == 2); // 3 depth-only, then red and green with colour
             }
             {
                 // A depth clear (DB_RENDER_CONTROL) back to 1 lets a far triangle
@@ -399,7 +420,7 @@ int main() {
                 both.ps(redPS); both.triangle(0.5f, forward);
                 check("cull both faces", both, green, 0, 0);
             }
-            std::puts("PASS depth test, depth-only pre-pass with no pixel program, depth clear, face culling (both windings, flipped Y)");
+            std::puts("PASS depth test, depth-only pre-pass with no pixel program, depth-only draws sharing a pipeline, depth clear, face culling (both windings, flipped Y)");
             // Other colour target formats: the green triangle into 16_16_16_16 FLOAT
             // (8 bytes a pixel, halves 0, 1, 0, 1) and 2_10_10_10 UNORM (G and A all ones).
             for (const auto& [info, expected, bytes] : {std::tuple<std::uint32_t, std::uint64_t, unsigned>{(0xcu << 2) | (7u << 8), 0x3c0000003c000000ull, 8},
