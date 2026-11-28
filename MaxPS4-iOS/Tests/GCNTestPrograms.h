@@ -97,6 +97,13 @@ inline void loadFetchVS(Arena& arena) {
     for (unsigned n = 0; n < 3; ++n) for (unsigned c = 0; c < 4; ++c) arena.put(0x10e00 + 16 * n + 4 * c, bits(fetchVertices[n][c]));
 }
 
+// The same VS without its loop (the branch back a s_nop): only forward
+// transfers, the fetch shader's blocks run in order after the call.
+inline void loadStraightFetchVS(Arena& arena) {
+    loadFetchVS(arena);
+    arena.put(fetchVS + 16, 0xbf800000); // s_nop instead of s_cbranch_scc1 -3
+}
+
 // A compute program, 32 threads per group (thread group id x in s16): thread
 // n of group g reads record 32g + n (float xyzw), halves x and stores the
 // record as 8_8_8_8 UNORM, then as pixel (n, g) of a linear 8x8 image.

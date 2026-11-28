@@ -106,6 +106,18 @@ int main(int argc, char** argv) {
     GCNTranslateOptions below = fetch; below.name = "vs_fetch_below"; below.userData[0] = std::uint32_t(fetchShaderBelow);
     const auto fetchedBelow = translateGCN(arena.memory, fetchVS, below);
     assert(fetchedBelow && fetchedBelow.position && fetchedBelow.params == 1);
+    // With a loop the dispatcher stays; straight, a call to a fetch shader
+    // above or below the VS runs its blocks in order, without the loop.
+    assert(fetched.source.find("while (running)") != std::string::npos);
+    Arena straightArena;
+    loadStraightFetchVS(straightArena);
+    GCNTranslateOptions straightOptions = fetch; straightOptions.name = "vs_straight";
+    const auto straight = translateGCN(straightArena.memory, fetchVS, straightOptions);
+    GCNTranslateOptions straightBelowOptions = below; straightBelowOptions.name = "vs_straight_below";
+    const auto straightBelow = translateGCN(straightArena.memory, fetchVS, straightBelowOptions);
+    assert(straight && straightBelow);
+    for (const auto* t : {&straight, &straightBelow})
+        assert(t->source.find("while (running)") == std::string::npos && t->source.find("if (pc == ") != std::string::npos);
     GCNTranslateOptions sizes; sizes.stage = GCNStage::vertex; sizes.name = "vs_resinfo";
     const auto resinfo = translateGCN(arena.memory, resinfoVS, sizes);
     if (!resinfo) std::printf("%s\n", resinfo.error.c_str());
@@ -146,6 +158,6 @@ int main(int argc, char** argv) {
     const std::string prelude = gcnMetalPrelude();
     assert(prelude.find("#include <metal_stdlib>") != std::string::npos && prelude.find("GCN_FN float4 gcn_sample(") != std::string::npos);
     std::ofstream out(argv[1]);
-    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << copied.source << shared.source;
+    out << embedded.source << quad.source << fetched.source << fetchedBelow.source << resinfo.source << copied.source << shared.source << straight.source << straightBelow.source;
     std::puts("PASS GCN translator stage 1: embedded VS, quad PS, fetch-shader VS, compute stores and LDS translated; refusals reported");
 }

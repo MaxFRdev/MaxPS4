@@ -85,6 +85,29 @@ int main() {
         // Outside every range reads zero.
         assert(rt::gcn_ld32(P, 0x10e00 + 48) == 0 && rt::gcn_ld32(P, Arena::start) == 0);
     }
+    // The VS without its loop, blocks in order (the fetch shader above and
+    // below it), against the interpreter.
+    {
+        Arena straight;
+        loadStraightFetchVS(straight);
+        const rt::GCNMemory S = window(straight);
+        for (const auto shader : {fetchShader, fetchShaderBelow}) {
+            GCNWave wave(straight.memory, 3);
+            wave.s[0] = std::uint32_t(shader); wave.s[2] = std::uint32_t(vertexTable);
+            for (unsigned lane = 0; lane < 3; ++lane) wave.v(0, lane) = lane;
+            assert(wave.run(fetchVS));
+            for (unsigned lane = 0; lane < 3; ++lane) {
+                rt::GCNLane L;
+                L.user[0] = std::uint32_t(shader); L.user[2] = std::uint32_t(vertexTable); L.vinit[0] = lane;
+                if (shader == fetchShader) rt::vs_straight(L, S, unusedQuad); else rt::vs_straight_below(L, S, unusedQuad);
+                for (unsigned c = 0; c < 4; ++c) {
+                    assert(same(L.pos[c], gcn_detail::f32(wave.exports[0].value[c][lane])));
+                    assert(same(L.param[0][c], gcn_detail::f32(wave.exports[1].value[c][lane])));
+                }
+                if (lane == 2) assert(L.pos[0] == 5 && L.param[0][0] == 5 * 3 + 6);
+            }
+        }
+    }
     // image_get_resinfo per mip level (the lane), against the interpreter.
     {
         GCNWave wave(arena.memory, 4);

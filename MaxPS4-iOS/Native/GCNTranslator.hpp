@@ -164,16 +164,82 @@ private:
         }
         return true;
     }
-    // No branch back and no jump through a register: each block can only lead to
-    // a later one, so the blocks can run in address order without a loop.
-    bool forwardOnly(std::uint64_t entry) const {
-        if (entry != *leaders_.begin()) return false;
-        for (const auto& item : code_) {
-            const GCNInstruction& i = item.second.i;
-            if (i.encoding == GCNEncoding::sop1 && (i.opcode == 32 || i.opcode == 33)) return false;
-            if (i.encoding == GCNEncoding::sopp && (i.opcode == 2 || (i.opcode >= 4 && i.opcode <= 9)) &&
-                branchTarget(item.first, i) <= item.first) return false;
+    // The blocks a block can lead to: branch targets, the next block, a
+    // called fetch shader, or (s_setpc_b64) the block after its one call.
+    std::vector<std::uint64_t> successors(std::uint64_t leader) const {
+        std::vector<std::uint64_t> out;
+        for (std::uint64_t pc = leader;;) {
+            const auto found = code_.find(pc);
+            if (found == code_.end()) return out;
+            const GCNInstruction& i = found->second.i;
+            const std::uint64_t next = pc + 4ull * i.size;
+            if (i.encoding == GCNEncoding::sopp) {
+                if (i.opcode == 1) return out;
+                if (i.opcode == 2) { out.push_back(branchTarget(pc, i)); return out; }
+                if (i.opcode >= 4 && i.opcode <= 9) { out.push_back(branchTarget(pc, i)); out.push_back(next); return out; }
+            }
+            if (i.encoding == GCNEncoding::sop1 && i.opcode == 33) {
+                const auto call = calls_.find(pc);
+                if (call != calls_.end()) out.push_back(call->second);
+                return out;
+            }
+            if (i.encoding == GCNEncoding::sop1 && i.opcode == 32) {
+                for (const auto& [at, target] : calls_) {
+                    const auto c = code_.find(at);
+                    if (c != code_.end()) out.push_back(at + 4ull * c->second.i.size);
+                }
+                return out;
+            }
+            if (leaders_.count(next)) { out.push_back(next); return out; }
+            pc = next;
         }
+    }
+    // An order of the blocks in which each one can only lead to a later one,
+    // so that they run in that order without a loop (false if none is found):
+    // address order, a called fetch shader's blocks (one call at most) moved
+    // to just after the calling block.
+    bool forwardOrder(std::uint64_t entry, std::vector<std::uint64_t>& order) const {
+        if (calls_.size() > 1) return false;
+        std::set<std::uint64_t> callee;
+        std::uint64_t caller = 0;
+        if (!calls_.empty()) {
+            const auto [at, target] = *calls_.begin();
+            caller = *std::prev(leaders_.upper_bound(at));
+            std::vector<std::uint64_t> work{target};
+            while (!work.empty()) {
+                const std::uint64_t block = work.back(); work.pop_back();
+                if (!callee.insert(block).second) continue;
+                const auto found = code_.find(block);
+                // A callee block ending in s_setpc_b64 returns: not followed further.
+                bool returns = false;
+                for (std::uint64_t pc = block; found != code_.end();) {
+                    const auto in = code_.find(pc);
+                    if (in == code_.end()) break;
+                    const GCNInstruction& i = in->second.i;
+                    if (i.encoding == GCNEncoding::sop1 && i.opcode == 32) { returns = true; break; }
+                    const std::uint64_t next = pc + 4ull * i.size;
+                    if (leaders_.count(next) || (i.encoding == GCNEncoding::sopp && (i.opcode == 1 || i.opcode == 2 || (i.opcode >= 4 && i.opcode <= 9))) ||
+                        (i.encoding == GCNEncoding::sop1 && i.opcode == 33)) break;
+                    pc = next;
+                }
+                if (!returns) for (const auto next : successors(block)) work.push_back(next);
+            }
+            if (callee.count(caller) || callee.count(entry)) return false;
+        }
+        order.clear();
+        for (const auto leader : leaders_) {
+            if (callee.count(leader)) continue;
+            order.push_back(leader);
+            if (leader == caller && !callee.empty()) order.insert(order.end(), callee.begin(), callee.end());
+        }
+        if (order.size() != leaders_.size() || order.front() != entry) return false;
+        std::map<std::uint64_t, std::size_t> position;
+        for (std::size_t k = 0; k < order.size(); ++k) position[order[k]] = k;
+        for (std::size_t k = 0; k < order.size(); ++k)
+            for (const auto next : successors(order[k])) {
+                const auto found = position.find(next);
+                if (found == position.end() || found->second <= k) return false;
+            }
         return true;
     }
     std::size_t index(std::uint64_t address) const { return std::size_t(std::distance(leaders_.begin(), leaders_.find(address))); }
@@ -229,11 +295,12 @@ private:
     void emit(std::uint64_t entry) {
         // The loop hides from Metal that a block runs at most once: every register
         // stays live around it. `break` leaves a block in both forms.
-        const bool inOrder = inOrder_ = options_.stage == GCNStage::pixel && !options_.dispatcher && forwardOnly(entry);
+        std::vector<std::uint64_t> order;
+        const bool inOrder = inOrder_ = !options_.dispatcher && forwardOrder(entry, order);
+        if (!inOrder) order.assign(leaders_.begin(), leaders_.end());
         for (unsigned n = 0; n < 128; ++n) known_[n] = n + 1;
-        std::size_t k = 0;
-        for (const auto leader : leaders_) {
-            const std::string number = std::to_string(k++);
+        for (const auto leader : order) {
+            const std::string number = std::to_string(index(leader));
             body_ += inOrder ? "    if (pc == " + number + "u) do {\n" : "    case " + number + "u: {\n";
             std::uint64_t pc = leader;
             if (inOrder && leader != entry) known_ = incoming_[leader];
