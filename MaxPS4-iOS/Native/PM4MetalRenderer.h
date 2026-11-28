@@ -299,7 +299,28 @@ private:
     double translateWindowMs_ = 0;
     // Pipelines Metal is building (asyncPipelines), shared with its completion handlers.
     struct AsyncPipelines : std::enable_shared_from_this<AsyncPipelines> {
-        struct Pending { std::chrono::steady_clock::time_point since; const char* stage; std::string programs; };
+        // `wanted`: when a draw last asked for the pipeline (steady clock, ns),
+        // shared with its queued jobs: the queues start the latest wanted first.
+        using Wanted = std::shared_ptr<std::atomic<std::int64_t>>;
+        static std::int64_t nowNs() {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
+        struct Pending { std::chrono::steady_clock::time_point since; const char* stage; std::string programs; Wanted wanted; };
+        // A queued job and the pipeline's `wanted`.
+        struct Queued { Wanted wanted; std::function<void()> job; };
+        // The queued job whose pipeline a draw wanted last (with mutex held):
+        // a loading screen's pipelines no longer drawn wait behind the frame's.
+        static std::function<void()> takeNewest(std::deque<Queued>& queue) {
+            auto best = queue.begin();
+            std::int64_t newest = best->wanted ? best->wanted->load() : 0;
+            for (auto it = queue.begin(); it != queue.end(); ++it) {
+                const std::int64_t at = it->wanted ? it->wanted->load() : 0;
+                if (at > newest) { newest = at; best = it; }
+            }
+            std::function<void()> job = std::move(best->job);
+            queue.erase(best);
+            return job;
+        }
         std::mutex mutex;
         std::map<PipelineKey, Pending> pending;
         std::set<PipelineKey> refused;
@@ -338,7 +359,7 @@ private:
         void remember(MTLRenderPipelineDescriptor* descriptor);
         // Builds the pipeline from source, then adds it to this launch's archive.
         void compile(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
-                     std::function<void(id<MTLRenderPipelineState>, NSError*)> done);
+                     std::function<void(id<MTLRenderPipelineState>, NSError*)> done, Wanted wanted = nullptr);
         void saveArchive(); // on archiveQueue
         std::string archiveReport() const; // with mutex held
         // Libraries by source (hash, length, optimisation): many pipelines
@@ -355,13 +376,10 @@ private:
         // Pipeline creations stay outside it (counted in pipelinesRunning).
         static constexpr unsigned compileLimit = 4;
         unsigned compilesRunning = 0, pipelinesRunning = 0;
-        std::deque<std::function<void()>> compileQueue;
-        void startCompile(std::function<void()> job, bool urgent = false) {
+        std::deque<Queued> compileQueue;
+        void startCompile(std::function<void()> job, Wanted wanted = nullptr) {
             { std::lock_guard<std::mutex> lock(mutex);
-              if (compilesRunning >= compileLimit) {
-                  if (urgent) compileQueue.push_front(std::move(job)); else compileQueue.push_back(std::move(job));
-                  return;
-              }
+              if (compilesRunning >= compileLimit) { compileQueue.push_back({std::move(wanted), std::move(job)}); return; }
               ++compilesRunning; }
             job();
         }
@@ -370,10 +388,10 @@ private:
         // sharing the library limit starved them (38 built). Six at a time.
         static constexpr unsigned pipelineLimit = 6;
         static constexpr bool kUseBinaryArchive = false; // see openArchive
-        std::deque<std::function<void()>> pipelineQueue;
-        void startPipeline(std::function<void()> job) {
+        std::deque<Queued> pipelineQueue;
+        void startPipeline(std::function<void()> job, Wanted wanted = nullptr) {
             { std::lock_guard<std::mutex> lock(mutex);
-              if (pipelinesRunning >= pipelineLimit) { pipelineQueue.push_back(std::move(job)); return; }
+              if (pipelinesRunning >= pipelineLimit) { pipelineQueue.push_back({std::move(wanted), std::move(job)}); return; }
               ++pipelinesRunning; }
             job();
         }
@@ -381,14 +399,14 @@ private:
             std::function<void()> job;
             { std::lock_guard<std::mutex> lock(mutex);
               if (pipelineQueue.empty()) { --pipelinesRunning; return; }
-              job = std::move(pipelineQueue.front()); pipelineQueue.pop_front(); }
+              job = takeNewest(pipelineQueue); }
             job();
         }
         void compileDone() {
             std::function<void()> job;
             { std::lock_guard<std::mutex> lock(mutex);
               if (compileQueue.empty()) { --compilesRunning; return; }
-              job = std::move(compileQueue.front()); compileQueue.pop_front(); }
+              job = takeNewest(compileQueue); }
             job();
         }
     };

@@ -128,7 +128,13 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
     if (found != pipelines_.end()) return found->second;
     if (asyncPipelines) {
         std::lock_guard<std::mutex> lock(async_->mutex);
-        if (async_->pending.count(key) || async_->refused.count(key)) { deferred_ = true; return nil; }
+        // A draw waiting for its pipeline marks it wanted now (the queues' order).
+        const auto waiting = async_->pending.find(key);
+        if (waiting != async_->pending.end()) {
+            if (waiting->second.wanted) waiting->second.wanted->store(AsyncPipelines::nowNs(), std::memory_order_relaxed);
+            deferred_ = true; return nil;
+        }
+        if (async_->refused.count(key)) { deferred_ = true; return nil; }
     }
     // A mission's first frames met hundreds of new pipelines, each translated
     // here on the game's submission thread (some programs make 372 KB of MSL):
@@ -258,8 +264,9 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         programs += programWords("PS", d.ps, d.psUser, d.psUserCount);
         programs += "\nSource Metal : " + std::to_string(source.size()) + " octets";
         auto async = async_;
+        const AsyncPipelines::Wanted wanted = std::make_shared<std::atomic<std::int64_t>>(AsyncPipelines::nowNs());
         { std::lock_guard<std::mutex> lock(async->mutex);
-          async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation", std::move(programs)}; }
+          async->pending[key] = {std::chrono::steady_clock::now(), "MSL compilation", std::move(programs), wanted}; }
         // `fast`: built with default optimisation. A size build shows the draws
         // first; a fast build replaces it, and is never replaced by one.
         auto finish = [async, key](id<MTLRenderPipelineState> state, NSError* error, bool fast) {
@@ -290,6 +297,8 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
         NSString* text = [NSString stringWithUTF8String:source.c_str()];
         const std::size_t sourceHash = std::hash<std::string>{}(source), sourceLength = source.size();
         auto build = [=](MTLCompileOptions* options, bool fast) {
+            // Default builds come after every size build: no claim on the order.
+            const AsyncPipelines::Wanted order = fast ? nullptr : wanted;
             auto made = [=](id<MTLLibrary> library, NSError* error) {
                 if (!library) { finished(nil, error, fast); return; }
                 { std::lock_guard<std::mutex> lock(async->mutex);
@@ -309,7 +318,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                 id<MTLDevice> gpu = device;
                 NSArray<id<MTLBinaryArchive>>* lookups = nil;
                 { std::lock_guard<std::mutex> lock(pool->mutex); lookups = pool->lookups; }
-                if (!lookups) { pool->compile(gpu, desc, done); return; }
+                if (!lookups) { pool->compile(gpu, desc, done, order); return; }
                 // From earlier launches' archives only: a miss compiles as before.
                 // Synchronous (a lookup is quick): the asynchronous call with
                 // FailOnBinaryArchiveMiss crashed the iPhone's driver, copying a
@@ -327,7 +336,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                   first = found && pool->archiveHits == 1; }
                 // A lookup that worked: this launch got past the archive code.
                 if (first) [[NSFileManager defaultManager] removeItemAtURL:[archiveFolder() URLByAppendingPathComponent:@"unfinished"] error:nil];
-                if (found) done(found, nil); else pool->compile(gpu, desc, done);
+                if (found) done(found, nil); else pool->compile(gpu, desc, done, order);
             };
             const AsyncPipelines::LibraryKey libraryKey{sourceHash, sourceLength, fast};
             id<MTLLibrary> have = nil;
@@ -353,7 +362,7 @@ id<MTLRenderPipelineState> PM4MetalRenderer::pipeline(const PM4Draw& d, MTLPixel
                     async->compileDone();
                     for (auto& waiter : waiters) waiter(library, error);
                 }];
-            });
+            }, order);
         };
         // Default optimisation did not finish some programs on the iPhone, large or
         // small (over 52 s for one, 2.8 s for size; 0.4 s on a Mac), their draws
@@ -2304,7 +2313,7 @@ void PM4MetalRenderer::AsyncPipelines::openArchive(id<MTLDevice> device) {
 }
 
 void PM4MetalRenderer::AsyncPipelines::compile(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
-                                               std::function<void(id<MTLRenderPipelineState>, NSError*)> done) {
+                                               std::function<void(id<MTLRenderPipelineState>, NSError*)> done, Wanted wanted) {
     auto self = shared_from_this();
     // Through the pipeline queue (pipelineLimit), apart from library compiles.
     startPipeline([self, device, descriptor, done] {
@@ -2313,7 +2322,7 @@ void PM4MetalRenderer::AsyncPipelines::compile(id<MTLDevice> device, MTLRenderPi
             if (state) self->remember(descriptor);
             done(state, failed);
         }];
-    });
+    }, std::move(wanted));
 }
 
 void PM4MetalRenderer::AsyncPipelines::remember(MTLRenderPipelineDescriptor* descriptor) {
